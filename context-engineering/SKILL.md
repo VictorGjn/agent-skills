@@ -33,10 +33,20 @@ Output: `cache/workspace-index.json`
 ### 2. Pack
 
 ```bash
+# Keyword mode (fast, good for keyword-rich queries)
 python3 scripts/pack_context.py "authentication middleware session" --budget 8000
-python3 scripts/pack_context.py "query" --quality   # fewer files, deeper
-python3 scripts/pack_context.py "query" --json       # structured output
+
+# Graph mode (follows imports/deps, finds structurally related files)
+python3 scripts/pack_context.py "query" --graph --budget 8000
+
+# Quality mode (fewer files, better depth per file)
+python3 scripts/pack_context.py "query" --quality
+
+# JSON output
+python3 scripts/pack_context.py "query" --json
 ```
+
+Use `--graph` when the query is about a specific file or module ("what depends on X?", "blast radius of this change"). Use keyword mode for broad topical queries.
 
 ### 3. Read
 
@@ -81,8 +91,9 @@ Keyword + stem matching on: path segments (camelCase-split), heading titles (ful
 | Script | Purpose |
 |--------|---------|
 | `pack_context_lib.py` | Core: scoring, packing, knowledge types |
+| `code_graph.py` | Import/dependency graph: build + BFS traversal |
 | `index_workspace.py` | Index local files → JSON |
 | `index_github_repo.py` | Index GitHub repo via API → JSON |
-| `pack_context.py` | CLI: query → depth-packed output |
+| `pack_context.py` | CLI: query → depth-packed output (keyword or graph mode) |
 
 Details: `references/eval-results.md` for methodology and numbers.
