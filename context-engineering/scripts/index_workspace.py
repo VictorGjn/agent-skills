@@ -200,13 +200,13 @@ def scan_directory(root_dir: str) -> dict:
 # ── Main ──
 
 if __name__ == '__main__':
-    root_dir = sys.argv[1] if len(sys.argv) > 1 else 'documents/'
+    root_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
     
     print(f'Scanning {root_dir}...', file=sys.stderr)
     index = scan_directory(root_dir)
     
     # Save full index
-    cache_dir = Path('skills/sauna/depth-packing/cache')
+    cache_dir = Path('cache')
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     index_path = cache_dir / 'workspace-index.json'

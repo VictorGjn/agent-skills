@@ -397,7 +397,7 @@ if __name__ == '__main__':
     index = index_github_repo(owner, repo, args.branch, args.token or None)
 
     # Default output path
-    output = args.output or f'skills/sauna/depth-packing/cache/{repo}-index.json'
+    output = args.output or f'cache/{repo}-index.json'
     Path(output).parent.mkdir(parents=True, exist_ok=True)
 
     with open(output, 'w') as f:
