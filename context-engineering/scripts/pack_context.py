@@ -23,7 +23,8 @@ from pack_context_lib import (
     DEPTH_NAMES, KNOWLEDGE_TYPES,
 )
 
-INDEX_PATH = Path('cache/workspace-index.json')
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
+INDEX_PATH = _SCRIPT_DIR / 'cache' / 'workspace-index.json'
 
 # ── Content rendering at depth levels ──
 

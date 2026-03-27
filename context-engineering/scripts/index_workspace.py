@@ -205,8 +205,9 @@ if __name__ == '__main__':
     print(f'Scanning {root_dir}...', file=sys.stderr)
     index = scan_directory(root_dir)
     
-    # Save full index
-    cache_dir = Path('cache')
+    # Save index next to the script (skill cache dir)
+    script_dir = Path(__file__).resolve().parent.parent
+    cache_dir = script_dir / 'cache'
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     index_path = cache_dir / 'workspace-index.json'
