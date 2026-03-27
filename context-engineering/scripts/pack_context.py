@@ -4,12 +4,16 @@ Context Packer — Query-driven depth-packed context from any indexed file colle
 Modes:
   keyword (default): Score files by keyword/stem matching, pack by budget
   graph:             Find entry points by keyword, then traverse import graph, pack by budget
+  semantic:          Hybrid keyword + embedding similarity, then pack by budget
+  semantic+graph:    Semantic entry points → graph traversal → pack by budget
 
 Usage:
   python3 pack_context.py "query" --budget 8000
-  python3 pack_context.py "query" --budget 8000 --graph     # graph-enhanced
-  python3 pack_context.py "query" --quality                  # fewer files, better depth
-  python3 pack_context.py "query" --json                     # structured output
+  python3 pack_context.py "query" --budget 8000 --graph        # graph-enhanced
+  python3 pack_context.py "query" --budget 8000 --semantic     # hybrid keyword+embedding
+  python3 pack_context.py "query" --semantic --graph           # semantic + graph traversal
+  python3 pack_context.py "query" --quality                    # fewer files, better depth
+  python3 pack_context.py "query" --json                       # structured output
 """
 
 import sys
@@ -25,6 +29,7 @@ from pack_context_lib import (
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 INDEX_PATH = _SCRIPT_DIR / 'cache' / 'workspace-index.json'
+EMBED_CACHE_PATH = _SCRIPT_DIR / 'cache' / 'embeddings.json'
 
 # ── Content rendering at depth levels ──
 
@@ -80,28 +85,32 @@ def _walk_nodes(node):
 
 # ── Graph-enhanced scoring ──
 
-def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int) -> list:
-    """Score files by keyword first, then expand via import graph."""
+def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int,
+                     entry_point_source: list = None) -> list:
+    """Score files by keyword (or provided entry points), then expand via import graph."""
     from code_graph import build_graph, traverse_from, find_entry_points
 
-    # Phase 1: Keyword scoring to find entry points
-    keyword_scored = []
-    for f in index['files']:
-        rel = score_file(f, query_tokens, query_lower)
-        if rel > 0:
-            keyword_scored.append({
-                'path': f['path'], 'relevance': rel,
-                'tokens': f['tokens'], 'tree': f.get('tree'),
-                'knowledge_type': f.get('knowledge_type', 'evidence'),
-            })
-    keyword_scored.sort(key=lambda x: x['relevance'], reverse=True)
+    # Phase 1: Entry points (from keyword or from caller)
+    if entry_point_source is not None:
+        keyword_scored = entry_point_source
+    else:
+        keyword_scored = []
+        for f in index['files']:
+            rel = score_file(f, query_tokens, query_lower)
+            if rel > 0:
+                keyword_scored.append({
+                    'path': f['path'], 'relevance': rel,
+                    'tokens': f['tokens'], 'tree': f.get('tree'),
+                    'knowledge_type': f.get('knowledge_type', 'evidence'),
+                })
+        keyword_scored.sort(key=lambda x: x['relevance'], reverse=True)
 
     # Phase 2: Build graph from ALL indexed files
     graph = build_graph(index['files'])
     print(f"<!-- Graph: {graph['stats']['total_nodes']} nodes, {graph['stats']['total_edges']} edges -->",
           file=sys.stderr)
 
-    # Phase 3: Find entry points from top keyword matches
+    # Phase 3: Find entry points from top matches
     entry_points = find_entry_points(keyword_scored[:10], threshold=0.2)
     if not entry_points:
         return keyword_scored[:top]
@@ -111,8 +120,6 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
                                follow_tests=True, follow_docs=True)
 
     # Phase 5: Merge keyword scores with graph scores
-    # Graph traversal gives structural relevance; keyword gives lexical relevance
-    # Final score = max(keyword, graph) with bonus if both match
     merged = {}
     for s in keyword_scored:
         merged[s['path']] = {**s, 'keyword_rel': s['relevance'], 'graph_rel': 0}
@@ -120,13 +127,11 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
         path = t['path']
         if path in merged:
             merged[path]['graph_rel'] = t['relevance']
-            # Boost: found by both keyword AND graph
             merged[path]['relevance'] = min(1.0,
                 max(merged[path]['keyword_rel'], t['relevance']) +
                 min(merged[path]['keyword_rel'], t['relevance']) * 0.3)
             merged[path]['reason'] = t.get('reason', '')
         else:
-            # Found only by graph (structural discovery)
             file_entry = next((f for f in index['files'] if f['path'] == path), None)
             if file_entry:
                 merged[path] = {
@@ -143,6 +148,68 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
     results = sorted(merged.values(), key=lambda x: x['relevance'], reverse=True)
     return results[:top]
 
+
+# ── Semantic-enhanced scoring ──
+
+def score_with_semantic(index: dict, query_tokens: list, query_lower: str,
+                        query_raw: str, top: int) -> list:
+    """Hybrid scoring: keyword + embedding similarity."""
+    from embed_resolve import resolve_hybrid
+
+    # Keyword scoring first
+    keyword_scored = []
+    for f in index['files']:
+        rel = score_file(f, query_tokens, query_lower)
+        keyword_scored.append({
+            'path': f['path'], 'relevance': rel,
+            'tokens': f['tokens'], 'tree': f.get('tree'),
+            'knowledge_type': f.get('knowledge_type', 'evidence'),
+        })
+
+    keyword_with_score = [s for s in keyword_scored if s['relevance'] > 0]
+
+    # Hybrid resolve
+    hybrid_results = resolve_hybrid(
+        query_raw,
+        keyword_with_score,
+        cache_path=str(EMBED_CACHE_PATH),
+        top_k=top,
+    )
+
+    if not hybrid_results:
+        # Fallback to keyword-only
+        keyword_with_score.sort(key=lambda x: x['relevance'], reverse=True)
+        return keyword_with_score[:top]
+
+    # Map back to full file entries
+    file_index = {f['path']: f for f in index['files']}
+    results = []
+    for hr in hybrid_results:
+        path = hr['path']
+        f = file_index.get(path)
+        if not f:
+            continue
+        results.append({
+            'path': path,
+            'relevance': hr['confidence'],
+            'tokens': f['tokens'],
+            'tree': f.get('tree'),
+            'knowledge_type': f.get('knowledge_type', 'evidence'),
+            'keyword_rel': hr.get('keyword_score', 0),
+            'semantic_rel': hr.get('semantic_score', 0),
+            'reason': hr.get('reason', ''),
+        })
+
+    # Log semantic-only discoveries (the whole point of this feature)
+    semantic_only = [r for r in results if r.get('keyword_rel', 0) == 0 and r.get('semantic_rel', 0) > 0]
+    if semantic_only:
+        print(f"<!-- Semantic discovered {len(semantic_only)} files invisible to keyword search:", file=sys.stderr)
+        for s in semantic_only[:5]:
+            print(f"     {s['path']} (sem={s['semantic_rel']:.3f}) -->", file=sys.stderr)
+
+    return results
+
+
 # ── Main ──
 
 def main():
@@ -154,6 +221,8 @@ def main():
                         help='Quality mode: fewer files (15), better depth')
     parser.add_argument('--graph', action='store_true',
                         help='Graph-enhanced: follow imports/deps from entry points')
+    parser.add_argument('--semantic', action='store_true',
+                        help='Semantic-enhanced: hybrid keyword + embedding similarity')
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--index', type=str, default=str(INDEX_PATH), help='Path to index')
     args = parser.parse_args()
@@ -176,8 +245,15 @@ def main():
     if not query_tokens:
         print('Empty query', file=sys.stderr); sys.exit(1)
 
-    # Score files
-    if args.graph:
+    # Score files based on mode
+    if args.semantic and args.graph:
+        # Semantic for entry points → graph traversal
+        semantic_scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
+        scored = score_with_graph(index, query_tokens, query_lower, args.top,
+                                  entry_point_source=semantic_scored)
+    elif args.semantic:
+        scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
+    elif args.graph:
         scored = score_with_graph(index, query_tokens, query_lower, args.top)
     else:
         scored = []
@@ -193,7 +269,14 @@ def main():
         print(f'No files matched: "{args.query}"', file=sys.stderr); sys.exit(0)
 
     packed = pack_context(scored, args.budget)
-    mode = 'graph+quality' if args.graph and args.quality else 'graph' if args.graph else 'quality' if args.quality else 'keyword'
+
+    # Determine mode label
+    modes = []
+    if args.semantic: modes.append('semantic')
+    if args.graph: modes.append('graph')
+    if args.quality: modes.append('quality')
+    if not modes: modes.append('keyword')
+    mode = '+'.join(modes)
 
     if args.json:
         output = [{
