@@ -1,133 +1,219 @@
-# Agent Skills
+# Context Engineering for AI Agents
 
-Reusable skills for AI coding agents. Drop into any LLM agent's skill directory.
+**Give your LLM agent awareness of 40+ files instead of 3, in the same token budget.**
 
-## context-engineering
-
-Depth-packed context loading for codebases and knowledge bases.
-
-### The Problem
-
-LLM agents load files all-or-nothing. Ask about authentication, get 2-3 files at 100% depth, miss the 15 related files. Or load everything and blow the context window.
-
-### The Solution
-
-Pack 50 files at 5 depth levels within a token budget. Full content for critical files, signatures for related files, just paths for peripheral ones. The calling LLM handles semantics (query expansion, synonym bridging). The packer handles structure and budget.
+RAG retrieves chunks. Repo-map lists symbols. This packs entire file hierarchies at 5 depth levels with elastic budget allocation, so the model sees the full picture without blowing the context window.
 
 ```
-LLM reformulates query → Packer (structural match + knowledge types) → depth-packed output → LLM reads
+                     Traditional RAG                              Context Engineering
+               ┌─────────────────────────┐                ┌─────────────────────────┐
+               │ Query → top-k chunks    │                │ Query → score all files  │
+               │                         │                │         ↓                │
+               │  ████  chunk 1 (100%)   │                │  ████  file A   (Full)   │
+               │  ████  chunk 2 (100%)   │                │  ███   file B (Detail)   │
+               │  ████  chunk 3 (100%)   │                │  ██    file C (Summary)  │
+               │  ████  chunk 4 (100%)   │                │  ██    file D (Summary)  │
+               │  ████  chunk 5 (100%)   │                │  █     file E (Headlines)│
+               │  ████  chunk 6 (100%)   │                │  █     file F (Headlines)│
+               │  ████  chunk 7 (100%)   │                │  █     file G (Headlines)│
+               │  ████  chunk 8 (100%)   │                │  ░     file H  (Mention) │
+               │                         │                │  ░     file I  (Mention) │
+               │  8 chunks, 42 invisible │                │  ░     file J  (Mention) │
+               │  No structure preserved │                │  ...15 more at Mention   │
+               │  No relations between   │                │                          │
+               │  chunks                 │                │  25 files, graded depth  │
+               └─────────────────────────┘                │  Structure preserved     │
+                                                          │  Relations visible       │
+                                                          └─────────────────────────┘
 ```
 
-No embedding model needed. Zero dependencies beyond Python stdlib.
+## Benchmarks
 
-### Quick Start
+Tested on 3 repos (30 queries, 5 budget levels each). Full data in [references/eval-results.md](context-engineering/references/eval-results.md).
+
+```
+Budget    Recall    Critical files at readable depth    % of repo consumed
+──────    ──────    ────────────────────────────────    ──────────────────
+  2K       84%                  0%                          0.3%
+  4K       98%                  0%                          0.5%
+  8K      100%                42-65%                        1.0%
+ 16K      100%                 80%                          2.0%
+ 32K      100%                85-90%                        4.0%
+```
+
+**100% recall at 8K tokens (1% of repo).** Every relevant file found. At 16K, 80% of critical files are at readable depth (Summary or better).
+
+| Repo | Language | Files | Tokens | Recall@8K |
+|------|----------|-------|--------|-----------|
+| modular-patchbay | TypeScript | 350 | 809K | **100%** |
+| fastify | JavaScript | 250 | 506K | **100%** |
+| flask | Python+RST | 181 | 280K | **95%** |
+
+## Quick Start
 
 ```bash
-# Index a local directory
-python3 context-engineering/scripts/index_workspace.py /path/to/files/
+pip install requests  # only needed for semantic mode
 
-# Pack context for a query (keyword mode)
+# 1. Index
+python3 context-engineering/scripts/index_workspace.py /path/to/project/
+
+# 2. Pack (keyword mode, zero API cost)
 python3 context-engineering/scripts/pack_context.py "auth middleware session" --budget 8000
 
-# Pack context (graph mode: follows imports from entry points)
-python3 context-engineering/scripts/pack_context.py "auth middleware" --graph --budget 8000
+# 3. Pack (semantic mode, bridges vocabulary gap)
+python3 context-engineering/scripts/embed_resolve.py build          # one-time, ~$0.01/500 files
+python3 context-engineering/scripts/pack_context.py "how does authentication work?" --semantic --budget 8000
+
+# 4. Pack (graph mode, follows imports/deps)
+python3 context-engineering/scripts/pack_context.py "PaymentService" --graph --budget 8000
+
+# 5. Full pipeline: semantic + graph
+python3 context-engineering/scripts/pack_context.py "how does auth work" --semantic --graph --budget 8000
 ```
 
-### How It Compares
+Output is markdown. Feed it to any LLM. No framework lock-in.
 
-| | Flat-chunk RAG | Aider repo-map | This |
-|---|---|---|---|
-| **Granularity** | Fixed-size chunks | Symbol list (1 level) | 5 depth levels per file |
-| **Budget control** | Truncate at limit | Truncate | Demote/promote per relevance |
-| **Structure** | Ignored | AST-based | Heading tree + import graph |
-| **Classification** | None | None | 6 knowledge types with priority |
-| **Embeddings** | Required | Not used | Not needed (LLM = semantic layer) |
-| **Language support** | Any | Python, JS, TS | Python, JS, TS, RST, MD, YAML |
+## Three Resolution Modes
 
----
+| Mode | Best for | How it works | API cost |
+|------|----------|-------------|----------|
+| **Keyword** (default) | Keyword-rich queries ("PaymentService error") | Stem/path matching on filenames, headings, exports | Free |
+| **Semantic** (`--semantic`) | Conceptual queries ("how does auth work?") | Hybrid keyword + embedding similarity (text-embedding-3-small) | ~$0.0001/query |
+| **Graph** (`--graph`) | Structural queries ("what depends on X?") | BFS from entry points, follows imports/deps/tests | Free |
 
-## Evaluation
+Modes compose: `--semantic --graph` uses embeddings to find entry points, then graph traversal to discover structurally related files.
 
-Tested on 3 repos (30 test cases, 5 budget levels each). Full methodology and per-query breakdowns in [references/eval-results.md](context-engineering/references/eval-results.md).
+### Why semantic matters
 
-### Budget Curve (averaged across repos)
+Keyword-only resolution has a vocabulary gap. Query "how does authentication work?", but files are named `session-manager.ts`, `jwt-middleware.ts`, `login-handler.ts`. No literal match. Zero results.
 
-```
-Budget   Recall   CritHit@depth≤2   Token cost vs full repo
-──────   ──────   ────────────────   ──────────────────────
-  2K      84%          0%            0.3%
-  4K      98%          0%            0.5%
-  8K     100%         42-65%         1.0%
- 16K     100%         80%            2.0%
- 32K     100%         85-90%         4.0%
-```
+Semantic mode embeds each file's identity (path + exports + headings + first sentence, ~100 tokens) and finds them by cosine similarity. The vocabulary gap closes.
 
-**Key finding:** 100% recall at 8K tokens (1% of repo). Every ground truth file is found. At 16K (2%), 80% of critical files are at Summary depth or better.
+## Five Depth Levels
 
-### Cross-Repo Consistency
+The core idea. Instead of include/exclude, every file gets a depth level proportional to its relevance:
 
-| Repo | Language | Files | Total tokens | Recall@8K | CritHit@16K |
-|------|----------|-------|-------------|-----------|-------------|
-| modular-patchbay | TypeScript | 350 | 809K | **100%** | **80%** |
-| fastify | JavaScript | 250 | 506K | **100%** | **80%** |
-| flask | Python+RST | 181 | 280K | **95%** | **80%** |
+| Level | What the LLM sees | Token cost |
+|-------|-------------------|------------|
+| **Full** | Complete file content | 100% |
+| **Detail** | Headings + first paragraphs | 40% |
+| **Summary** | Headings + first sentences | 20% |
+| **Headlines** | Heading tree only | 8% |
+| **Mention** | Path + token count | 3% |
 
-Results are stable across languages and repo structures. Flask at 95% because 2 generic-named docs (`config.rst`, `quickstart.rst`) don't match domain queries via keyword/stem.
+The packer runs 3 phases:
+1. **Assign** initial depth from relevance score
+2. **Demote** lowest-relevance files if over budget
+3. **Promote** highest-relevance files if budget remains
 
-### Graph Mode vs Keyword Mode
+Budget utilization: 95%. No wasted tokens.
 
-| Mode | Recall | Best for |
-|------|--------|----------|
-| Keyword | 90% | Broad topical queries ("voyage optimization", "error handling") |
-| Graph | **97%** | Structural queries ("what depends on X?", "blast radius of this change") |
+## Six Knowledge Types
 
-Graph follows imports/deps via BFS, discovering files that share no keywords with the query but are structurally connected. +7% recall on structural queries.
+Files are auto-classified. At equal relevance, higher-priority types get better depth:
 
-### What Fixed the Most
+| Type | Priority | Examples |
+|------|----------|---------|
+| **Ground Truth** | 1st | Source code, schemas, API docs, PRDs |
+| **Framework** | 2nd | Architecture docs, guidelines, conventions |
+| **Evidence** | 3rd | Research, benchmarks, competitive analysis |
+| **Signal** | 4th | Meeting notes, feedback, interviews |
+| **Hypothesis** | 5th | Proposals, RFCs, roadmaps |
+| **Artifact** | 6th | READMEs, changelogs, generated outputs |
+
+Source code always gets better depth than a changelog, even at equal keyword match.
+
+## How It Compares
+
+| | Flat-chunk RAG | Aider repo-map | Koylan's Agent Skills | **This** |
+|---|---|---|---|---|
+| **What it is** | Vector search pipeline | Symbol listing | Educational guides | Working context packer |
+| **Granularity** | Fixed-size chunks | 1 level (tags) | N/A (conceptual) | 5 depth levels per file |
+| **Budget control** | Top-k cutoff | Truncate | N/A | Elastic demote/promote |
+| **Structure** | Destroyed by chunking | AST tags | Described in prose | Heading tree + import graph |
+| **Classification** | None | None | None | 6 knowledge types |
+| **Semantic search** | Embeddings required | Not available | N/A | Optional (hybrid mode) |
+| **Relations** | None | None | Described conceptually | imports, calls, tested_by, documents, configured_by |
+| **Evaluated** | Varies | Not published | Not applicable | 30 queries, 3 repos, 5 budgets |
+| **Runnable** | Yes (many deps) | Yes (aider) | No | Yes (Python stdlib + optional OpenAI) |
+
+## What Fixed the Most
 
 | Fix | Impact on Recall@4K |
 |-----|-------------------|
 | camelCase splitting (`treeIndexer` → [tree, indexer]) | 0.490 → **0.983** |
+| Semantic embedding resolution | 0 results → **full coverage** on conceptual queries |
 | Stemmer expansion (`traversal` ↔ `traverser`) | +5% on morphological variants |
-| KT priority sorting (ground_truth before artifacts) | Better depth allocation |
+| KT priority sorting (ground_truth before artifacts) | Better depth allocation at equal relevance |
 | Promotion threshold tuning (0.70 → 0.92) | Budget utilization 75% → **95%** |
-
-### Known Limitations
-
-| Limitation | Impact | Mitigation |
-|-----------|--------|-----------|
-| No synonym matching | "billing" misses "payment" | LLM expands queries before packing |
-| Generic filenames invisible | `quickstart.rst` not found | Use `--graph` mode |
-| Low precision (~10% at 50 files) | Many false positives | Use `--quality` for 15 files, ~30% precision |
-
----
 
 ## Architecture
 
 ```
 context-engineering/
-├── SKILL.md                          # Agent instructions (<700 tokens)
+├── SKILL.md                          # Agent instructions (drop into any agent skill dir)
 ├── scripts/
 │   ├── pack_context_lib.py           # Core: scoring, packing, knowledge types
+│   ├── embed_resolve.py              # Embedding resolver: build, resolve, hybrid
+│   ├── embeddingResolver.ts          # TypeScript port (for Node.js/browser agents)
 │   ├── code_graph.py                 # Import graph: build + BFS traversal
 │   ├── pack_context.py               # CLI: query → depth-packed output
 │   ├── index_workspace.py            # Index local files → JSON
 │   ├── index_github_repo.py          # Index GitHub repo via API → JSON
-│   └── eval/                         # Eval scripts (3 repos)
-│       ├── run_eval.py               # modular-patchbay eval
-│       ├── run_eval_fastify.py       # fastify eval
-│       ├── run_eval_flask.py         # flask eval
-│       └── eval_graph_vs_keyword.py  # graph vs keyword comparison
+│   └── eval/                         # Evaluation suite (3 repos)
 ├── references/
-│   └── eval-results.md               # Full methodology + data
+│   └── eval-results.md               # Full methodology + per-query data
 └── cache/                            # Runtime data (gitignored)
 ```
 
-All scripts are Python 3.9+ with zero external dependencies (stdlib only).
+Python scripts: stdlib only (zero deps) for keyword/graph modes. `requests` for semantic mode.
+
+TypeScript resolver: drop-in for any Node.js agent wanting hybrid resolution.
+
+## Integration
+
+### As an agent skill (Claude Code, Cursor, Sauna, etc.)
+
+Copy `SKILL.md` into your agent's skill directory. The agent reads it, learns the commands, runs the scripts.
+
+### As a Python library
+
+```python
+from pack_context_lib import tokenize_query, score_file, pack_context
+
+# Score files against a query
+tokens = tokenize_query("authentication middleware")
+scored = [{'path': f['path'], 'relevance': score_file(f, tokens, "authentication middleware"),
+           'tokens': f['tokens'], 'tree': f.get('tree')} for f in index['files']]
+
+# Pack into budget
+packed = pack_context([s for s in scored if s['relevance'] > 0], token_budget=8000)
+```
+
+### As a TypeScript module
+
+```typescript
+import { resolveHybridEntryPoints, buildEmbeddingCache } from './embeddingResolver.js';
+
+// Build cache once (persists, only re-embeds changed files)
+const cache = await buildEmbeddingCache(graph, existingCache, apiKey);
+
+// Hybrid resolve: lexical + semantic
+const entries = await resolveHybridEntryPoints(query, graph, cache, apiKey);
+```
 
 ## Origin
 
-Adapted from [modular-patchbay](https://github.com/victorgjn/modular-patchbay)'s graph engine, depth packer, and knowledge pipeline. The depth system, knowledge type classification, and budget-aware traversal are the core innovations from that project.
+Extracted from [modular-patchbay](https://github.com/victorgjn/modular-patchbay), a context engineering IDE. The depth system, knowledge type classification, budget-aware traversal, and adaptive retrieval are the core innovations from that project.
+
+## Known Limitations
+
+| Limitation | Impact | Mitigation |
+|-----------|--------|-----------|
+| No synonym matching in keyword mode | "billing" misses "payment" | Use `--semantic` mode |
+| Generic filenames ("utils.ts") | Low relevance score | Graph mode finds them via imports |
+| Precision ~10% at 50 files | Many low-relevance files included | `--quality` flag caps at 15 files |
+| No AST parsing | Regex extraction misses some patterns | Covers 80%+ of common code patterns |
 
 ## License
 
