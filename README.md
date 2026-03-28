@@ -135,7 +135,8 @@ Source code always gets better depth than a changelog, even at equal keyword mat
 | **Semantic search** | Embeddings required | Not available | N/A | Optional (hybrid mode) |
 | **Relations** | None | None | Described conceptually | imports, calls, tested_by, documents, configured_by |
 | **Evaluated** | Varies | Not published | Not applicable | 30 queries, 3 repos, 5 budgets |
-| **Runnable** | Yes (many deps) | Yes (aider) | No | Yes (Python stdlib + optional OpenAI) |
+| **AST parsing** | N/A | tree-sitter | N/A | tree-sitter (14 langs) with regex fallback |
+| **Runnable** | Yes (many deps) | Yes (aider) | No | Yes (Python stdlib + optional deps) |
 
 ## What Fixed the Most
 
@@ -166,7 +167,7 @@ context-engineering/
 └── cache/                            # Runtime data (gitignored)
 ```
 
-Python scripts: stdlib only (zero deps) for keyword/graph modes. `requests` for semantic mode.
+Python scripts: stdlib only for keyword/graph modes. `tree-sitter` for AST parsing (14 languages). `requests` for semantic mode.
 
 TypeScript resolver: drop-in for any Node.js agent wanting hybrid resolution.
 
@@ -243,7 +244,7 @@ Extracted from [modular-patchbay](https://github.com/victorgjn/modular-patchbay)
 | No synonym matching in keyword mode | "billing" misses "payment" | Use `--semantic` mode |
 | Generic filenames ("utils.ts") | Low relevance score | Graph mode finds them via imports |
 | Precision ~10% at 50 files | Many low-relevance files included | `--quality` flag caps at 15 files |
-| No AST parsing | Regex extraction misses some patterns | Covers 80%+ of common code patterns |
+| tree-sitter AST (optional) | Falls back to regex if tree-sitter not installed | `pip install tree-sitter tree-sitter-languages` |
 
 ## License
 
