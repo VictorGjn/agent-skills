@@ -172,6 +172,42 @@ TypeScript resolver: drop-in for any Node.js agent wanting hybrid resolution.
 
 ## Integration
 
+### As an MCP server (Claude Desktop, Cursor, any MCP client)
+
+```bash
+# Install
+pip install "mcp[cli]" requests
+
+# Run (stdio for local agents)
+python3 context-engineering/scripts/mcp_server.py
+
+# Run (HTTP for remote agents)
+python3 context-engineering/scripts/mcp_server.py --http 8000
+```
+
+MCP tools exposed:
+
+| Tool | What it does |
+|------|-------------|
+| `pack` | Query → depth-packed context. Modes: keyword, semantic, graph, semantic+graph |
+| `index_workspace` | Index a local directory |
+| `index_github_repo` | Index a GitHub repo via API |
+| `build_embeddings` | Build/refresh embedding cache for semantic mode |
+| `resolve` | Find relevant files without packing (for debugging) |
+| `stats` | Show index and cache statistics |
+
+Claude Desktop config (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "context-engineering": {
+      "command": "python3",
+      "args": ["/path/to/context-engineering/scripts/mcp_server.py"]
+    }
+  }
+}
+```
+
 ### As an agent skill (Claude Code, Cursor, Sauna, etc.)
 
 Copy `SKILL.md` into your agent's skill directory. The agent reads it, learns the commands, runs the scripts.
@@ -181,12 +217,9 @@ Copy `SKILL.md` into your agent's skill directory. The agent reads it, learns th
 ```python
 from pack_context_lib import tokenize_query, score_file, pack_context
 
-# Score files against a query
 tokens = tokenize_query("authentication middleware")
 scored = [{'path': f['path'], 'relevance': score_file(f, tokens, "authentication middleware"),
            'tokens': f['tokens'], 'tree': f.get('tree')} for f in index['files']]
-
-# Pack into budget
 packed = pack_context([s for s in scored if s['relevance'] > 0], token_budget=8000)
 ```
 
@@ -195,10 +228,7 @@ packed = pack_context([s for s in scored if s['relevance'] > 0], token_budget=80
 ```typescript
 import { resolveHybridEntryPoints, buildEmbeddingCache } from './embeddingResolver.js';
 
-// Build cache once (persists, only re-embeds changed files)
 const cache = await buildEmbeddingCache(graph, existingCache, apiKey);
-
-// Hybrid resolve: lexical + semantic
 const entries = await resolveHybridEntryPoints(query, graph, cache, apiKey);
 ```
 
@@ -217,4 +247,4 @@ Extracted from [modular-patchbay](https://github.com/victorgjn/modular-patchbay)
 
 ## License
 
-Apache 2.0
+MIT
