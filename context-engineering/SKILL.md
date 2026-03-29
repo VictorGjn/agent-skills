@@ -11,7 +11,7 @@ Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 ful
 ## Prerequisites
 
 - Python 3.10+
-- tree-sitter (`pip install tree-sitter`) for AST extraction
+- `pip install tree-sitter-languages` for AST extraction (without it, falls back to regex)
 - OpenAI API key (semantic mode only, via `OPENAI_API_KEY` env var)
 - `pip install "mcp[cli]" requests` (MCP server only)
 
@@ -66,27 +66,50 @@ Use packed output for orientation. Read critical files fully with your file-read
 
 ## Output
 
-Markdown block per file, depth-ordered by relevance:
+Markdown grouped by depth level. Each section lists files at that depth:
 
 ```
-## [Full] src/auth/middleware.ts (245 tokens)
-<full file content>
+<!-- depth-packed [keyword] query="auth middleware" budget=8000 used=~7600 files=12 -->
 
-## [Detail] src/routes/api.ts (98 tokens)
-# API Routes
+## Full (2 files)
+
+### src/auth/middleware.ts
+#### verifyToken
+export async function verifyToken(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  // ... full content
+}
+
+### src/auth/roles.ts
+#### RoleGuard
+// ... full content
+
+## Detail (3 files)
+
+### src/routes/api.ts
+#### API Routes
 Express router with 12 endpoints for user, payment, and admin domains.
 
-GET /api/users - List users with pagination
-POST /api/payments - Process payment via Stripe
+#### User endpoints
+CRUD operations with role-based access...
 
-## [Summary] src/config/database.ts (42 tokens)
-# Database Config
+## Summary (3 files)
+
+### src/config/database.ts
+#### Database Config
 Postgres connection pool with read replicas.
 
-## [Headlines] src/utils/logger.ts (18 tokens)
-# Logger → Winston → formatters, transports
+## Headlines (2 files)
 
-## [Mention] src/utils/helpers.ts (6 tokens)
+### src/utils/logger.ts
+  - Winston setup (24 tok)
+  - Formatters (18 tok)
+  - Transports (12 tok)
+
+## Mention (2 files)
+
+- `src/utils/helpers.ts` (340 tok)
+- `src/types/auth.d.ts` (120 tok)
 ```
 
 Token utilization target: 95% of budget.
