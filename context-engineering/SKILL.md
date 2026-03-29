@@ -63,7 +63,7 @@ Extract a feature inventory from any codebase:
 
 ```bash
 # 1. Index the repo
-python3 scripts/index_github_repo.py syrocolab/fleet --branch develop
+python3 scripts/index_github_repo.py acme/fleet-dashboard --branch develop
 
 # 2. Broad scan: what features exist?
 python3 scripts/pack_context.py "all features pages routes components" --semantic --budget 16000
@@ -74,7 +74,7 @@ python3 scripts/pack_context.py "weather layers map visualization" --semantic --
 python3 scripts/pack_context.py "authentication authorization roles" --graph --budget 8000
 ```
 
-Tested on 3 Syroco repos (1200-3800 files each): extracted 18 undocumented features from Live, 14 from Fleet, 57 new backend modules. 4-7x more features than manual file-by-file reading.
+Tested on 3 production repos (1200-3800 files each): extracted 18 undocumented features from Live, 14 from Fleet, 57 new backend modules. 4-7x more features than manual file-by-file reading.
 
 ## Depth Levels
 
