@@ -1,12 +1,19 @@
 ---
 name: context-engineering
-description: "Depth-packed context loading for codebases and document collections. Use when an LLM agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Packs 40+ files at 5 depth levels with keyword, semantic, and graph resolution. 14 languages via tree-sitter AST."
+description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Keyword, semantic, and graph resolution. 14 languages via tree-sitter AST. Do NOT use for single-file reads or when every file needs full content."
 requiredApps: []
 ---
 
 # Context Engineering
 
-Pack many files at varying depth into a token budget, instead of loading 2-3 fully.
+Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 fully.
+
+## Prerequisites
+
+- Python 3.10+
+- tree-sitter (`pip install tree-sitter`) for AST extraction
+- OpenAI API key (semantic mode only, via `OPENAI_API_KEY` env var)
+- `pip install "mcp[cli]" requests` (MCP server only)
 
 ## Architecture
 
@@ -57,6 +64,33 @@ python3 scripts/pack_context.py "explain payment flow" --semantic --graph --budg
 
 Use packed output for orientation. Read critical files fully with your file-read tool.
 
+## Output
+
+Markdown block per file, depth-ordered by relevance:
+
+```
+## [Full] src/auth/middleware.ts (245 tokens)
+<full file content>
+
+## [Detail] src/routes/api.ts (98 tokens)
+# API Routes
+Express router with 12 endpoints for user, payment, and admin domains.
+
+GET /api/users - List users with pagination
+POST /api/payments - Process payment via Stripe
+
+## [Summary] src/config/database.ts (42 tokens)
+# Database Config
+Postgres connection pool with read replicas.
+
+## [Headlines] src/utils/logger.ts (18 tokens)
+# Logger → Winston → formatters, transports
+
+## [Mention] src/utils/helpers.ts (6 tokens)
+```
+
+Token utilization target: 95% of budget.
+
 ## Code-to-Knowledge Pattern
 
 Extract a feature inventory from any codebase:
@@ -93,7 +127,7 @@ Tested on 3 production repos (1200-3800 files each): extracted 18 undocumented f
 Files auto-classified, higher priority = better depth at equal relevance:
 
 | Priority | Type | Examples |
-|----------|------|---------|
+|----------|------|----------|
 | 1st | Ground Truth | Source code, schemas, API docs |
 | 2nd | Framework | Architecture docs, guidelines |
 | 3rd | Evidence | Research, benchmarks |
