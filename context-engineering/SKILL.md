@@ -1,12 +1,19 @@
 ---
 name: context-engineering
-description: "Depth-packed context loading for codebases and document collections. Use when an LLM agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Packs 40+ files at 5 depth levels with keyword, semantic, and graph resolution. 14 languages via tree-sitter AST."
+description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Keyword, semantic, and graph resolution. 14 languages via tree-sitter AST. Do NOT use for single-file reads or when every file needs full content."
 requiredApps: []
 ---
 
 # Context Engineering
 
-Pack many files at varying depth into a token budget, instead of loading 2-3 fully.
+Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 fully.
+
+## Prerequisites
+
+- Python 3.10+
+- `pip install tree-sitter-languages` for AST extraction (without it, falls back to regex)
+- OpenAI API key (semantic mode only, via `OPENAI_API_KEY` env var)
+- `pip install "mcp[cli]" requests` (MCP server only)
 
 ## Architecture
 
@@ -57,6 +64,56 @@ python3 scripts/pack_context.py "explain payment flow" --semantic --graph --budg
 
 Use packed output for orientation. Read critical files fully with your file-read tool.
 
+## Output
+
+Markdown grouped by depth level. Each section lists files at that depth:
+
+```
+<!-- depth-packed [keyword] query="auth middleware" budget=8000 used=~7600 files=12 -->
+
+## Full (2 files)
+
+### src/auth/middleware.ts
+#### verifyToken
+export async function verifyToken(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  // ... full content
+}
+
+### src/auth/roles.ts
+#### RoleGuard
+// ... full content
+
+## Detail (3 files)
+
+### src/routes/api.ts
+#### API Routes
+Express router with 12 endpoints for user, payment, and admin domains.
+
+#### User endpoints
+CRUD operations with role-based access...
+
+## Summary (3 files)
+
+### src/config/database.ts
+#### Database Config
+Postgres connection pool with read replicas.
+
+## Headlines (2 files)
+
+### src/utils/logger.ts
+  - Winston setup (24 tok)
+  - Formatters (18 tok)
+  - Transports (12 tok)
+
+## Mention (2 files)
+
+- `src/utils/helpers.ts` (340 tok)
+- `src/types/auth.d.ts` (120 tok)
+```
+
+Token utilization target: 95% of budget.
+
 ## Code-to-Knowledge Pattern
 
 Extract a feature inventory from any codebase:
@@ -93,7 +150,7 @@ Tested on 3 production repos (1200-3800 files each): extracted 18 undocumented f
 Files auto-classified, higher priority = better depth at equal relevance:
 
 | Priority | Type | Examples |
-|----------|------|---------|
+|----------|------|----------|
 | 1st | Ground Truth | Source code, schemas, API docs |
 | 2nd | Framework | Architecture docs, guidelines |
 | 3rd | Evidence | Research, benchmarks |
