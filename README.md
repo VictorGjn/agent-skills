@@ -81,12 +81,12 @@ The killer use case. Index a repo, run targeted queries, get a complete feature 
 
 | Repo | Files | Method | Features found |
 |------|-------|--------|---------------|
-| efficientship-live | 1,217 | Manual reading (10 key files) | ~9 capabilities documented |
-| efficientship-live | 1,217 | **Context graph (35 files at graded depth)** | **27 capabilities (18 new)** |
+| voyage-optimization-app | 1,217 | Manual reading (10 key files) | ~9 capabilities documented |
+| voyage-optimization-app | 1,217 | **Context graph (35 files at graded depth)** | **27 capabilities (18 new)** |
 | fleet | 391 | Manual reading (8 key files) | ~10 capabilities documented |
 | fleet | 391 | **Context graph (55 files at graded depth)** | **24 capabilities (14 new)** |
-| efficientship-backend | 3,872 | Known modules | 12 modules |
-| efficientship-backend | 3,872 | **Context graph (20+ key files)** | **69 modules (57 new)** |
+| maritime-platform-backend | 3,872 | Known modules | 12 modules |
+| maritime-platform-backend | 3,872 | **Context graph (20+ key files)** | **69 modules (57 new)** |
 
 **4-7x more features** than manual file-by-file reading. The depth packing forces systematic exploration: every file gets scored, the top ones read in depth, peripheral ones acknowledged at Headlines/Mention level.
 
@@ -94,7 +94,7 @@ The killer use case. Index a repo, run targeted queries, get a complete feature 
 
 ```bash
 # 1. Index the repo
-python3 context-engineering/scripts/index_github_repo.py syrocolab/fleet --branch develop
+python3 context-engineering/scripts/index_github_repo.py acme/fleet-dashboard --branch develop
 
 # 2. Broad scan: what features exist?
 python3 context-engineering/scripts/pack_context.py "all features pages routes components" --semantic --budget 16000
