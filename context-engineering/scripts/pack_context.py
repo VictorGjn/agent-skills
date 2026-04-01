@@ -7,11 +7,18 @@ Modes:
   semantic:          Hybrid keyword + embedding similarity, then pack by budget
   semantic+graph:    Semantic entry points → graph traversal → pack by budget
 
+Options:
+  --task TYPE:       Auto-configure graph traversal for fix/review/explain/build/document/research
+  --topic-filter:    Remove off-topic results before packing (anti-hallucination)
+  --confidence:      Print confidence signal when results are weak
+
 Usage:
   python3 pack_context.py "query" --budget 8000
   python3 pack_context.py "query" --budget 8000 --graph        # graph-enhanced
   python3 pack_context.py "query" --budget 8000 --semantic     # hybrid keyword+embedding
   python3 pack_context.py "query" --semantic --graph           # semantic + graph traversal
+  python3 pack_context.py "query" --graph --task fix           # task-aware graph traversal
+  python3 pack_context.py "query" --topic-filter               # anti-hallucination
   python3 pack_context.py "query" --quality                    # fewer files, better depth
   python3 pack_context.py "query" --json                       # structured output
 """
@@ -23,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pack_context_lib import (
-    tokenize_query, score_file, pack_context,
+    tokenize_query, score_file, pack_context, filter_by_topic, confidence_check,
     DEPTH_NAMES, KNOWLEDGE_TYPES,
 )
 
@@ -86,9 +93,9 @@ def _walk_nodes(node):
 # ── Graph-enhanced scoring ──
 
 def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int,
-                     entry_point_source: list = None) -> list:
+                     entry_point_source: list = None, task_type: str = None) -> list:
     """Score files by keyword (or provided entry points), then expand via import graph."""
-    from code_graph import build_graph, traverse_from, find_entry_points
+    from code_graph import build_graph, traverse_from, traverse_for_task, find_entry_points
 
     # Phase 1: Entry points (from keyword or from caller)
     if entry_point_source is not None:
@@ -115,9 +122,13 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
     if not entry_points:
         return keyword_scored[:top]
 
-    # Phase 4: Traverse graph from entry points
-    traversed = traverse_from(entry_points, graph, max_depth=3, max_files=top,
-                               follow_tests=True, follow_docs=True)
+    # Phase 4: Traverse graph (task-aware or default)
+    if task_type:
+        traversed = traverse_for_task(query_lower, entry_points, graph, task_type=task_type)
+        print(f"<!-- Task preset: {task_type} -->", file=sys.stderr)
+    else:
+        traversed = traverse_from(entry_points, graph, max_depth=3, max_files=top,
+                                   follow_tests=True, follow_docs=True)
 
     # Phase 5: Merge keyword scores with graph scores
     merged = {}
@@ -156,7 +167,6 @@ def score_with_semantic(index: dict, query_tokens: list, query_lower: str,
     """Hybrid scoring: keyword + embedding similarity."""
     from embed_resolve import resolve_hybrid
 
-    # Keyword scoring first
     keyword_scored = []
     for f in index['files']:
         rel = score_file(f, query_tokens, query_lower)
@@ -168,7 +178,6 @@ def score_with_semantic(index: dict, query_tokens: list, query_lower: str,
 
     keyword_with_score = [s for s in keyword_scored if s['relevance'] > 0]
 
-    # Hybrid resolve
     hybrid_results = resolve_hybrid(
         query_raw,
         keyword_with_score,
@@ -177,11 +186,9 @@ def score_with_semantic(index: dict, query_tokens: list, query_lower: str,
     )
 
     if not hybrid_results:
-        # Fallback to keyword-only
         keyword_with_score.sort(key=lambda x: x['relevance'], reverse=True)
         return keyword_with_score[:top]
 
-    # Map back to full file entries
     file_index = {f['path']: f for f in index['files']}
     results = []
     for hr in hybrid_results:
@@ -200,7 +207,6 @@ def score_with_semantic(index: dict, query_tokens: list, query_lower: str,
             'reason': hr.get('reason', ''),
         })
 
-    # Log semantic-only discoveries (the whole point of this feature)
     semantic_only = [r for r in results if r.get('keyword_rel', 0) == 0 and r.get('semantic_rel', 0) > 0]
     if semantic_only:
         print(f"<!-- Semantic discovered {len(semantic_only)} files invisible to keyword search:", file=sys.stderr)
@@ -223,6 +229,13 @@ def main():
                         help='Graph-enhanced: follow imports/deps from entry points')
     parser.add_argument('--semantic', action='store_true',
                         help='Semantic-enhanced: hybrid keyword + embedding similarity')
+    parser.add_argument('--task', type=str, default=None,
+                        choices=['fix', 'review', 'explain', 'build', 'document', 'research'],
+                        help='Task-type preset for graph traversal (auto-detects if not set with --graph)')
+    parser.add_argument('--topic-filter', action='store_true',
+                        help='Remove off-topic results before packing (anti-hallucination)')
+    parser.add_argument('--confidence', action='store_true',
+                        help='Print confidence signal when results are weak')
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--index', type=str, default=str(INDEX_PATH), help='Path to index')
     args = parser.parse_args()
@@ -246,15 +259,15 @@ def main():
         print('Empty query', file=sys.stderr); sys.exit(1)
 
     # Score files based on mode
+    task_type = args.task  # explicit task type, or None
     if args.semantic and args.graph:
-        # Semantic for entry points → graph traversal
         semantic_scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
         scored = score_with_graph(index, query_tokens, query_lower, args.top,
-                                  entry_point_source=semantic_scored)
+                                  entry_point_source=semantic_scored, task_type=task_type)
     elif args.semantic:
         scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
     elif args.graph:
-        scored = score_with_graph(index, query_tokens, query_lower, args.top)
+        scored = score_with_graph(index, query_tokens, query_lower, args.top, task_type=task_type)
     else:
         scored = []
         for f in index['files']:
@@ -268,12 +281,31 @@ def main():
     if not scored:
         print(f'No files matched: "{args.query}"', file=sys.stderr); sys.exit(0)
 
+    # Anti-hallucination: topic filter
+    if args.topic_filter:
+        before = len(scored)
+        scored = filter_by_topic(scored, args.query)
+        after = len(scored)
+        if before != after:
+            print(f"<!-- Topic filter: {before} → {after} files -->", file=sys.stderr)
+
+    # Confidence check
+    if args.confidence:
+        conf = confidence_check(scored)
+        if conf['is_low']:
+            print(f"<!-- CONFIDENCE WARNING: {conf['signal']} -->", file=sys.stderr)
+
+    if not scored:
+        print(f'No files matched after filtering: "{args.query}"', file=sys.stderr); sys.exit(0)
+
     packed = pack_context(scored, args.budget)
 
     # Determine mode label
     modes = []
     if args.semantic: modes.append('semantic')
     if args.graph: modes.append('graph')
+    if args.task: modes.append(f'task:{args.task}')
+    if args.topic_filter: modes.append('topic-filtered')
     if args.quality: modes.append('quality')
     if not modes: modes.append('keyword')
     mode = '+'.join(modes)
