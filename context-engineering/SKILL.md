@@ -1,6 +1,6 @@
 ---
 name: context-engineering
-description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Keyword, semantic, and graph resolution. 14 languages via tree-sitter AST. Do NOT use for single-file reads or when every file needs full content."
+description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Keyword, semantic, and graph resolution. 14 languages via tree-sitter AST. Anti-hallucination filters (topic, section, confidence). Task-type presets. Do NOT use for single-file reads or when every file needs full content."
 requiredApps: []
 ---
 
@@ -21,6 +21,8 @@ Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 ful
 Query → Resolution (keyword | semantic | graph) → Entry points
                                                        ↓
                                                  Graph traversal (optional)
+                                                       ↓
+                                                 Anti-hallucination filters
                                                        ↓
                                                  Depth-aware packing (5 levels)
                                                        ↓
@@ -58,6 +60,7 @@ python3 scripts/pack_context.py "authentication middleware" --budget 8000
 python3 scripts/pack_context.py "how does auth work" --semantic --budget 8000
 python3 scripts/pack_context.py "PaymentService" --graph --budget 8000
 python3 scripts/pack_context.py "explain payment flow" --semantic --graph --budget 16000
+python3 scripts/pack_context.py "fix login bug" --task fix --graph --budget 8000
 ```
 
 ### 4. Read
@@ -74,64 +77,50 @@ Markdown grouped by depth level. Each section lists files at that depth:
 ## Full (2 files)
 
 ### src/auth/middleware.ts
-#### verifyToken
-export async function verifyToken(req, res, next) {
-  const token = req.headers.authorization?.split(' ')[1];
-  // ... full content
-}
-
-### src/auth/roles.ts
-#### RoleGuard
-// ... full content
+(complete file content)
 
 ## Detail (3 files)
 
 ### src/routes/api.ts
-#### API Routes
-Express router with 12 endpoints for user, payment, and admin domains.
-
-#### User endpoints
-CRUD operations with role-based access...
+(headings + first paragraphs)
 
 ## Summary (3 files)
 
 ### src/config/database.ts
-#### Database Config
-Postgres connection pool with read replicas.
+(headings + first sentences)
 
 ## Headlines (2 files)
 
 ### src/utils/logger.ts
   - Winston setup (24 tok)
-  - Formatters (18 tok)
-  - Transports (12 tok)
 
 ## Mention (2 files)
 
 - `src/utils/helpers.ts` (340 tok)
-- `src/types/auth.d.ts` (120 tok)
 ```
 
 Token utilization target: 95% of budget.
 
-## Code-to-Knowledge Pattern
+## Anti-Hallucination Filters (from chatbot)
 
-Extract a feature inventory from any codebase:
+Three filters run BEFORE packing to prevent off-topic context from reaching the LLM:
 
-```bash
-# 1. Index the repo
-python3 scripts/index_github_repo.py acme/fleet-dashboard --branch develop
+1. **Topic filter** (`--topic-filter`): removes results whose content doesn't overlap with query terms. Threshold: 25% term overlap OR high cosine score (>0.5).
+2. **Section filter**: within long documents, extracts only sections matching query terms. Reduces noise from multi-topic docs.
+3. **Confidence scoring**: when average cosine similarity is below threshold, injects uncertainty signal. Use `pack_context_lib.confidence_check()`.
 
-# 2. Broad scan: what features exist?
-python3 scripts/pack_context.py "all features pages routes components" --semantic --budget 16000
+## Task-Type Presets (from modular-patchbay)
 
-# 3. Deep dive per domain
-python3 scripts/pack_context.py "real-time position tracking PubNub" --semantic --graph --budget 8000
-python3 scripts/pack_context.py "weather layers map visualization" --semantic --budget 8000
-python3 scripts/pack_context.py "authentication authorization roles" --graph --budget 8000
-```
+Auto-detect or specify task type to adjust graph traversal behavior:
 
-Tested on 3 production repos (1200-3800 files each): extracted 18 undocumented features from Live, 14 from Fleet, 57 new backend modules. 4-7x more features than manual file-by-file reading.
+| Task | Flag | Behavior |
+|------|------|----------|
+| fix | `--task fix` | Deep imports, follow tests, skip docs |
+| review | `--task review` | Wide scan, follow callers + tests + docs |
+| explain | `--task explain` | Deep traversal, follow docs + links |
+| build | `--task build` | Shallow, imports + docs only |
+| document | `--task document` | Follow everything |
+| research | `--task research` | Wide, docs + links + references only |
 
 ## Depth Levels
 
@@ -158,12 +147,35 @@ Files auto-classified, higher priority = better depth at equal relevance:
 | 5th | Hypothesis | Plans, proposals, RFCs |
 | 6th | Artifact | READMEs, changelogs |
 
+## Graph Relations (expanded)
+
+17 relation kinds with weighted edges:
+
+| Kind | Weight | Direction |
+|------|--------|-----------|
+| imports | 1.0 | A imports B |
+| extends | 0.9 | A extends B |
+| implements | 0.85 | A implements B |
+| calls | 0.7 | A calls B |
+| uses_type | 0.7 | A uses type from B |
+| tested_by / tests | 0.6 | Test ↔ source |
+| documents | 0.5 | Doc ↔ code |
+| configured_by | 0.5 | A configured by B |
+| links_to | 0.5 | Markdown link |
+| references | 0.4 | Markdown reference |
+| depends_on | 0.4 | Explicit dependency |
+| defined_in | 0.4 | Symbol defined in |
+| continues / supersedes | 0.3 | Doc versioning |
+| related | 0.3 | Semantic relation |
+| co_located | 0.3 | Same directory |
+
 ## MCP Server
 
 ```bash
 pip install "mcp[cli]" requests
 python3 scripts/mcp_server.py              # stdio (local)
 python3 scripts/mcp_server.py --http 8000  # remote
+python3 scripts/mcp_server.py --http 8000 --auth  # with API key auth
 ```
 
 Tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`.
@@ -172,13 +184,13 @@ Tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `reso
 
 | Script | Purpose |
 |--------|---------|
-| `pack_context_lib.py` | Core: scoring, packing, knowledge types |
+| `pack_context_lib.py` | Core: scoring, packing, knowledge types, topic/section filters |
 | `pack_context.py` | CLI: query → depth-packed output |
 | `embed_resolve.py` | Embedding resolver: build, resolve, hybrid |
 | `ast_extract.py` | tree-sitter AST symbol extraction (14 languages) |
-| `code_graph.py` | Import/dependency graph + BFS traversal |
+| `code_graph.py` | Import/dependency graph + BFS traversal + task presets |
 | `embeddingResolver.ts` | TypeScript port for Node.js agents |
-| `mcp_server.py` | MCP server (stdio + HTTP) |
+| `mcp_server.py` | MCP server (stdio + HTTP + optional auth) |
 | `index_workspace.py` | Index local files → JSON |
 | `index_github_repo.py` | Index GitHub repo via API → JSON |
 
