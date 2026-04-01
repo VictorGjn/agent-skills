@@ -1,9 +1,10 @@
 """
-Code Graph — Import/dependency graph with BFS traversal.
+Code Graph — Import/dependency graph with BFS traversal and task-type presets.
 
-Builds a relation graph from indexed files (imports, exports, tests, docs).
+Builds a relation graph from indexed files (imports, exports, tests, docs, links).
 Traverses from entry points with relevance decay to find structurally related files.
 
+Sources: agent-skills (core), modular-patchbay (relation kinds, task presets, bidirectional)
 Used by pack_context.py --graph mode.
 """
 
@@ -11,20 +12,85 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
-# ── Relation types ──
+# ── Relation types (expanded from modular-patchbay's 17 kinds) ──
 
 RELATION_KINDS = {
-    'imports': 1.0,       # A imports B
-    'calls': 0.7,         # A calls function from B (via exports)
-    'extends': 0.9,       # A extends class from B
-    'tested_by': 0.6,     # A is tested by B
-    'tests': 0.6,         # A tests B
-    'documents': 0.5,     # A (doc) documents B (code)
-    'configured_by': 0.5, # A is configured by B
-    'co_located': 0.3,    # same directory
+    # Code relations
+    'imports':       1.0,    # A imports B
+    'extends':       0.9,    # A extends class from B
+    'implements':    0.85,   # A implements interface from B
+    'calls':         0.7,    # A calls function from B
+    'uses_type':     0.7,    # A uses type from B
+    'tested_by':     0.6,    # A is tested by B
+    'tests':         0.6,    # A tests B
+    'configured_by': 0.5,   # A is configured by B
+    # Doc relations
+    'documents':     0.5,    # A (doc) documents B (code)
+    'links_to':      0.5,    # Markdown link A → B
+    'references':    0.4,    # Markdown reference
+    'depends_on':    0.4,    # Explicit dependency
+    'defined_in':    0.4,    # Symbol defined in
+    'continues':     0.3,    # Doc versioning
+    'supersedes':    0.3,    # Doc versioning
+    'related':       0.3,    # Semantic relation
+    'co_located':    0.3,    # Same directory
 }
 
 DECAY = 0.65  # relevance decay per hop
+
+# ── Task-type presets (from modular-patchbay traverser.ts) ──
+
+TASK_PRESETS = {
+    'fix': {
+        'max_depth': 3, 'max_files': 15,
+        'follow_kinds': {'imports', 'extends', 'implements', 'calls', 'uses_type',
+                         'tested_by', 'tests', 'configured_by'},
+        'follow_callers': False, 'min_weight': 0.4,
+    },
+    'review': {
+        'max_depth': 2, 'max_files': 25,
+        'follow_kinds': {'imports', 'extends', 'implements', 'calls', 'uses_type',
+                         'tested_by', 'tests', 'documents', 'links_to'},
+        'follow_callers': True, 'min_weight': 0.3,
+    },
+    'explain': {
+        'max_depth': 4, 'max_files': 20,
+        'follow_kinds': {'imports', 'extends', 'calls', 'documents', 'links_to',
+                         'references', 'related'},
+        'follow_callers': False, 'min_weight': 0.3,
+    },
+    'build': {
+        'max_depth': 2, 'max_files': 15,
+        'follow_kinds': {'imports', 'extends', 'implements', 'uses_type',
+                         'documents', 'configured_by'},
+        'follow_callers': False, 'min_weight': 0.5,
+    },
+    'document': {
+        'max_depth': 3, 'max_files': 20,
+        'follow_kinds': {'imports', 'extends', 'calls', 'tested_by', 'tests',
+                         'documents', 'links_to', 'references', 'related'},
+        'follow_callers': True, 'min_weight': 0.3,
+    },
+    'research': {
+        'max_depth': 4, 'max_files': 30,
+        'follow_kinds': {'documents', 'links_to', 'references', 'related',
+                         'continues', 'supersedes'},
+        'follow_callers': False, 'min_weight': 0.2,
+    },
+}
+
+
+def detect_task_type(query: str) -> str:
+    """Auto-detect task type from query keywords (from modular-patchbay)."""
+    q = query.lower()
+    if re.search(r'fix|bug|error|crash|broken|issue', q): return 'fix'
+    if re.search(r'\bresearch\b|find|look.*up|what.*about', q): return 'research'
+    if re.search(r'\breview\b|pr\b|pull request|diff|changes', q): return 'review'
+    if re.search(r'explain|how does|what is|understand|walk.*through', q): return 'explain'
+    if re.search(r'add|build|create|implement|feature|new', q): return 'build'
+    if re.search(r'document|readme|write.*doc|api.*doc', q): return 'document'
+    return 'explain'  # safe default
+
 
 # ── Import extraction ──
 
@@ -41,6 +107,9 @@ TS_EXPORT = re.compile(
     r'^export\s+(?:default\s+)?(?:async\s+)?(?:declare\s+)?'
     r'(?:(?:abstract\s+)?class|interface|type|enum|function|(?:const|let|var))\s+(\w+)', re.M)
 PY_DEF = re.compile(r'^(?:class|(?:async\s+)?def)\s+(\w+)', re.M)
+
+# Markdown link extraction (for doc→doc relations)
+MD_LINK = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
 
 # Test detection
 TEST_PATTERNS = [
@@ -86,7 +155,6 @@ def _resolve_import(import_path: str, source_dir: str, file_index: dict) -> str:
     else:
         normalized = import_path
 
-    # Remove .js/.ts extension suffix if present
     normalized = re.sub(r'\.(js|ts|tsx|jsx|mjs)$', '', normalized)
 
     candidates = [
@@ -102,7 +170,6 @@ def _resolve_import(import_path: str, source_dir: str, file_index: dict) -> str:
     for c in candidates:
         if c in file_index:
             return c
-        # Try matching just the end of path
         for fp in file_index:
             if fp.endswith('/' + c) or fp == c:
                 return fp
@@ -110,26 +177,37 @@ def _resolve_import(import_path: str, source_dir: str, file_index: dict) -> str:
     return None
 
 
+def _resolve_md_link(link_target: str, source_dir: str, file_index: dict) -> str:
+    """Resolve a markdown link target to an indexed file."""
+    if link_target.startswith('http://') or link_target.startswith('https://'):
+        return None
+    # Strip anchors
+    target = link_target.split('#')[0]
+    if not target:
+        return None
+    # Resolve relative to source dir
+    if not target.startswith('/'):
+        full = str(Path(source_dir) / target)
+    else:
+        full = target.lstrip('/')
+    # Normalize
+    full = str(Path(full))
+    if full in file_index:
+        return full
+    for fp in file_index:
+        if fp.endswith('/' + full) or fp == full:
+            return fp
+    return None
+
+
 # ── Build graph ──
 
 def build_graph(files: list) -> dict:
-    """
-    Build a relation graph from indexed files.
-
-    Args:
-        files: list of {path, content, language, symbols?, ...}
-              'content' is needed for import extraction.
-              If content not available, pass tree's firstParagraph.
+    """Build a relation graph from indexed files.
 
     Returns:
-        {
-            'nodes': {path: {exports, is_test, is_doc, ...}},
-            'edges': [{source, target, kind, weight}],
-            'outgoing': {path: [edges]},
-            'incoming': {path: [edges]},
-        }
+        {nodes, edges, outgoing, incoming, stats}
     """
-    # Build path index
     file_index = {}
     for f in files:
         file_index[f['path']] = f
@@ -144,11 +222,9 @@ def build_graph(files: list) -> dict:
         path = f['path']
         ext = Path(path).suffix.lower()
         content = f.get('content', '')
-        # If no raw content, use tree text
         if not content and f.get('tree'):
             content = f['tree'].get('text', '')
 
-        # Extract exports
         exports = []
         if ext in ('.ts', '.tsx', '.js', '.jsx', '.mjs'):
             exports = [m.group(1) for m in TS_EXPORT.finditer(content)]
@@ -163,6 +239,13 @@ def build_graph(files: list) -> dict:
             'dir': str(Path(path).parent),
         }
 
+    def _add_edge(source, target, kind):
+        edge = {'source': source, 'target': target, 'kind': kind,
+                'weight': RELATION_KINDS.get(kind, 0.3)}
+        edges.append(edge)
+        outgoing[source].append(edge)
+        incoming[target].append(edge)
+
     # Phase 2: Extract relations
     for f in files:
         path = f['path']
@@ -172,7 +255,7 @@ def build_graph(files: list) -> dict:
             content = f['tree'].get('text', '')
         source_dir = str(Path(path).parent)
 
-        # Imports
+        # Code imports
         import_patterns = []
         if ext in ('.ts', '.tsx', '.js', '.jsx', '.mjs'):
             import_patterns = [TS_IMPORT, TS_REQUIRE, TS_DYNAMIC]
@@ -184,22 +267,24 @@ def build_graph(files: list) -> dict:
                 import_path = m.group(1)
                 if not import_path:
                     continue
-                # Skip external packages
                 if ext in ('.ts', '.tsx', '.js', '.jsx', '.mjs'):
                     if not import_path.startswith('.') and not import_path.startswith('/'):
                         continue
 
                 target = _resolve_import(import_path, source_dir, file_index)
                 if target and target != path:
-                    edge = {'source': path, 'target': target, 'kind': 'imports',
-                            'weight': RELATION_KINDS['imports']}
-                    edges.append(edge)
-                    outgoing[path].append(edge)
-                    incoming[target].append(edge)
+                    _add_edge(path, target, 'imports')
+
+        # Markdown links (doc → doc or doc → code)
+        if ext in ('.md', '.mdx'):
+            for m in MD_LINK.finditer(content):
+                link_target = m.group(2)
+                resolved = _resolve_md_link(link_target, source_dir, file_index)
+                if resolved and resolved != path:
+                    _add_edge(path, resolved, 'links_to')
 
         # Test ↔ Source relations
         if nodes[path]['is_test']:
-            # Find what this test file tests (by filename matching)
             test_name = Path(path).stem.lower()
             test_name = re.sub(r'\.(test|spec)$', '', test_name)
             test_name = re.sub(r'^test[_-]', '', test_name)
@@ -210,19 +295,10 @@ def build_graph(files: list) -> dict:
                     continue
                 other_stem = Path(other_path).stem.lower()
                 if other_stem == test_name and other_node['is_code']:
-                    edge = {'source': path, 'target': other_path, 'kind': 'tests',
-                            'weight': RELATION_KINDS['tests']}
-                    edges.append(edge)
-                    outgoing[path].append(edge)
-                    incoming[other_path].append(edge)
-                    # Reverse relation
-                    rev = {'source': other_path, 'target': path, 'kind': 'tested_by',
-                           'weight': RELATION_KINDS['tested_by']}
-                    edges.append(rev)
-                    outgoing[other_path].append(rev)
-                    incoming[path].append(rev)
+                    _add_edge(path, other_path, 'tests')
+                    _add_edge(other_path, path, 'tested_by')
 
-        # Doc ↔ Code relations (by filename/stem matching)
+        # Doc ↔ Code relations (by filename matching)
         if nodes[path]['is_doc']:
             doc_stem = Path(path).stem.lower().replace('-', '').replace('_', '')
             for other_path, other_node in nodes.items():
@@ -230,11 +306,7 @@ def build_graph(files: list) -> dict:
                     continue
                 code_stem = Path(other_path).stem.lower().replace('-', '').replace('_', '')
                 if doc_stem == code_stem or doc_stem in code_stem or code_stem in doc_stem:
-                    edge = {'source': path, 'target': other_path, 'kind': 'documents',
-                            'weight': RELATION_KINDS['documents']}
-                    edges.append(edge)
-                    outgoing[path].append(edge)
-                    incoming[other_path].append(edge)
+                    _add_edge(path, other_path, 'documents')
 
     return {
         'nodes': nodes,
@@ -256,29 +328,35 @@ def build_graph(files: list) -> dict:
 def traverse_from(entry_points: list, graph: dict,
                   max_depth: int = 3, max_files: int = 30,
                   follow_tests: bool = True, follow_docs: bool = True,
-                  follow_callers: bool = False) -> list:
-    """
-    BFS from entry points, following relations with relevance decay.
+                  follow_callers: bool = False,
+                  follow_kinds: set = None,
+                  min_weight: float = 0.05) -> list:
+    """BFS from entry points, following relations with relevance decay.
 
     Args:
         entry_points: [{path, confidence}]
         graph: output of build_graph()
         max_depth: how many hops to follow
         max_files: cap on returned files
+        follow_kinds: explicit set of relation kinds to follow (overrides flags)
+        follow_callers: also follow incoming edges (who imports/calls this?)
+        min_weight: minimum relevance to keep traversing
 
     Returns:
         [{path, relevance, distance, reason}] sorted by relevance desc
     """
-    visited = {}  # path → {relevance, distance, reason}
+    visited = {}
     queue = []
 
-    # Allowed relation kinds for forward traversal
-    follow_kinds = {'imports', 'extends', 'calls', 'configured_by'}
-    if follow_tests:
-        follow_kinds.add('tested_by')
-        follow_kinds.add('tests')
-    if follow_docs:
-        follow_kinds.add('documents')
+    # Determine which relation kinds to follow
+    if follow_kinds is not None:
+        allowed_kinds = follow_kinds
+    else:
+        allowed_kinds = {'imports', 'extends', 'implements', 'calls', 'uses_type', 'configured_by'}
+        if follow_tests:
+            allowed_kinds.update({'tested_by', 'tests'})
+        if follow_docs:
+            allowed_kinds.update({'documents', 'links_to', 'references'})
 
     # Seed with entry points
     for ep in entry_points:
@@ -301,11 +379,11 @@ def traverse_from(entry_points: list, graph: dict,
 
         # Follow outgoing edges
         for edge in graph.get('outgoing', {}).get(current['path'], []):
-            if edge['kind'] not in follow_kinds:
+            if edge['kind'] not in allowed_kinds:
                 continue
 
             new_rel = current['relevance'] * edge['weight'] * DECAY
-            if new_rel < 0.05:
+            if new_rel < min_weight:
                 continue
 
             target = edge['target']
@@ -325,11 +403,11 @@ def traverse_from(entry_points: list, graph: dict,
         # Optionally follow incoming edges (callers)
         if follow_callers:
             for edge in graph.get('incoming', {}).get(current['path'], []):
-                if edge['kind'] not in ('imports', 'calls', 'extends'):
+                if edge['kind'] not in ('imports', 'calls', 'extends', 'implements'):
                     continue
 
                 new_rel = current['relevance'] * edge['weight'] * DECAY * 0.7
-                if new_rel < 0.05:
+                if new_rel < min_weight:
                     continue
 
                 source = edge['source']
@@ -346,9 +424,23 @@ def traverse_from(entry_points: list, graph: dict,
                 visited[source] = item
                 queue.append(item)
 
-    # Sort by relevance, cap at max_files
     results = sorted(visited.values(), key=lambda x: -x['relevance'])
     return results[:max_files]
+
+
+def traverse_for_task(query: str, entry_points: list, graph: dict,
+                      task_type: str = None) -> list:
+    """Convenience: auto-detect task type and traverse with preset."""
+    task = task_type or detect_task_type(query)
+    preset = TASK_PRESETS.get(task, TASK_PRESETS['explain'])
+    return traverse_from(
+        entry_points, graph,
+        max_depth=preset['max_depth'],
+        max_files=preset['max_files'],
+        follow_callers=preset['follow_callers'],
+        follow_kinds=preset['follow_kinds'],
+        min_weight=preset['min_weight'],
+    )
 
 
 def find_entry_points(query_scored: list, threshold: float = 0.3) -> list:
