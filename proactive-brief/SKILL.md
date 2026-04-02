@@ -1,154 +1,208 @@
 ---
 name: proactive-brief
-description: "Generate concise, actionable status briefs from scattered sources — inspired by Claude Code's KAIROS Brief Mode and Memory Extract system. Use as a scheduled task or manually to produce delta-based reports: what changed, what needs attention, what to do next."
+description: "Generate concise, actionable status briefs from project state and recent activity. Delta-based reports: what changed, what needs attention, what to do next. Inspired by Claude Code's KAIROS Brief Mode. Works as a manual prompt, a slash command, or a cron job."
 requiredApps: []
 ---
 
 # Proactive Brief
 
-Generate concise, actionable status briefs from scattered sources — inspired by Claude Code's KAIROS Brief Mode.
+Generate concise, actionable status briefs from project state and recent activity — inspired by Claude Code's KAIROS Brief Mode.
 
-## When to Use
+## Concept
 
-- **Morning briefing**: What happened overnight, what's on today's plate
-- **End-of-week digest**: What was accomplished, what carries over
-- **Project checkpoint**: Status across multiple workstreams
-- **After-meeting synthesis**: Extract decisions + actions from meeting notes
-- As a **scheduled task** for any of the above
+A brief is not a summary. It's a **delta report**: only what changed, only what matters, only what needs action. If someone read the last brief, this one should tell them everything new in 15 seconds.
 
-## Design Principles (from Claude Code's KAIROS)
+## Design Principles
 
 1. **Brief, not verbose** — max 20 words per item. If it needs more, link to a file.
-2. **Delta-based** — only report what CHANGED since last brief. No restating known facts.
-3. **Actionable** — every item should be either informational ("X happened") or actionable ("Y needs attention")
-4. **15-second rule** — the brief should be readable in 15 seconds. If it's longer, it's not brief.
-5. **Source-linked** — every claim links to its source (session, message, ticket, doc)
+2. **Delta-based** — only what CHANGED since last brief. No restating known facts.
+3. **Actionable** — every item is either informational ("X happened") or actionable ("Y needs attention by [when]")
+4. **15-second rule** — the whole brief should be scannable in 15 seconds. If it's longer, it's not brief.
+5. **Source-linked** — every claim cites its source (commit, PR, issue, conversation)
 
-## Brief Format
+## Brief Template
 
 ```markdown
-# Brief — [Date] [Time]
+# Brief — [Date]
 
-## Needs Attention (act today)
-- [Issue]: [1-line description] → [suggested action] ([source])
+## Needs Attention
+- [Thing]: [1-line what + why] → [suggested action] (source: [ref])
 
-## Changed Since Last Brief
-- [Topic]: [what changed] ([source])
+## Changed
+- [Topic]: [what changed] (source: [ref])
 
 ## Upcoming (next 48h)
-- [Event/deadline]: [1-line description]
+- [Deadline/event]: [1-line context]
 
-## Extracted Knowledge (durable facts learned)
-- [Fact]: [value] — saved to [file] ([source])
+## Learned (new durable facts)
+- [Fact]: [value] (source: [ref])
 ```
 
-## Source Gathering
+**That's it.** Four sections. If a section is empty, omit it.
 
-The brief pulls from multiple sources in priority order:
+## Sources
 
-### Tier 1: Direct signals (always check)
-- **Recent sessions** — decisions, discoveries, blockers from conversations
-- **Calendar** — meetings in the next 48h
-- **Email** — unread threads requiring action
+What you pull from depends on your project setup. Check what's available:
 
-### Tier 2: Work management (check if connected)
-- **Linear/Jira** — tickets assigned, status changes, blockers
-- **GitHub** — PRs awaiting review, CI failures, new issues assigned
-- **Slack** — unread mentions in key channels
+### Tier 1: Always available (any project)
+```bash
+# Recent commits
+git log --since="24 hours ago" --oneline --no-merges
 
-### Tier 3: Knowledge delta (check if relevant)
-- **Notion** — pages modified in shared workspaces
-- **Meeting notes** — recent Granola transcripts with unextracted actions
+# Changed files
+git diff --stat HEAD~5
 
-## Scheduled Task Template
+# Open branches
+git branch --sort=-committerdate | head -10
 
-Create a schedule file at `schedules/morning-brief/schedule.md`:
+# TODO/FIXME delta
+git diff HEAD~5 -- '*.ts' '*.py' '*.rs' | grep "^+" | grep -i "todo\|fixme\|hack"
+```
 
-```yaml
+### Tier 2: If you have a remote
+```bash
+# Open PRs
+gh pr list --state open --limit 10
+
+# PR reviews needed
+gh pr list --search "review-requested:@me"
+
+# CI status
+gh run list --limit 5
+```
+
+### Tier 3: If you have integrations
+- **Issue tracker** (Linear, Jira, GitHub Issues): Assigned tickets, status changes, blockers
+- **Slack/Discord**: Unread mentions in project channels
+- **Calendar**: Meetings in next 48h
+- **Email**: Threads requiring response
+
+### Tier 4: Agent memory (if available)
+- Previous session decisions not yet captured in docs
+- Open questions from last conversation
+- Promises made ("I'll fix X tomorrow")
+
+## Running a Brief
+
+### Manual (paste into any agent)
+
+```
+Generate a project brief. Follow the proactive-brief pattern:
+
+1. Check: git log last 24h, open PRs, CI status, open issues assigned to me
+2. Check: any TODO/FIXME comments added recently
+3. Check: [add any integrations you use]
+
+Format: 4 sections max (Needs Attention, Changed, Upcoming, Learned)
+Rules: Max 20 words per item. Delta only — skip anything unchanged. 
+       Cite sources. Omit empty sections.
+```
+
+### Claude Code slash command
+
+Add to `.claude/commands/brief.md`:
+```markdown
 ---
-name: "morning-brief"
-description: "Daily morning briefing — what changed overnight, what needs attention"
-cron: "0 8 * * 1-5"
-timezone: "Europe/Paris"
-enabled: true
+description: Generate a project status brief
+allowed-tools: Bash(git:*), Bash(gh:*), Read, Glob, Grep
 ---
 
-Generate a morning brief following the proactive-brief skill pattern.
+Generate a concise project brief following the proactive-brief pattern.
 
-1. Check calendar for today's meetings
-2. Check email for unread threads requiring action
-3. Check Linear/Jira for assigned ticket status changes
-4. Check GitHub for PRs needing review or CI failures
-5. Search recent session memory for unresolved items from yesterday
+Check git log (24h), open PRs, CI status, and recent TODO additions.
+Format as: Needs Attention → Changed → Upcoming → Learned.
+Max 20 words per item. Delta-only. Cite sources. Omit empty sections.
+```
 
-Format the brief using the standard template (Needs Attention → Changed → Upcoming → Extracted Knowledge).
+Trigger with `/brief` in Claude Code.
 
-Keep each item under 20 words. The whole brief should be readable in 15 seconds.
+### Cron job (daily morning brief)
 
-Save the brief to session/morning-brief.md.
+```bash
+# Weekdays at 8:30am
+30 8 * * 1-5 cd /path/to/project && claude -p "Generate a morning brief: git log last 24h, open PRs, CI status, assigned issues. Save to .claude/briefs/$(date +%Y-%m-%d).md. Max 20 words per item, delta-only, cite sources."
+```
+
+### Multi-project brief
+
+If you work across several repos, loop:
+
+```bash
+#!/bin/bash
+REPOS=("~/code/api" "~/code/frontend" "~/code/infra")
+BRIEF=""
+
+for repo in "${REPOS[@]}"; do
+  cd "$repo"
+  BRIEF+="## $(basename $repo)\n"
+  BRIEF+="$(git log --since='24 hours ago' --oneline --no-merges 2>/dev/null || echo 'No commits')\n\n"
+done
+
+echo -e "$BRIEF" | claude -p "Synthesize this multi-repo activity into a single brief. Follow proactive-brief format. Highlight cross-repo impacts."
 ```
 
 ## Memory Extract Pattern
 
-From each brief, extract durable knowledge — facts that should persist beyond this session:
+Every brief is an opportunity to capture durable knowledge. After generating the brief, check:
 
-```
-Extraction rules:
-1. Decisions made → save to relevant project knowledge file
-2. Facts discovered → save with provenance and date
-3. Status changes → update project status files
-4. Blockers identified → flag in project files with date
+| Signal | Action |
+|---|---|
+| Decision made | Write to project memory / decision log |
+| Pattern discovered | Add to conventions / architecture docs |
+| Bug root cause found | Add to known issues / post-mortem |
+| External API behavior learned | Add to integration docs |
 
-Only extract if signal ≥ 2 (has at least: title + source + 1-line purpose)
-```
+**Rule**: Only extract if the fact has signal ≥ 2 — it must have a title, a source, AND a 1-line purpose to be worth persisting.
 
-## Example Briefs
+Where to save extracted knowledge:
+- `.claude/memory/` — if using Claude Code's memory system
+- `docs/decisions/` — for decision records (ADRs)
+- `CLAUDE.md` — for the single most important project context
+- Wherever your team keeps durable docs
 
-### Morning Brief
+## Examples
+
+### Morning Brief (solo developer)
 ```markdown
-# Brief — 2026-04-01 08:00
+# Brief — 2026-04-02
 
 ## Needs Attention
-- PR #247: CI failing on auth tests → fix before standup (GitHub)
-- Linear SYR-412: Blocked by API spec, needs @jean input (Linear)
+- CI: `test-auth` failing since 8pm yesterday → flaky Redis mock, see commit a3f21b
 
-## Changed Since Last Brief
-- Modular-crew Phase 1 marked complete (session yesterday)
-- Syroco staging deployed v2.4.1 (Slack #releases)
+## Changed
+- Merged PR #42: rate limiting middleware (3 files, +180 lines)
+- New issue #51: user reports timeout on /api/export (assigned to me)
 
-## Upcoming (next 48h)
-- 10:00 Product sync — agenda: Q2 roadmap finalization
-- Tomorrow 14:00 — Sprint review demo
+## Upcoming
+- Friday: v2.5 release tag deadline
 
-## Extracted Knowledge
-- modular-crew `crew diff` shows 33% token savings → saved to projects/modular-crew/
+## Learned
+- Redis MULTI/EXEC doesn't support WATCH inside pipelines (hit this in rate limiter)
 ```
 
-### End-of-Week Digest
+### Weekly Digest (team lead)
 ```markdown
-# Week Digest — W14 2026
+# Brief — W14 2026
 
-## Completed
-- Claude Code leak analysis + next-gen feature extraction (3 sessions)
-- Plane research report finalized (documents/01 - Discovery/)
-- Agent skills repo: context-engineering published
+## Needs Attention
+- 2 PRs open >3 days: #38 (backend) and #41 (frontend) — need review
+- Sprint velocity: 18/24 points done, 6 carry over
 
-## Carries Over
-- Product workflow implementation plan (needs modular-crew session)
-- Syroco engineering guidelines update (blocked on team review)
+## Changed
+- Auth service migrated to JWT (merged Monday, 12 files)
+- New staging environment provisioned (infra PR #15)
+- Onboarded 1 new contributor (first PR merged Thursday)
 
-## Key Decisions
-- Adopted Plane over Linear for project management
-- Context engineering budget: 8K tokens default, 16K for graph queries
-
-## Numbers
-- 12 sessions this week, 3 knowledge files updated, 1 new skill published
+## Learned
+- JWT refresh token rotation needs explicit revocation on logout (missed in spec)
 ```
 
-## Integration with Knowledge Dream
+## Anti-Patterns
 
-The proactive brief and knowledge-dream skills are complementary:
-- **Brief** = fast, daily, surface-level — "what's happening now"
-- **Dream** = slow, weekly, deep — "what have we learned"
-
-Brief extracts signal → Dream consolidates signal into durable knowledge.
+| Don't | Do |
+|---|---|
+| "The project is a web app built with..." | Skip — this is known context, not a delta |
+| "No changes to the database schema" | Omit — empty sections are noise |
+| "We should probably look into..." | Be specific: "X needs attention → do Y by [when]" |
+| Paragraphs of explanation | Max 20 words. Link to a file if more is needed. |
+| "Everything looks good" | If nothing needs attention, the brief is just Changed + Learned |
