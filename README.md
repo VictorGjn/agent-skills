@@ -1,32 +1,44 @@
 # agent-skills
 
-Reusable AI agent skills for [Sauna](https://sauna.ai) and any LLM-powered workflow.
+Reusable skills for AI coding agents. Works with Claude Code, Cursor, Sauna, or any LLM-powered coding tool.
 
 ## Skills
 
 ### [context-engineering](./context-engineering/)
-Pack 40+ files at 5 depth levels into any LLM context window. Keyword, semantic, and graph resolution. 100% recall at 1% of repo token cost. Drop-in for any AI agent.
+Pack 40+ files at 5 depth levels into any LLM context window. Keyword, semantic, and graph resolution. 100% recall at 1% of repo token cost.
 
 ### [knowledge-dream](./knowledge-dream/)
-Periodic knowledge consolidation — synthesize scattered session learnings into durable, well-organized knowledge files. 4-phase process: Orient → Gather → Consolidate → Prune. Inspired by Claude Code's autoDream memory consolidation engine.
+Periodic knowledge consolidation. 4-phase process (Orient → Gather → Consolidate → Prune) that synthesizes scattered project learnings into durable memory files. Run manually, as a slash command, or via cron. Inspired by Claude Code's autoDream engine.
 
 ### [coordinator-pattern](./coordinator-pattern/)
-Decompose complex tasks into parallel sub-agent work using the Research → Synthesis → Implementation → Verification pattern. Use when a task is too large for a single agent pass. Works with any sub-agent spawning system.
+Decompose complex tasks into parallel sub-agent work: Research → Synthesis → Implementation → Verification. Works with any agent that can spawn sub-tasks.
 
 ### [proactive-brief](./proactive-brief/)
-Generate concise, actionable status briefs from scattered sources. Delta-based reports: what changed, what needs attention, what to do next. Designed for scheduled daily/weekly use. Inspired by Claude Code's KAIROS Brief Mode.
+Concise, delta-based status reports. What changed, what needs attention, what to do next. Designed for daily/weekly use as a slash command or cron job. Inspired by Claude Code's KAIROS Brief Mode.
 
-## Usage
+## How to Use
 
-Each skill is a standalone folder with a `SKILL.md` that describes when and how to use it. Skills are designed for:
+Each skill is a standalone folder with a `SKILL.md` containing instructions. No dependencies between skills. Three ways to use them:
 
-- **Sauna** — drop into `skills/sauna/` or `skills/global/`
-- **Claude Code** — use as custom skills via `.claude/skills/`
-- **Any LLM agent** — follow the instructions in SKILL.md
+### Claude Code
+Copy a skill folder into your project's `.claude/skills/` directory. The skill becomes available as context for Claude Code automatically.
+
+```bash
+# Example: add coordinator-pattern to your project
+cp -r coordinator-pattern/ /path/to/project/.claude/skills/coordinator-pattern/
+```
+
+Or reference it as a slash command — see each skill's SKILL.md for the `.claude/commands/` template.
+
+### Sauna
+Drop into `skills/sauna/` or `skills/global/` in your workspace. Skills are loaded automatically when relevant to your request.
+
+### Any LLM Agent
+Read the SKILL.md and follow the instructions. The skills are processes described in markdown — they work with any agent that can read files, run commands, and spawn sub-tasks.
 
 ## Origin
 
-The `knowledge-dream`, `coordinator-pattern`, and `proactive-brief` skills are derived from patterns discovered in Claude Code's leaked source (March 2026 npm sourcemap incident). See the [analysis](https://kuber.studio/blog/AI/Claude-Code's-Entire-Source-Code-Got-Leaked-via-a-Sourcemap-in-npm,-Let's-Talk-About-it) for context.
+`knowledge-dream`, `coordinator-pattern`, and `proactive-brief` are derived from patterns found in Claude Code's leaked source code (March 2026 npm sourcemap incident). The original systems (autoDream, Coordinator Mode, KAIROS Brief) were extracted, generalized, and made portable. See the [analysis](https://kuber.studio/blog/AI/Claude-Code's-Entire-Source-Code-Got-Leaked-via-a-Sourcemap-in-npm,-Let's-Talk-About-it) for context.
 
 ## License
 
