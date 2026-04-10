@@ -167,7 +167,7 @@ def pack(
         # Auto-discover graphify graph.json
         _gp = graphify_path
         if _gp is None:
-            workspace_root = index.get("metadata", {}).get("root") or str(INDEX_PATH.parent)
+            workspace_root = index.get("root") or str(INDEX_PATH.parent)
             candidate = Path(workspace_root) / "graphify-out" / "graph.json"
             if candidate.exists():
                 _gp = str(candidate)

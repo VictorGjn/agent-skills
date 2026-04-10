@@ -262,7 +262,7 @@ def main():
     # Auto-discover graphify graph.json when --graph is used
     graphify_path = args.graphify_path
     if graphify_path is None and args.graph:
-        workspace_root = index.get('metadata', {}).get('root') or str(index_path.parent)
+        workspace_root = index.get('root') or str(index_path.parent)
         candidate = Path(workspace_root) / 'graphify-out' / 'graph.json'
         if candidate.exists():
             graphify_path = str(candidate)
