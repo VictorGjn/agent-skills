@@ -37,6 +37,7 @@ Query → Resolution (keyword | semantic | graph) → Entry points
 | Semantic | `--semantic` | Conceptual queries ("how does auth work?") | ~$0.0001/query |
 | Graph | `--graph` | Structural queries ("what depends on X?") | Free |
 | Semantic+Graph | `--semantic --graph` | Full discovery | ~$0.0001/query |
+| Graphify+Graph | `--graph` *(auto-detects `graphify-out/graph.json`)* | Rich call graphs, inheritance, cross-language | Free |
 
 ## Usage
 
@@ -62,6 +63,20 @@ python3 scripts/pack_context.py "PaymentService" --graph --budget 8000
 python3 scripts/pack_context.py "explain payment flow" --semantic --graph --budget 16000
 python3 scripts/pack_context.py "fix login bug" --task fix --graph --budget 8000
 ```
+
+### Graphify integration (optional, richer graph)
+
+If you've already run [Graphify](https://github.com/safishamsi/graphify) in the workspace, `--graph` auto-detects `graphify-out/graph.json` and uses it instead of the import-only graph. This surfaces files reachable via call graphs, inheritance, method relationships, and doc-to-code links — edges the import parser misses.
+
+```bash
+# Happy path: graphify graph.json auto-detected
+python3 scripts/pack_context.py "query" --graph
+
+# Explicit path
+python3 scripts/pack_context.py "query" --graph --graphify-path /path/to/graph.json
+```
+
+Falls back silently to import-only if no `graph.json` exists. Zero cost beyond running Graphify once.
 
 ### 4. Read
 
@@ -189,6 +204,7 @@ Tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `reso
 | `embed_resolve.py` | Embedding resolver: build, resolve, hybrid |
 | `ast_extract.py` | tree-sitter AST symbol extraction (14 languages) |
 | `code_graph.py` | Import/dependency graph + BFS traversal + task presets |
+| `graphify_adapter.py` | Adapter: converts Graphify graph.json to code_graph format |
 | `embeddingResolver.ts` | TypeScript port for Node.js agents |
 | `mcp_server.py` | MCP server (stdio + HTTP + optional auth) |
 | `index_workspace.py` | Index local files → JSON |
