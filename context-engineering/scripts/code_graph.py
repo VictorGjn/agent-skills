@@ -9,6 +9,7 @@ Used by pack_context.py --graph mode.
 """
 
 import re
+import sys
 from pathlib import Path
 from collections import defaultdict
 
@@ -445,8 +446,6 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
 
 def build_graph_with_fallback(files: list, graphify_path: str = None) -> dict:
     """Build graph from Graphify graph.json if available, else import-only fallback."""
-    import sys
-
     if graphify_path:
         from graphify_adapter import load_graphify_graph, adapt_to_code_graph
 
