@@ -443,6 +443,28 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
     )
 
 
+def build_graph_with_fallback(files: list, graphify_path: str = None) -> dict:
+    """Build graph from Graphify graph.json if available, else import-only fallback."""
+    import sys
+
+    if graphify_path:
+        from graphify_adapter import load_graphify_graph, adapt_to_code_graph
+
+        graphify_data = load_graphify_graph(graphify_path)
+        if graphify_data is not None:
+            indexed_paths = {f['path'] for f in files}
+            graph = adapt_to_code_graph(graphify_data, indexed_paths)
+            if graph['edges']:
+                print(f"<!-- Graph source: graphify ({graph['stats']['total_nodes']} nodes, "
+                      f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
+                return graph
+
+    graph = build_graph(files)
+    print(f"<!-- Graph source: import-only ({graph['stats']['total_nodes']} nodes, "
+          f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
+    return graph
+
+
 def find_entry_points(query_scored: list, threshold: float = 0.3) -> list:
     """Convert scored files (from keyword matching) to graph entry points."""
     return [
