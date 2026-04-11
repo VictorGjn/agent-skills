@@ -1,11 +1,16 @@
 """
-Workspace Indexer — Scans documents/ into a heading-tree JSON index.
+Workspace Indexer — Scans a directory into a heading-tree JSON index.
+
+Indexes:
+  - Markdown/MDX/RST/TXT files via heading parser
+  - Code files (TS/JS/Python/Go/Rust/etc) via AST symbol extraction (ast_extract)
 
 Output: cache/workspace-index.json
-Each file gets a tree of {title, depth, tokens, totalTokens, children, firstSentence}
+Each file gets a tree of {title, depth, tokens, totalTokens, children, firstSentence}.
+For code files, top-level symbols (functions/classes/methods) become tree children
+so the packer can render them at Headlines/Summary/Detail/Full depth levels.
 
-Usage: python3 index-workspace.py [root_dir]
-Default root: documents/
+Usage: python3 index_workspace.py [root_dir]
 """
 
 import os
@@ -18,11 +23,20 @@ from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pack_context_lib import classify_knowledge_type
+from ast_extract import extract_symbols, lang_from_path, EXT_TO_LANG
 
 # ── Config ──
 
-SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.cache', 'assets', 'screenshots'}
+SKIP_DIRS = {
+    '.git', 'node_modules', '__pycache__', '.cache', 'assets', 'screenshots',
+    '.next', '.turbo', 'dist', 'build', 'out', 'coverage', '.vscode', '.idea',
+    'vendor', 'target',
+}
 MAX_FILE_SIZE = 200_000  # 200KB
+
+DOC_EXTENSIONS = {'.md', '.mdx', '.rst', '.txt'}
+CODE_EXTENSIONS = set(EXT_TO_LANG.keys())
+INDEXABLE_EXTENSIONS = DOC_EXTENSIONS | CODE_EXTENSIONS
 
 # ── Token estimation ──
 
@@ -129,39 +143,122 @@ def extract_headings(node: dict, max_depth: int = 3) -> list:
         headings.extend(extract_headings(child, max_depth))
     return headings
 
+
+# ── Code tree parser ──
+
+def parse_code_tree(source: str, content: str, lang: str) -> dict:
+    """Build a heading-tree-compatible structure from code via AST symbols.
+
+    Root node contains a content preview. Each top-level symbol (function, class,
+    interface, type, etc.) becomes a depth-1 child with its signature as title and
+    docstring as text. This makes code files renderable at all 5 depth levels.
+    """
+    tokens = estimate_tokens(content)
+    counter = [0]
+
+    def make_node(title, depth, text='', tok=0):
+        counter[0] += 1
+        return {
+            'nodeId': f'n{depth}-{counter[0]}',
+            'title': title, 'depth': depth,
+            'text': text, 'tokens': tok, 'totalTokens': tok,
+            'children': [],
+            'firstSentence': first_sentence(text) if text else '',
+            'firstParagraph': first_paragraph(text) if text else '',
+        }
+
+    # Preview = first ~400 chars (skip blank lines/imports)
+    preview_lines = []
+    for line in content.split('\n')[:50]:
+        s = line.strip()
+        if not s or s.startswith(('import ', 'from ', '//', '#')):
+            continue
+        preview_lines.append(s)
+        if len(' '.join(preview_lines)) >= 400:
+            break
+    preview = ' '.join(preview_lines)[:500]
+
+    root = make_node(source, 0, text=content[:1000], tok=tokens)
+    root['firstParagraph'] = preview
+    root['firstSentence'] = first_sentence(preview) if preview else ''
+
+    try:
+        symbols = extract_symbols(lang, content, source)
+    except Exception:
+        symbols = []
+
+    # Sort by line, dedupe by (name, kind, line)
+    seen = set()
+    unique_symbols = []
+    for sym in sorted(symbols, key=lambda s: s.get('line', 0)):
+        key = (sym.get('name'), sym.get('kind'), sym.get('line'))
+        if key in seen or sym.get('kind') == 'import':
+            continue
+        seen.add(key)
+        unique_symbols.append(sym)
+
+    for sym in unique_symbols:
+        name = sym.get('name', '')
+        kind = sym.get('kind', '')
+        sig = sym.get('signature', '') or name
+        doc = sym.get('docstring', '')
+        # Title = "kind name" (so keyword scoring matches both kind and name)
+        title = f'{kind} {name}' if kind and kind not in ('export', 'function', 'method') else name
+        # Symbol text = signature + docstring
+        sym_text = sig
+        if doc:
+            sym_text += '\n' + doc
+        sym_tokens = estimate_tokens(sym_text)
+        node = make_node(title, 1, text=sym_text, tok=sym_tokens)
+        # Mark exported flag in title prefix for visibility
+        if sym.get('exported'):
+            node['title'] = f'{title}'  # exports surface naturally via path scoring
+        root['children'].append(node)
+        root['totalTokens'] += sym_tokens
+
+    return root
+
 # ── Scanner ──
 
 def scan_directory(root_dir: str) -> dict:
     root = Path(root_dir)
     files = []
     total_tokens = 0
-    
-    for md_path in sorted(root.rglob('*.md')):
-        rel = str(md_path.relative_to(root))
-        
-        # Skip directories
-        if any(part in SKIP_DIRS for part in md_path.parts):
+    skipped = 0
+
+    for path in sorted(root.rglob('*')):
+        if not path.is_file():
             continue
-        
-        # Skip large files
-        size = md_path.stat().st_size
-        if size > MAX_FILE_SIZE:
+        if any(part in SKIP_DIRS for part in path.parts):
             continue
-        if size == 0:
+
+        ext = path.suffix.lower()
+        if ext not in INDEXABLE_EXTENSIONS:
             continue
-        
+
         try:
-            content = md_path.read_text(encoding='utf-8', errors='replace')
+            size = path.stat().st_size
+            if size == 0 or size > MAX_FILE_SIZE:
+                skipped += 1
+                continue
+            content = path.read_text(encoding='utf-8', errors='replace')
         except Exception:
+            skipped += 1
             continue
-        
-        tree = parse_markdown_tree(rel, content)
+
+        rel = str(path.relative_to(root))
+
+        if ext in DOC_EXTENSIONS:
+            tree = parse_markdown_tree(rel, content)
+            headings_text = ' '.join(h['title'] for h in extract_headings(tree, max_depth=3))
+            kt = classify_knowledge_type(rel, headings_text, tree.get('firstParagraph', ''))
+        else:
+            lang = lang_from_path(rel)
+            tree = parse_code_tree(rel, content, lang)
+            kt = 'ground_truth'
+
         headings = extract_headings(tree, max_depth=3)
-        
-        # Classify knowledge type
-        headings_text = ' '.join(h['title'] for h in headings)
-        kt = classify_knowledge_type(rel, headings_text, tree.get('firstParagraph', ''))
-        
+
         file_entry = {
             'path': rel,
             'size': size,
@@ -172,7 +269,7 @@ def scan_directory(root_dir: str) -> dict:
             'headings': headings,
             'tree': tree,
         }
-        
+
         files.append(file_entry)
         total_tokens += tree['totalTokens']
     
@@ -192,6 +289,7 @@ def scan_directory(root_dir: str) -> dict:
         'root': str(root),
         'totalFiles': len(files),
         'totalTokens': total_tokens,
+        'skipped': skipped,
         'knowledgeTypeDistribution': dict(kt_dist),
         'directories': sorted(dirs),
         'files': files,

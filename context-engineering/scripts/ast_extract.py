@@ -26,7 +26,12 @@ try:
     from tree_sitter_languages import get_parser
     HAS_TREESITTER = True
 except ImportError:
-    HAS_TREESITTER = False
+    try:
+        # tree_sitter_language_pack is the maintained successor (Python 3.12+)
+        from tree_sitter_language_pack import get_parser
+        HAS_TREESITTER = True
+    except ImportError:
+        HAS_TREESITTER = False
 
 # ── Language mapping ──
 
