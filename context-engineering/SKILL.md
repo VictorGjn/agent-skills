@@ -1,6 +1,6 @@
 ---
 name: context-engineering
-description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Keyword, semantic, and graph resolution. 14 languages via tree-sitter AST. Anti-hallucination filters (topic, section, confidence). Task-type presets. Do NOT use for single-file reads or when every file needs full content."
+description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Indexes markdown + code files (14 languages via tree-sitter AST symbol extraction). Keyword, semantic, and graph resolution (with optional graphify integration). Anti-hallucination filters (topic, section, confidence). Task-type presets. Do NOT use for single-file reads or when every file needs full content."
 requiredApps: []
 ---
 
@@ -11,7 +11,7 @@ Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 ful
 ## Prerequisites
 
 - Python 3.10+
-- `pip install tree-sitter-languages` for AST extraction (without it, falls back to regex)
+- `pip install tree-sitter-language-pack` (Python 3.12+) or `tree-sitter-languages` (Python 3.10-3.11) for AST symbol extraction. Falls back to regex if neither is installed.
 - OpenAI API key (semantic mode only, via `OPENAI_API_KEY` env var)
 - `pip install "mcp[cli]" requests` (MCP server only)
 
@@ -47,6 +47,8 @@ Query → Resolution (keyword | semantic | graph) → Entry points
 python3 scripts/index_workspace.py /path/to/files/
 python3 scripts/index_github_repo.py owner/repo --branch main
 ```
+
+The local indexer handles **markdown** (heading-tree) and **code** (`.ts/.tsx/.js/.jsx/.py/.go/.rs/.rb/.java/.c/.cpp/.cs/.kt/.scala/.php`) — code files get AST symbol extraction so functions, classes, interfaces, methods, and types are searchable as headings and renderable at all 5 depth levels.
 
 ### 2. Build embeddings (semantic mode only, one-time)
 
