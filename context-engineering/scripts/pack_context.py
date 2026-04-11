@@ -93,9 +93,10 @@ def _walk_nodes(node):
 # ── Graph-enhanced scoring ──
 
 def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int,
-                     entry_point_source: list = None, task_type: str = None) -> list:
+                     entry_point_source: list = None, task_type: str = None,
+                     graphify_path: str = None) -> list:
     """Score files by keyword (or provided entry points), then expand via import graph."""
-    from code_graph import build_graph, traverse_from, traverse_for_task, find_entry_points
+    from code_graph import build_graph_with_fallback, traverse_from, traverse_for_task, find_entry_points
 
     # Phase 1: Entry points (from keyword or from caller)
     if entry_point_source is not None:
@@ -112,10 +113,8 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
                 })
         keyword_scored.sort(key=lambda x: x['relevance'], reverse=True)
 
-    # Phase 2: Build graph from ALL indexed files
-    graph = build_graph(index['files'])
-    print(f"<!-- Graph: {graph['stats']['total_nodes']} nodes, {graph['stats']['total_edges']} edges -->",
-          file=sys.stderr)
+    # Phase 2: Build graph from ALL indexed files (with graphify fallback)
+    graph = build_graph_with_fallback(index['files'], graphify_path=graphify_path)
 
     # Phase 3: Find entry points from top matches
     entry_points = find_entry_points(keyword_scored[:10], threshold=0.2)
@@ -238,6 +237,8 @@ def main():
                         help='Print confidence signal when results are weak')
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--index', type=str, default=str(INDEX_PATH), help='Path to index')
+    parser.add_argument('--graphify-path', type=str, default=None,
+                        help='Path to graphify graph.json (auto-discovers at {workspace}/graphify-out/graph.json)')
     args = parser.parse_args()
 
     if args.quality and args.top is None:
@@ -258,16 +259,26 @@ def main():
     if not query_tokens:
         print('Empty query', file=sys.stderr); sys.exit(1)
 
+    # Auto-discover graphify graph.json when --graph is used
+    graphify_path = args.graphify_path
+    if graphify_path is None and args.graph:
+        workspace_root = index.get('root') or str(index_path.parent)
+        candidate = Path(workspace_root) / 'graphify-out' / 'graph.json'
+        if candidate.exists():
+            graphify_path = str(candidate)
+
     # Score files based on mode
     task_type = args.task  # explicit task type, or None
     if args.semantic and args.graph:
         semantic_scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
         scored = score_with_graph(index, query_tokens, query_lower, args.top,
-                                  entry_point_source=semantic_scored, task_type=task_type)
+                                  entry_point_source=semantic_scored, task_type=task_type,
+                                  graphify_path=graphify_path)
     elif args.semantic:
         scored = score_with_semantic(index, query_tokens, query_lower, args.query, args.top)
     elif args.graph:
-        scored = score_with_graph(index, query_tokens, query_lower, args.top, task_type=task_type)
+        scored = score_with_graph(index, query_tokens, query_lower, args.top,
+                                  task_type=task_type, graphify_path=graphify_path)
     else:
         scored = []
         for f in index['files']:
