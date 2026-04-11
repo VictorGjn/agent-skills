@@ -103,6 +103,7 @@ def pack(
     budget: int = 8000,
     mode: str = "keyword",
     top: int = 30,
+    graphify_path: str = None,
 ) -> str:
     """
     Pack depth-graded context for a query within a token budget.
@@ -113,6 +114,8 @@ def pack(
         mode: Resolution mode. "keyword" (free, fast), "semantic" (hybrid embedding+keyword),
               "graph" (follows imports/deps), "semantic+graph" (full pipeline).
         top: Maximum files to consider before packing.
+        graphify_path: Optional path to graphify graph.json. Auto-discovers at
+                       {workspace}/graphify-out/graph.json when None and mode includes "graph".
 
     Returns:
         Depth-packed markdown context with files at Full/Detail/Summary/Headlines/Mention levels.
@@ -159,8 +162,17 @@ def pack(
         scored = scored[:top]
 
     if "graph" in mode:
-        from code_graph import build_graph, traverse_from, find_entry_points
-        graph = build_graph(index["files"])
+        from code_graph import build_graph_with_fallback, traverse_from, find_entry_points
+
+        # Auto-discover graphify graph.json
+        _gp = graphify_path
+        if _gp is None:
+            workspace_root = index.get("root") or str(INDEX_PATH.parent)
+            candidate = Path(workspace_root) / "graphify-out" / "graph.json"
+            if candidate.exists():
+                _gp = str(candidate)
+
+        graph = build_graph_with_fallback(index["files"], graphify_path=_gp)
         entry_points = find_entry_points(scored[:10], threshold=0.2)
         if entry_points:
             traversed = traverse_from(entry_points, graph, max_depth=3, max_files=top)
