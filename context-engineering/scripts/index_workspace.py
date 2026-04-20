@@ -210,9 +210,6 @@ def parse_code_tree(source: str, content: str, lang: str) -> dict:
             sym_text += '\n' + doc
         sym_tokens = estimate_tokens(sym_text)
         node = make_node(title, 1, text=sym_text, tok=sym_tokens)
-        # Mark exported flag in title prefix for visibility
-        if sym.get('exported'):
-            node['title'] = f'{title}'  # exports surface naturally via path scoring
         root['children'].append(node)
         root['totalTokens'] += sym_tokens
 
@@ -226,15 +223,18 @@ def scan_directory(root_dir: str) -> dict:
     total_tokens = 0
     skipped = 0
 
-    for path in sorted(root.rglob('*')):
-        if not path.is_file():
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune skipped dirs in-place so os.walk does not descend into them
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for name in filenames:
+            ext = Path(name).suffix.lower()
+            if ext in INDEXABLE_EXTENSIONS:
+                candidates.append(Path(dirpath) / name)
+    candidates.sort()
 
+    for path in candidates:
         ext = path.suffix.lower()
-        if ext not in INDEXABLE_EXTENSIONS:
-            continue
 
         try:
             size = path.stat().st_size
