@@ -316,6 +316,25 @@ graphData.links.forEach(l => {
   adj[t].push({ node: s, kind: l.kind, dir: 'in' });
 });
 
+let highlightNodes = new Set();
+let highlightLinks = new Set();
+let selectedNode = null;
+
+function selectNode(node) {
+  highlightNodes.clear();
+  highlightLinks.clear();
+  selectedNode = node;
+  if (node) {
+    highlightNodes.add(node);
+    graphData.links.forEach(link => {
+      const s = typeof link.source === 'object' ? link.source : graphData.nodes.find(n => n.id === link.source);
+      const t = typeof link.target === 'object' ? link.target : graphData.nodes.find(n => n.id === link.target);
+      if (s && s.id === node.id) { highlightNodes.add(t); highlightLinks.add(link); }
+      if (t && t.id === node.id) { highlightNodes.add(s); highlightLinks.add(link); }
+    });
+  }
+}
+
 const Graph = ForceGraph3D()
   (document.getElementById('graph'))
   .backgroundColor('#FAFBFC')
@@ -323,13 +342,26 @@ const Graph = ForceGraph3D()
   .nodeLabel(n => n.type === 'file'
     ? `<b>${n.label}</b> <span style="color:#94A3B8">(${n.tokens} tok)</span>`
     : `<b>${n.label}</b> <span style="color:#94A3B8">${n.type}</span>`)
-  .nodeColor(n => nodeColors[n.type] || '#94A3B8')
+  .nodeColor(n => {
+    if (selectedNode && !highlightNodes.has(n)) return '#E2E8F0';
+    return nodeColors[n.type] || '#94A3B8';
+  })
   .nodeVal(n => n.val || 2)
   .nodeOpacity(0.92)
   .nodeResolution(12)
-  .linkColor(l => edgeColors[l.kind] || '#CBD5E1')
-  .linkWidth(l => l.kind === 'contains' ? 0.2 : Math.max(0.4, (l.weight || 0.3) * 2.5))
-  .linkOpacity(l => l.kind === 'contains' ? 0.12 : 0.35)
+  .linkColor(l => {
+    if (selectedNode && !highlightLinks.has(l)) return 'rgba(203,213,225,0.15)';
+    if (selectedNode && highlightLinks.has(l)) return edgeColors[l.kind] || '#2563EB';
+    return edgeColors[l.kind] || '#CBD5E1';
+  })
+  .linkWidth(l => {
+    if (selectedNode && highlightLinks.has(l)) return Math.max(1.5, (l.weight || 0.3) * 4);
+    return l.kind === 'contains' ? 0.2 : Math.max(0.4, (l.weight || 0.3) * 2.5);
+  })
+  .linkOpacity(l => {
+    if (selectedNode && !highlightLinks.has(l)) return 0.05;
+    return l.kind === 'contains' ? 0.12 : 0.35;
+  })
   .linkDirectionalArrowLength(l => l.kind === 'contains' ? 0 : 3.5)
   .linkDirectionalArrowRelPos(1)
   .linkDirectionalArrowColor(l => edgeColors[l.kind] || '#CBD5E1')
@@ -337,6 +369,8 @@ const Graph = ForceGraph3D()
   .d3VelocityDecay(0.35)
   .warmupTicks(80)
   .onNodeClick(node => {
+    selectNode(node);
+    Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
     const detail = document.getElementById('detail');
     document.getElementById('d-name').textContent = node.label;
     document.getElementById('d-path').textContent = node.path;
@@ -370,6 +404,8 @@ const Graph = ForceGraph3D()
     );
   })
   .onBackgroundClick(() => {
+    selectNode(null);
+    Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
     document.getElementById('detail').style.display = 'none';
   });
 
