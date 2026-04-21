@@ -146,6 +146,104 @@ def test_cluster_by_prefix():
     assert len(cluster_edges) >= 3
 
 
+def test_extract_focused():
+    """Focus mode expands one repo and collapses others into bubbles."""
+    from visualize_graph import extract_focused, merge_indexes
+
+    idx_a = {
+        'root': '/repos/fleet',
+        'totalFiles': 1, 'totalTokens': 150,
+        'files': [{
+            'path': 'src/types.ts', 'tokens': 150, 'knowledge_type': 'ground_truth',
+            'tree': {
+                'title': 'src/types.ts', 'depth': 0, 'tokens': 150, 'totalTokens': 150,
+                'text': '', 'firstSentence': '', 'firstParagraph': '',
+                'children': [
+                    {'title': 'type VoyageReport', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                ],
+            },
+        }],
+        'directories': ['src'],
+    }
+    idx_b = {
+        'root': '/repos/backend',
+        'totalFiles': 2, 'totalTokens': 400,
+        'files': [
+            {'path': 'src/dto.ts', 'tokens': 200, 'knowledge_type': 'ground_truth',
+             'tree': {'title': 'src/dto.ts', 'depth': 0, 'tokens': 200, 'totalTokens': 200,
+                      'text': '', 'firstSentence': '', 'firstParagraph': '',
+                      'children': [
+                          {'title': 'type VoyageReport', 'depth': 1, 'tokens': 100, 'totalTokens': 100, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                      ]}},
+            {'path': 'src/service.ts', 'tokens': 200, 'knowledge_type': 'ground_truth',
+             'tree': {'title': 'src/service.ts', 'depth': 0, 'tokens': 200, 'totalTokens': 200,
+                      'text': '', 'firstSentence': '', 'firstParagraph': '',
+                      'children': []}},
+        ],
+        'directories': ['src'],
+    }
+    merged = merge_indexes([idx_a, idx_b])
+    nodes, file_ids, repo_bubbles = extract_focused(merged, 'fleet', include_symbols=True)
+
+    # Fleet files/symbols should be expanded
+    fleet_nodes = [n for n in nodes if n.get('path', '').startswith('fleet/')]
+    assert len(fleet_nodes) >= 2  # 1 file + 1 symbol
+
+    # Backend should be a single bubble
+    assert 'backend' in repo_bubbles
+    bubble = [n for n in nodes if n['id'] == repo_bubbles['backend']]
+    assert len(bubble) == 1
+    assert bubble[0]['type'] == 'repo'
+    assert bubble[0]['fileCount'] == 2
+    assert bubble[0]['symbolCount'] == 1  # only VoyageReport child
+
+
+def test_find_cross_repo_links_focused():
+    """Focused cross-repo links connect focus types to repo bubbles."""
+    from visualize_graph import extract_focused, find_cross_repo_links_focused, merge_indexes
+
+    idx_a = {
+        'root': '/repos/fleet',
+        'totalFiles': 1, 'totalTokens': 150,
+        'files': [{
+            'path': 'src/types.ts', 'tokens': 150, 'knowledge_type': 'ground_truth',
+            'tree': {
+                'title': 'src/types.ts', 'depth': 0, 'tokens': 150, 'totalTokens': 150,
+                'text': '', 'firstSentence': '', 'firstParagraph': '',
+                'children': [
+                    {'title': 'type VoyageReport', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                ],
+            },
+        }],
+        'directories': ['src'],
+    }
+    idx_b = {
+        'root': '/repos/backend',
+        'totalFiles': 1, 'totalTokens': 200,
+        'files': [{
+            'path': 'src/dto.ts', 'tokens': 200, 'knowledge_type': 'ground_truth',
+            'tree': {
+                'title': 'src/dto.ts', 'depth': 0, 'tokens': 200, 'totalTokens': 200,
+                'text': '', 'firstSentence': '', 'firstParagraph': '',
+                'children': [
+                    {'title': 'type VoyageReport', 'depth': 1, 'tokens': 100, 'totalTokens': 100, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                    {'title': 'type FleetStatus', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                ],
+            },
+        }],
+        'directories': ['src'],
+    }
+    merged = merge_indexes([idx_a, idx_b])
+    nodes, file_ids, repo_bubbles = extract_focused(merged, 'fleet', include_symbols=True)
+    links = find_cross_repo_links_focused(nodes, merged, 'fleet', repo_bubbles)
+
+    # VoyageReport is shared -> 1 link to backend bubble
+    assert len(links) == 1
+    assert links[0]['kind'] == 'shared_type'
+    assert links[0]['target'] == repo_bubbles['backend']
+    assert links[0]['label'] == 'VoyageReport'
+
+
 def test_full_pipeline_multi_index():
     """End-to-end: merge two indexes, extract nodes, cluster, cross-link, generate HTML."""
     from visualize_graph import (

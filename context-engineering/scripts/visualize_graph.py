@@ -109,6 +109,113 @@ def find_cross_repo_links(nodes: list) -> list:
     return links
 
 
+def extract_focused(index: dict, focus_repo: str, top=None,
+                     include_symbols=True, graph_edges=None) -> tuple:
+    """Extract nodes in focus mode: expand one repo, collapse others into bubbles.
+
+    The focused repo gets full file + symbol extraction (same as extract_nodes).
+    Every other repo becomes a single large "repo" node. Cross-repo edges are
+    re-routed to point at the repo bubble instead of individual files.
+
+    Returns (nodes, file_ids, repo_bubbles) where repo_bubbles maps
+    repo_name -> bubble_node_id.
+    """
+    files = index.get('files', [])
+    focus_files = [f for f in files if f.get('repo') == focus_repo]
+    other_repos = defaultdict(list)
+    for f in files:
+        repo = f.get('repo', '')
+        if repo and repo != focus_repo:
+            other_repos[repo].append(f)
+
+    # Extract focus repo nodes using existing logic
+    focus_index = {**index, 'files': focus_files}
+    nodes, file_ids = extract_nodes(
+        focus_index, top=top, include_symbols=include_symbols,
+        graph_edges=graph_edges)
+
+    # Create repo bubble nodes for non-focus repos
+    repo_bubbles = {}
+    for repo, repo_files in other_repos.items():
+        total_tokens = sum(f.get('tokens', 0) for f in repo_files)
+        bubble_id = f'__repo__/{repo}'
+        repo_bubbles[repo] = bubble_id
+
+        # Count types for the label
+        type_count = 0
+        for f in repo_files:
+            tree = f.get('tree', {})
+            type_count += len(tree.get('children', []))
+
+        nodes.append({
+            'id': bubble_id,
+            'label': repo,
+            'type': 'repo',
+            'path': repo,
+            'group': repo,
+            'tokens': total_tokens,
+            'val': max(8, min(25, 4 + math.log1p(total_tokens) / 1.5)),
+            'fileCount': len(repo_files),
+            'symbolCount': type_count,
+        })
+        file_ids.add(bubble_id)
+
+    return nodes, file_ids, repo_bubbles
+
+
+def find_cross_repo_links_focused(nodes: list, index: dict,
+                                   focus_repo: str, repo_bubbles: dict) -> list:
+    """Find shared types between the focus repo and collapsed repo bubbles.
+
+    Scans ALL files in non-focus repos (not just visible nodes) for type names
+    that match types in the focus repo. Links point to the repo bubble node.
+    """
+    # Collect type labels from focus repo nodes
+    focus_types = {}
+    for n in nodes:
+        if n.get('type') in ('type', 'class', 'interface', 'enum'):
+            path_parts = n.get('path', '').split('/')
+            if len(path_parts) >= 1 and path_parts[0] == focus_repo:
+                focus_types.setdefault(n['label'], []).append(n['id'])
+
+    if not focus_types:
+        return []
+
+    # Scan all files in other repos for matching type names
+    links = []
+    seen_pairs = set()
+    for f in index.get('files', []):
+        repo = f.get('repo', '')
+        if repo == focus_repo or repo not in repo_bubbles:
+            continue
+        tree = f.get('tree', {})
+        for child in tree.get('children', []):
+            title = child.get('title', '')
+            # Extract label same way as _classify_symbol
+            tl = title.strip().lower()
+            label = title.strip()
+            for pfx in ('class ', 'abstract class ', 'interface ', 'type ', 'enum '):
+                if tl.startswith(pfx):
+                    label = title.strip()[len(pfx):].split('(')[0].split('{')[0].split('=')[0].strip()
+                    break
+
+            if label in focus_types:
+                bubble_id = repo_bubbles[repo]
+                for focus_id in focus_types[label]:
+                    pair = (focus_id, bubble_id, label)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        links.append({
+                            'source': focus_id,
+                            'target': bubble_id,
+                            'kind': 'shared_type',
+                            'weight': 0.8,
+                            'label': label,
+                        })
+
+    return links
+
+
 def cluster_by_prefix(nodes: list, min_group: int = 3) -> tuple:
     """Group symbol nodes by CamelCase prefix to reduce visual clutter.
 
@@ -443,6 +550,7 @@ kbd {
   <div class="legend-item"><div class="legend-dot" style="background:#7C3AED"></div> class / interface</div>
   <div class="legend-item"><div class="legend-dot" style="background:#0D9488"></div> concept</div>
   <div class="legend-item"><div class="legend-dot" style="background:#F59E0B"></div> cluster</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#1E293B"></div> repo</div>
   <div class="legend-item"><div class="legend-dot" style="background:#94A3B8"></div> file</div>
   <h3>Edges</h3>
   <div class="legend-item"><div class="legend-line" style="background:#2563EB"></div> imports</div>
@@ -476,6 +584,7 @@ const nodeColors = {
   class: '#7C3AED', interface: '#7C3AED', type: '#6366F1',
   concept: '#0D9488',
   cluster: '#F59E0B',
+  repo: '#1E293B',
   file: '#94A3B8', other: '#6B7280',
 };
 
@@ -524,16 +633,18 @@ const Graph = ForceGraph3D()
   (document.getElementById('graph'))
   .backgroundColor('#FAFBFC')
   .graphData(graphData)
-  .nodeLabel(n => n.type === 'file'
-    ? `<b>${n.label}</b> <span style="color:#94A3B8">(${n.tokens} tok)</span>`
-    : `<b>${n.label}</b> <span style="color:#94A3B8">${n.type}</span>`)
+  .nodeLabel(n => {
+    if (n.type === 'repo') return `<b>${n.label}</b> <span style="color:#94A3B8">${n.fileCount} files, ${n.symbolCount} symbols</span>`;
+    if (n.type === 'file') return `<b>${n.label}</b> <span style="color:#94A3B8">(${n.tokens} tok)</span>`;
+    return `<b>${n.label}</b> <span style="color:#94A3B8">${n.type}</span>`;
+  })
   .nodeColor(n => {
     if (selectedNode && !highlightNodes.has(n)) return '#E2E8F0';
     return nodeColors[n.type] || '#94A3B8';
   })
   .nodeVal(n => n.val || 2)
   .nodeOpacity(n => n.clustered ? 0.08 : 0.92)
-  .nodeResolution(12)
+  .nodeResolution(graphData.nodes.length > 500 ? 6 : 12)
   .linkColor(l => {
     if (selectedNode && !highlightLinks.has(l)) return 'rgba(203,213,225,0.15)';
     if (selectedNode && highlightLinks.has(l)) return edgeColors[l.kind] || '#2563EB';
@@ -552,7 +663,7 @@ const Graph = ForceGraph3D()
   .linkDirectionalArrowColor(l => edgeColors[l.kind] || '#CBD5E1')
   .d3AlphaDecay(0.015)
   .d3VelocityDecay(0.35)
-  .warmupTicks(80)
+  .warmupTicks(graphData.nodes.length > 500 ? 40 : 80)
   .onNodeClick(node => {
     selectNode(node);
     Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
@@ -599,7 +710,7 @@ Graph.d3Force('link').distance(link =>
   link.kind === 'contains' ? 12 : 50 + (1 - (link.weight || 0.3)) * 50
 );
 Graph.d3Force('charge').strength(n =>
-  n.type === 'file' ? -120 : -40
+  n.type === 'repo' ? -300 : n.type === 'file' ? -120 : -40
 );
 
 // ── Query Overlay ──
@@ -710,6 +821,8 @@ def main():
                         help='Overlay relevance scores for a query')
     parser.add_argument('--multi-index', nargs='+', default=None,
                         help='Multiple workspace-index.json paths to merge')
+    parser.add_argument('--focus', default=None,
+                        help='Focus on one repo (expand it, collapse others into bubbles)')
     args = parser.parse_args()
 
     # Load index (single or multi)
@@ -747,10 +860,19 @@ def main():
     graph = build_graph_with_fallback(index['files'], graphify_path)
     all_graph_edges = graph.get('edges', [])
 
-    # Extract nodes (uses graph edges to pick most-connected files when --top)
-    nodes, file_ids = extract_nodes(
-        index, top=args.top, include_symbols=not args.no_symbols,
-        graph_edges=all_graph_edges)
+    # Extract nodes
+    repo_bubbles = {}
+    if args.focus and args.multi_index:
+        # Focus mode: expand one repo, collapse others into bubbles
+        nodes, file_ids, repo_bubbles = extract_focused(
+            index, args.focus, top=args.top,
+            include_symbols=not args.no_symbols, graph_edges=all_graph_edges)
+        print(f'Focus: {args.focus} ({sum(1 for n in nodes if n["type"] != "repo")} nodes) '
+              f'+ {len(repo_bubbles)} repo bubbles', file=sys.stderr)
+    else:
+        nodes, file_ids = extract_nodes(
+            index, top=args.top, include_symbols=not args.no_symbols,
+            graph_edges=all_graph_edges)
 
     if not nodes:
         print('No files found in index.', file=sys.stderr)
@@ -784,7 +906,12 @@ def main():
             })
 
     # Cross-repo DTO linking
-    if args.multi_index:
+    if args.focus and repo_bubbles:
+        cross_links = find_cross_repo_links_focused(nodes, index, args.focus, repo_bubbles)
+        edges.extend(cross_links)
+        if cross_links:
+            print(f'{len(cross_links)} cross-repo type links', file=sys.stderr)
+    elif args.multi_index:
         cross_links = find_cross_repo_links(nodes)
         edges.extend(cross_links)
         if cross_links:
