@@ -113,3 +113,34 @@ def test_find_cross_repo_links():
     assert link['kind'] == 'shared_type'
     assert 'fleet' in link['source'] and 'backend' in link['target'] or \
            'backend' in link['source'] and 'fleet' in link['target']
+
+
+def test_cluster_by_prefix():
+    """Symbols with shared naming prefix get grouped into cluster nodes."""
+    from visualize_graph import cluster_by_prefix
+
+    nodes = [
+        {'id': 'types.ts::type VoyageReport', 'label': 'VoyageReport', 'type': 'type', 'path': 'types.ts', 'tokens': 50, 'val': 2, 'parent': 'types.ts'},
+        {'id': 'types.ts::type VoyageDetail', 'label': 'VoyageDetail', 'type': 'type', 'path': 'types.ts', 'tokens': 40, 'val': 2, 'parent': 'types.ts'},
+        {'id': 'types.ts::type VoyageStatus', 'label': 'VoyageStatus', 'type': 'type', 'path': 'types.ts', 'tokens': 30, 'val': 2, 'parent': 'types.ts'},
+        {'id': 'types.ts::type FleetVessel', 'label': 'FleetVessel', 'type': 'type', 'path': 'types.ts', 'tokens': 60, 'val': 2, 'parent': 'types.ts'},
+        {'id': 'types.ts::type FleetStatus', 'label': 'FleetStatus', 'type': 'type', 'path': 'types.ts', 'tokens': 20, 'val': 2, 'parent': 'types.ts'},
+        {'id': 'utils.ts::doStuff', 'label': 'doStuff', 'type': 'function', 'path': 'utils.ts', 'tokens': 10, 'val': 2},
+    ]
+
+    clustered, cluster_edges = cluster_by_prefix(nodes, min_group=3)
+
+    # Voyage* has 3 members -> should be clustered
+    cluster_ids = [n['id'] for n in clustered if n['type'] == 'cluster']
+    assert any('Voyage' in c for c in cluster_ids)
+
+    # Fleet* has only 2 members -> should NOT be clustered
+    assert not any('Fleet' in c for c in cluster_ids if c.endswith(':cluster'))
+
+    # Individual Voyage* nodes should be marked as clustered, not removed
+    clustered_members = [n for n in clustered if n.get('clustered')]
+    assert len(clustered_members) == 3
+    assert all(m['val'] == 0.3 for m in clustered_members)
+
+    # Cluster edges should connect cluster -> member
+    assert len(cluster_edges) >= 3

@@ -109,6 +109,73 @@ def find_cross_repo_links(nodes: list) -> list:
     return links
 
 
+def cluster_by_prefix(nodes: list, min_group: int = 3) -> tuple:
+    """Group symbol nodes by CamelCase prefix to reduce visual clutter.
+
+    E.g., VoyageReport, VoyageDetail, VoyageStatus -> "Voyage* (3)" cluster node.
+    Only clusters type/class/interface symbols with min_group or more members.
+
+    Returns (new_nodes, cluster_edges).
+    """
+    import re
+
+    def get_prefix(label):
+        m = re.match(r'^([A-Z][a-z]+)', label)
+        return m.group(1) if m else None
+
+    clusterable_types = {'type', 'class', 'interface', 'enum'}
+    groups = defaultdict(list)
+    for n in nodes:
+        if n.get('type') in clusterable_types and n.get('parent'):
+            prefix = get_prefix(n['label'])
+            if prefix and len(prefix) >= 3:
+                groups[(n.get('parent', ''), prefix)].append(n)
+
+    clustered_ids = set()
+    cluster_nodes = []
+    cluster_edges = []
+
+    for (parent, prefix), members in groups.items():
+        if len(members) < min_group:
+            continue
+
+        cluster_id = f'{parent}::{prefix}*:cluster'
+        total_tokens = sum(m.get('tokens', 0) for m in members)
+
+        cluster_nodes.append({
+            'id': cluster_id,
+            'label': f'{prefix}* ({len(members)})',
+            'type': 'cluster',
+            'path': parent,
+            'group': members[0].get('group', ''),
+            'tokens': total_tokens,
+            'val': _node_size(total_tokens, False) * 1.5,
+            'parent': parent,
+            'members': [m['id'] for m in members],
+        })
+
+        for m in members:
+            clustered_ids.add(m['id'])
+            cluster_edges.append({
+                'source': cluster_id,
+                'target': m['id'],
+                'kind': 'contains_member',
+                'weight': 0.15,
+            })
+
+    # Build new node list: non-clustered + cluster nodes
+    # Keep clustered members (marked hidden) for edge routing
+    new_nodes = []
+    for n in nodes:
+        if n['id'] in clustered_ids:
+            new_nodes.append({**n, 'clustered': True, 'val': 0.3})
+        else:
+            new_nodes.append(n)
+    new_nodes.extend(cluster_nodes)
+
+    return new_nodes, cluster_edges
+
+
 CODE_EXTENSIONS = {
     '.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb',
     '.java', '.c', '.cpp', '.cs', '.kt', '.scala', '.php',
@@ -362,6 +429,7 @@ kbd {
   <div class="legend-item"><div class="legend-dot" style="background:#2563EB"></div> function</div>
   <div class="legend-item"><div class="legend-dot" style="background:#7C3AED"></div> class / interface</div>
   <div class="legend-item"><div class="legend-dot" style="background:#0D9488"></div> concept</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#F59E0B"></div> cluster</div>
   <div class="legend-item"><div class="legend-dot" style="background:#94A3B8"></div> file</div>
   <h3>Edges</h3>
   <div class="legend-item"><div class="legend-line" style="background:#2563EB"></div> imports</div>
@@ -394,6 +462,7 @@ const nodeColors = {
   function: '#2563EB', method: '#3B82F6',
   class: '#7C3AED', interface: '#7C3AED', type: '#6366F1',
   concept: '#0D9488',
+  cluster: '#F59E0B',
   file: '#94A3B8', other: '#6B7280',
 };
 
@@ -450,7 +519,7 @@ const Graph = ForceGraph3D()
     return nodeColors[n.type] || '#94A3B8';
   })
   .nodeVal(n => n.val || 2)
-  .nodeOpacity(0.92)
+  .nodeOpacity(n => n.clustered ? 0.08 : 0.92)
   .nodeResolution(12)
   .linkColor(l => {
     if (selectedNode && !highlightLinks.has(l)) return 'rgba(203,213,225,0.15)';
@@ -674,6 +743,9 @@ def main():
         print('No files found in index.', file=sys.stderr)
         sys.exit(1)
 
+    # Concept clustering — collapse blob nodes like types.ts with 100+ DTOs
+    nodes, cluster_edges = cluster_by_prefix(nodes, min_group=3)
+
     # Build edges (filter to visible nodes + add containment)
     node_id_set = {n['id'] for n in nodes}
     edges = []
@@ -704,6 +776,9 @@ def main():
         edges.extend(cross_links)
         if cross_links:
             print(f'{len(cross_links)} cross-repo type links', file=sys.stderr)
+
+    # Cluster containment edges
+    edges.extend(cluster_edges)
 
     # Generate HTML
     root_name = Path(index.get('root', 'graph')).name
