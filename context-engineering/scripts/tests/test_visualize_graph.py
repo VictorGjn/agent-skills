@@ -144,3 +144,72 @@ def test_cluster_by_prefix():
 
     # Cluster edges should connect cluster -> member
     assert len(cluster_edges) >= 3
+
+
+def test_full_pipeline_multi_index():
+    """End-to-end: merge two indexes, extract nodes, cluster, cross-link, generate HTML."""
+    from visualize_graph import (
+        merge_indexes, extract_nodes, find_cross_repo_links,
+        cluster_by_prefix, generate_html, score_for_overlay,
+    )
+
+    # Two mini repos with shared DTOs
+    idx_a = {
+        'root': '/repos/fleet',
+        'totalFiles': 1, 'totalTokens': 300,
+        'files': [{
+            'path': 'src/types.ts', 'tokens': 300, 'knowledge_type': 'ground_truth',
+            'tree': {
+                'title': 'src/types.ts', 'depth': 0, 'tokens': 300, 'totalTokens': 300,
+                'text': '', 'firstSentence': '', 'firstParagraph': '',
+                'children': [
+                    {'title': 'type VoyageReport', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                    {'title': 'type VoyageDetail', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                    {'title': 'type VoyageStatus', 'depth': 1, 'tokens': 50, 'totalTokens': 50, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                ],
+            },
+        }],
+        'directories': ['src'],
+    }
+    idx_b = {
+        'root': '/repos/backend',
+        'totalFiles': 1, 'totalTokens': 200,
+        'files': [{
+            'path': 'src/dto.ts', 'tokens': 200, 'knowledge_type': 'ground_truth',
+            'tree': {
+                'title': 'src/dto.ts', 'depth': 0, 'tokens': 200, 'totalTokens': 200,
+                'text': '', 'firstSentence': '', 'firstParagraph': '',
+                'children': [
+                    {'title': 'type VoyageReport', 'depth': 1, 'tokens': 100, 'totalTokens': 100, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+                ],
+            },
+        }],
+        'directories': ['src'],
+    }
+
+    # Merge
+    merged = merge_indexes([idx_a, idx_b])
+    assert merged['totalFiles'] == 2
+
+    # Extract nodes
+    nodes, file_ids = extract_nodes(merged, include_symbols=True)
+    assert len(nodes) >= 6  # 2 files + 4 symbols
+
+    # Cross-repo links
+    cross_links = find_cross_repo_links(nodes)
+    assert len(cross_links) >= 1  # VoyageReport shared
+
+    # Clustering (Voyage* should cluster in fleet)
+    nodes, cluster_edges = cluster_by_prefix(nodes, min_group=3)
+    cluster_ids = [n['id'] for n in nodes if n.get('type') == 'cluster']
+    assert len(cluster_ids) >= 1
+
+    # Score overlay
+    scores = score_for_overlay(merged, 'VoyageReport')
+    assert len(scores) >= 1
+
+    # Generate HTML
+    all_edges = cross_links + cluster_edges
+    html = generate_html(nodes, all_edges, 'Dual Graph', query='VoyageReport', relevance_scores=scores)
+    assert 'VoyageReport' in html
+    assert len(html) > 1000
