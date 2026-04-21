@@ -171,7 +171,15 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
         key=lambda x: x['relevance'], reverse=True,
     )
 
-    results = keyword_winners[:top]
+    # Reserve a small quota for graph-only neighbors so --semantic --graph
+    # (where entry_point_source is already capped at top) still benefits from
+    # graph expansion. Keyword winners always keep the majority of slots.
+    if graph_only and len(keyword_winners) >= top:
+        graph_quota = min(len(graph_only), max(1, top // 5))
+        kw_keep = top - graph_quota
+        return keyword_winners[:kw_keep] + graph_only[:graph_quota]
+
+    results = list(keyword_winners[:top])
     remaining = top - len(results)
     if remaining > 0:
         results.extend(graph_only[:remaining])

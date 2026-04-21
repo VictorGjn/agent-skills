@@ -153,7 +153,6 @@ def parse_code_tree(source: str, content: str, lang: str) -> dict:
     interface, type, etc.) becomes a depth-1 child with its signature as title and
     docstring as text. This makes code files renderable at all 5 depth levels.
     """
-    tokens = estimate_tokens(content)
     counter = [0]
 
     def make_node(title, depth, text='', tok=0):
@@ -178,7 +177,13 @@ def parse_code_tree(source: str, content: str, lang: str) -> dict:
             break
     preview = ' '.join(preview_lines)[:500]
 
-    root = make_node(source, 0, text=content[:1000], tok=tokens)
+    # Root stores a truncated preview (full-depth render caps at 1000 chars),
+    # so its token count must match that truncated text — not the whole file.
+    # Otherwise totalTokens is inflated multi-fold and the packer demotes large
+    # code files under fixed budgets.
+    root_text = content[:1000]
+    root_tokens = estimate_tokens(root_text)
+    root = make_node(source, 0, text=root_text, tok=root_tokens)
     root['firstParagraph'] = preview
     root['firstSentence'] = first_sentence(preview) if preview else ''
 

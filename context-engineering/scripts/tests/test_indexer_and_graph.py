@@ -54,6 +54,20 @@ class ParseCodeTreeTests(unittest.TestCase):
             self.assertIsInstance(child['title'], str)
             self.assertNotEqual(child['title'], '')
 
+    def test_root_tokens_reflect_truncated_text_not_whole_file(self):
+        # Regression for P1: root stores `text = content[:1000]` but previously
+        # counted `tokens = estimate_tokens(content)` (the whole file). On large
+        # files this inflated totalTokens multi-fold and caused the packer to
+        # demote them under fixed budgets.
+        large = ('def f():\n    return 1\n\n' * 2000)  # ~40KB, far above 1000 chars
+        tree = index_workspace.parse_code_tree('large.py', large, 'python')
+        root_own_tokens = tree['tokens']
+        child_tokens = sum(c['totalTokens'] for c in tree['children'])
+        self.assertEqual(tree['totalTokens'], root_own_tokens + child_tokens)
+        # Root's own tokens must be bounded by the 1000-char truncation
+        # (≈ len(text) / 4 + word count). A whole-file estimate would be >> 1000.
+        self.assertLess(root_own_tokens, 1000)
+
 
 class ScannerPruningTests(unittest.TestCase):
     def test_skip_dirs_are_pruned(self):
@@ -84,33 +98,42 @@ class GraphDisplacementTests(unittest.TestCase):
             })
         return {'files': files}
 
-    def test_keyword_winners_preserved_when_graph_boosts_others(self):
-        index = self._make_index()
+    def _make_large_index(self, n):
+        files = []
+        for i in range(n):
+            path = f'f{i:02d}.py'
+            files.append({
+                'path': path, 'tokens': 10, 'tree': {'totalTokens': 10},
+                'knowledge_type': 'evidence', 'headings': [],
+            })
+        return {'files': files}
 
-        # Pretend a/b are strong keyword matches; c/d are graph-only with high relevance.
+    def test_top_keyword_winner_never_displaced(self):
+        # Strong contract: regardless of graph relevance, the highest-scoring
+        # keyword winner is always present in the results.
+        index = self._make_large_index(20)
+
         keyword_scored = [
-            {'path': 'a.py', 'relevance': 0.9, 'tokens': 10, 'tree': {'totalTokens': 10},
-             'knowledge_type': 'evidence'},
-            {'path': 'b.py', 'relevance': 0.8, 'tokens': 10, 'tree': {'totalTokens': 10},
-             'knowledge_type': 'evidence'},
+            {'path': f'f{i:02d}.py', 'relevance': 0.9 - i * 0.05,
+             'tokens': 10, 'tree': {'totalTokens': 10},
+             'knowledge_type': 'evidence'} for i in range(10)
         ]
 
-        # Stub the code_graph functions imported inside score_with_graph.
         import code_graph
         orig_build = code_graph.build_graph_with_fallback
         orig_traverse = code_graph.traverse_from
         orig_entry = code_graph.find_entry_points
         try:
             code_graph.build_graph_with_fallback = lambda files, graphify_path=None: {}
-            code_graph.find_entry_points = lambda scored, threshold=0.3: ['a.py']
+            code_graph.find_entry_points = lambda scored, threshold=0.3: ['f00.py']
             code_graph.traverse_from = lambda entry_points, graph, **kw: [
-                {'path': 'c.py', 'relevance': 0.95, 'reason': 'graph'},
-                {'path': 'd.py', 'relevance': 0.93, 'reason': 'graph'},
+                {'path': f'f{i:02d}.py', 'relevance': 0.99, 'reason': 'graph'}
+                for i in range(10, 20)
             ]
 
             results = pack_context.score_with_graph(
                 index, query_tokens=[], query_lower='',
-                top=2, entry_point_source=keyword_scored,
+                top=10, entry_point_source=keyword_scored,
             )
         finally:
             code_graph.build_graph_with_fallback = orig_build
@@ -118,8 +141,49 @@ class GraphDisplacementTests(unittest.TestCase):
             code_graph.find_entry_points = orig_entry
 
         result_paths = [r['path'] for r in results]
-        # Both keyword winners must remain in top-2 — no displacement by graph-only files.
-        self.assertEqual(result_paths, ['a.py', 'b.py'])
+        # Highest-ranked keyword winner always retained.
+        self.assertEqual(result_paths[0], 'f00.py')
+        # Majority of slots still go to keyword winners (quota <= top // 5 + floor 1).
+        kw_paths = {f'f{i:02d}.py' for i in range(10)}
+        kept = sum(1 for p in result_paths if p in kw_paths)
+        self.assertGreaterEqual(kept, 8)  # 10 - max(1, 10//5) = 8
+
+    def test_graph_only_quota_applied_when_keyword_pool_fills_top(self):
+        # P2 regression: previously `keyword_winners[:top]` starved graph-only
+        # neighbors in --semantic --graph. Now reserve a small quota for them.
+        index = self._make_large_index(20)
+
+        keyword_scored = [
+            {'path': f'f{i:02d}.py', 'relevance': 0.9 - i * 0.05,
+             'tokens': 10, 'tree': {'totalTokens': 10},
+             'knowledge_type': 'evidence'} for i in range(10)
+        ]
+
+        import code_graph
+        orig_build = code_graph.build_graph_with_fallback
+        orig_traverse = code_graph.traverse_from
+        orig_entry = code_graph.find_entry_points
+        try:
+            code_graph.build_graph_with_fallback = lambda files, graphify_path=None: {}
+            code_graph.find_entry_points = lambda scored, threshold=0.3: ['f00.py']
+            code_graph.traverse_from = lambda entry_points, graph, **kw: [
+                {'path': f'f{i:02d}.py', 'relevance': 0.7, 'reason': 'graph'}
+                for i in range(10, 15)
+            ]
+
+            results = pack_context.score_with_graph(
+                index, query_tokens=[], query_lower='',
+                top=10, entry_point_source=keyword_scored,
+            )
+        finally:
+            code_graph.build_graph_with_fallback = orig_build
+            code_graph.traverse_from = orig_traverse
+            code_graph.find_entry_points = orig_entry
+
+        result_paths = [r['path'] for r in results]
+        graph_paths = {f'f{i:02d}.py' for i in range(10, 15)}
+        # At least one graph-only file appears even though keyword pool fills top.
+        self.assertTrue(any(p in graph_paths for p in result_paths))
 
     def test_graph_only_files_fill_remaining_slots(self):
         index = self._make_index()
