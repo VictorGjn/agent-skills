@@ -261,6 +261,19 @@ kbd {
   border-radius: 3px; font-size: 10px; font-family: inherit; color: #64748B;
   background: #F8FAFC;
 }
+#search {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+  background: white; border: 1px solid #E2E8F0; border-radius: 10px;
+  padding: 8px 14px; z-index: 10;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  display: flex; align-items: center; gap: 8px;
+}
+#search-input {
+  border: none; outline: none; font-family: 'Roboto', sans-serif;
+  font-size: 13px; color: #1E293B; width: 200px; background: transparent;
+}
+#search-input::placeholder { color: #94A3B8; }
+#search-info { font-size: 11px; color: #64748B; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -272,6 +285,11 @@ kbd {
   <span class="stat"><b>{{EDGE_COUNT}}</b> edges</span>
   <span class="stat"><b>{{FILE_COUNT}}</b> files</span>
   <span class="stat"><b>{{SYMBOL_COUNT}}</b> symbols</span>
+</div>
+
+<div id="search">
+  <input id="search-input" type="text" placeholder="Search query...">
+  <span id="search-info"></span>
 </div>
 
 <div id="legend">
@@ -434,12 +452,77 @@ Graph.d3Force('link').distance(link =>
 Graph.d3Force('charge').strength(n =>
   n.type === 'file' ? -120 : -40
 );
+
+// ── Query Overlay ──
+const relevanceScores = {{RELEVANCE_SCORES}};
+const initialQuery = {{QUERY}};
+
+function applyRelevanceOverlay(scores) {
+  if (!scores || Object.keys(scores).length === 0) {
+    Graph.nodeColor(n => {
+      if (selectedNode && !highlightNodes.has(n)) return '#E2E8F0';
+      return nodeColors[n.type] || '#94A3B8';
+    });
+    Graph.nodeVal(n => n.val || 2);
+    document.getElementById('search-info').textContent = '';
+    return;
+  }
+  const maxRel = Math.max(...Object.values(scores), 0.01);
+  const matchCount = Object.keys(scores).length;
+  document.getElementById('search-info').textContent = matchCount + ' matches';
+  Graph.nodeColor(n => {
+    const filePath = n.parent || n.id;
+    const rel = scores[filePath] || 0;
+    if (rel > 0) {
+      const t = rel / maxRel;
+      return t > 0.6 ? '#2563EB' : t > 0.3 ? '#0D9488' : '#38BDF8';
+    }
+    return '#E2E8F0';
+  });
+  Graph.nodeVal(n => {
+    const filePath = n.parent || n.id;
+    const rel = scores[filePath] || 0;
+    if (rel > 0) return (n.val || 2) * (1 + rel * 2);
+    return (n.val || 2) * 0.5;
+  });
+}
+
+if (initialQuery) {
+  document.getElementById('search-input').value = initialQuery;
+  applyRelevanceOverlay(relevanceScores);
+}
+
+// Client-side keyword search using existing graph node data
+function clientScore(query) {
+  if (!query || query.trim().length < 2) return {};
+  const terms = query.toLowerCase().split(/\s+/).filter(t => t.length >= 2);
+  const scores = {};
+  graphData.nodes.forEach(n => {
+    const searchable = ((n.path || '') + ' ' + (n.label || '')).toLowerCase();
+    let score = 0;
+    terms.forEach(t => { if (searchable.includes(t)) score += 0.3; });
+    if (score > 0) {
+      const filePath = n.parent || n.id;
+      scores[filePath] = Math.max(scores[filePath] || 0, Math.min(1.0, score));
+    }
+  });
+  return scores;
+}
+
+let searchTimeout;
+document.getElementById('search-input').addEventListener('input', e => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => {
+    const q = e.target.value.trim();
+    applyRelevanceOverlay(q ? clientScore(q) : {});
+  }, 300);
+});
 </script>
 </body>
 </html>"""
 
 
-def generate_html(nodes, edges, title):
+def generate_html(nodes, edges, title, query=None, relevance_scores=None):
     """Fill in the HTML template with graph data."""
     graph_data = {'nodes': nodes, 'links': edges}
 
@@ -453,6 +536,8 @@ def generate_html(nodes, edges, title):
     html = html.replace('{{FILE_COUNT}}', str(file_count))
     html = html.replace('{{SYMBOL_COUNT}}', str(symbol_count))
     html = html.replace('{{GRAPH_DATA}}', json.dumps(graph_data, ensure_ascii=False))
+    html = html.replace('{{QUERY}}', json.dumps(query or ''))
+    html = html.replace('{{RELEVANCE_SCORES}}', json.dumps(relevance_scores or {}, ensure_ascii=False))
 
     return html
 
@@ -472,6 +557,8 @@ def main():
                         help='Output HTML path')
     parser.add_argument('--title', default='Context Engineering Graph',
                         help='Graph title')
+    parser.add_argument('--query', default=None,
+                        help='Overlay relevance scores for a query')
     args = parser.parse_args()
 
     # Locate index
@@ -481,6 +568,12 @@ def main():
     print(f'Reading index: {index_path}', file=sys.stderr)
     with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
+
+    # Query overlay scoring
+    relevance_scores = {}
+    if args.query:
+        relevance_scores = score_for_overlay(index, args.query)
+        print(f'Query "{args.query}": {len(relevance_scores)} matches', file=sys.stderr)
 
     # Auto-detect graphify
     graphify_path = args.graphify
@@ -532,7 +625,7 @@ def main():
     root_name = Path(index.get('root', 'graph')).name
     title = args.title if args.title != 'Context Engineering Graph' else root_name
 
-    html = generate_html(nodes, edges, title)
+    html = generate_html(nodes, edges, title, query=args.query, relevance_scores=relevance_scores)
 
     # Write output
     output_path = args.output or str(script_dir / 'cache' / 'graph.html')

@@ -44,3 +44,21 @@ def test_score_for_overlay():
     scores = score_for_overlay(index, 'auth middleware')
     assert 'src/auth/middleware.ts' in scores
     assert scores['src/auth/middleware.ts'] > 0
+
+
+def test_query_flag_embeds_scores():
+    """When query is provided, HTML should contain relevanceScores JSON."""
+    from visualize_graph import generate_html, extract_nodes
+
+    index = {
+        'files': [
+            {'path': 'auth.ts', 'tokens': 100, 'tree': {'title': 'auth.ts', 'depth': 0, 'tokens': 100, 'totalTokens': 100, 'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+        ]
+    }
+    nodes, _ = extract_nodes(index, include_symbols=False)
+    edges = []
+    scores = {'auth.ts': 0.75}
+    html = generate_html(nodes, edges, 'Test', query='auth', relevance_scores=scores)
+
+    assert 'relevanceScores' in html
+    assert '0.75' in html
