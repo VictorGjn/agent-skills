@@ -16,7 +16,9 @@ Usage:
   #   'end_line': 16, 'exported': True, 'signature': 'resolveEntryPoints(query, graph)',
   #   'docstring': '...'}]
 
-Install: pip install tree-sitter==0.21.3 tree-sitter-languages==1.10.2
+Install: pip install tree-sitter-language-pack  (Python 3.12+)
+     or: pip install tree-sitter==0.21.3 tree-sitter-languages==1.10.2  (Python 3.10–3.11)
+Falls back to regex extraction if neither is installed.
 """
 
 import re
@@ -26,7 +28,12 @@ try:
     from tree_sitter_languages import get_parser
     HAS_TREESITTER = True
 except ImportError:
-    HAS_TREESITTER = False
+    try:
+        # tree_sitter_language_pack is the maintained successor (Python 3.12+)
+        from tree_sitter_language_pack import get_parser
+        HAS_TREESITTER = True
+    except ImportError:
+        HAS_TREESITTER = False
 
 # ── Language mapping ──
 
