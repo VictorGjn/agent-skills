@@ -129,7 +129,11 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
         traversed = traverse_from(entry_points, graph, max_depth=3, max_files=top,
                                    follow_tests=True, follow_docs=True)
 
-    # Phase 5: Merge keyword scores with graph scores
+    # Phase 5: Merge keyword scores with graph scores.
+    # Preserves keyword winners — graph traversal ADDS files, never displaces
+    # high-scoring keyword matches out of the top-N. This avoids the regression
+    # where structurally-related files push keyword-found files out of results.
+    file_map = {f['path']: f for f in index['files']}
     merged = {}
     for s in keyword_scored:
         merged[s['path']] = {**s, 'keyword_rel': s['relevance'], 'graph_rel': 0}
@@ -142,7 +146,7 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
                 min(merged[path]['keyword_rel'], t['relevance']) * 0.3)
             merged[path]['reason'] = t.get('reason', '')
         else:
-            file_entry = next((f for f in index['files'] if f['path'] == path), None)
+            file_entry = file_map.get(path)
             if file_entry:
                 merged[path] = {
                     'path': path,
@@ -155,8 +159,31 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
                     'reason': t.get('reason', ''),
                 }
 
-    results = sorted(merged.values(), key=lambda x: x['relevance'], reverse=True)
-    return results[:top]
+    # Preserve keyword ranking — graph traversal can BOOST relevance (better depth)
+    # but never displace keyword winners. Sort primarily by original keyword_rel
+    # (keeping pure-keyword ordering) with boosted relevance as tiebreaker.
+    keyword_winners = sorted(
+        (merged[s['path']] for s in keyword_scored if s['relevance'] > 0),
+        key=lambda x: (x['keyword_rel'], x['relevance']), reverse=True,
+    )
+    graph_only = sorted(
+        (v for v in merged.values() if v.get('keyword_rel', 0) == 0),
+        key=lambda x: x['relevance'], reverse=True,
+    )
+
+    # Reserve a small quota for graph-only neighbors so --semantic --graph
+    # (where entry_point_source is already capped at top) still benefits from
+    # graph expansion. Keyword winners always keep the majority of slots.
+    if graph_only and len(keyword_winners) >= top:
+        graph_quota = min(len(graph_only), max(1, top // 5))
+        kw_keep = top - graph_quota
+        return keyword_winners[:kw_keep] + graph_only[:graph_quota]
+
+    results = list(keyword_winners[:top])
+    remaining = top - len(results)
+    if remaining > 0:
+        results.extend(graph_only[:remaining])
+    return results
 
 
 # ── Semantic-enhanced scoring ──
