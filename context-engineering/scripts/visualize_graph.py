@@ -223,22 +223,35 @@ def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
     files = index.get('files', [])
 
     if top and len(files) > top:
+        # Check if multi-repo (files have 'repo' field from merge_indexes)
+        repos = set(f.get('repo', '') for f in files)
+        repos.discard('')
+        is_multi = len(repos) > 1
+
         if graph_edges:
-            # Rank files by number of graph connections
             conn_count = defaultdict(int)
             for e in graph_edges:
                 conn_count[e['source'].replace('\\', '/')] += 1
                 conn_count[e['target'].replace('\\', '/')] += 1
-            path_set = {f['path'].replace('\\', '/') for f in files}
-            # Sort by connections (desc), break ties by token count
-            files = sorted(
-                files,
-                key=lambda f: (conn_count.get(f['path'].replace('\\', '/'), 0),
-                               f.get('tokens', 0)),
-                reverse=True,
-            )[:top]
+            sort_key = lambda f: (conn_count.get(f['path'].replace('\\', '/'), 0), f.get('tokens', 0))
         else:
-            files = sorted(files, key=lambda f: f.get('tokens', 0), reverse=True)[:top]
+            sort_key = lambda f: (f.get('tokens', 0), 0)
+
+        if is_multi:
+            # Proportional selection: each repo gets quota based on file count
+            by_repo = defaultdict(list)
+            for f in files:
+                by_repo[f.get('repo', 'unknown')].append(f)
+            selected = []
+            for repo in repos:
+                repo_files = by_repo[repo]
+                quota = max(1, round(top * len(repo_files) / len(files)))
+                repo_sorted = sorted(repo_files, key=sort_key, reverse=True)
+                selected.extend(repo_sorted[:quota])
+            # Trim to exact top if rounding gave us extra
+            files = sorted(selected, key=sort_key, reverse=True)[:top]
+        else:
+            files = sorted(files, key=sort_key, reverse=True)[:top]
 
     for f in files:
         path = f['path'].replace('\\', '/')
