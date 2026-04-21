@@ -5,7 +5,7 @@ Reusable skills for AI coding agents. Works with Claude Code, Cursor, Sauna, or 
 ## Skills
 
 ### [context-engineering](./context-engineering/)
-Pack 40+ files at 5 depth levels into any LLM context window. Keyword, semantic, and graph resolution. 100% recall at 1% of repo token cost.
+Pack 40+ files at 5 depth levels into any LLM context window. Indexes markdown + 14 code languages (tree-sitter AST). Keyword, semantic, and graph resolution with Graphify integration. Anti-hallucination filters and task-type presets.
 
 ### [knowledge-dream](./knowledge-dream/)
 Periodic knowledge consolidation. 4-phase process (Orient → Gather → Consolidate → Prune) that synthesizes scattered project learnings into durable memory files. Run manually, as a slash command, or via cron. Inspired by Claude Code's autoDream engine.
