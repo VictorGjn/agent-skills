@@ -437,7 +437,7 @@ kbd {
   <div class="legend-item"><div class="legend-line" style="background:#7C3AED"></div> extends</div>
   <div class="legend-item"><div class="legend-line" style="background:#10B981"></div> tests</div>
   <div class="legend-item"><div class="legend-line" style="background:#F59E0B"></div> documents</div>
-  <div class="legend-item"><div class="legend-line" style="background:#F59E0B"></div> shared type</div>
+  <div class="legend-item"><div class="legend-line" style="background:#EF4444"></div> shared type</div>
 </div>
 
 <div id="detail">
@@ -474,7 +474,7 @@ const edgeColors = {
   contains: '#D1D5DB', related: '#CBD5E1',
   configured_by: '#94A3B8', depends_on: '#94A3B8',
   co_located: '#E2E8F0', defined_in: '#CBD5E1',
-  shared_type: '#F59E0B',
+  shared_type: '#EF4444',
 };
 
 // Pre-build adjacency for detail panel

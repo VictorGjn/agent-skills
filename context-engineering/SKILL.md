@@ -108,6 +108,12 @@ The full index adds the complete heading tree with text content, first sentences
 # 3D force-directed graph — opens in any browser
 python3 scripts/visualize_graph.py --top 50
 
+# With query overlay — shows how the packer "sees" the codebase
+python3 scripts/visualize_graph.py --top 80 --query "authentication"
+
+# Dual graph — two repos with cross-repo DTO linking
+python3 scripts/visualize_graph.py --multi-index cache/fleet-index.json cache/backend-index.json --top 100
+
 # File-level only (no symbols), custom output path
 python3 scripts/visualize_graph.py --no-symbols -o my-graph.html
 
@@ -115,7 +121,11 @@ python3 scripts/visualize_graph.py --no-symbols -o my-graph.html
 python3 scripts/visualize_graph.py --graphify graphify-out/graph.json
 ```
 
-Outputs a standalone `graph.html` — zero dependencies, interactive 3D visualization (Three.js). Functions are blue, classes purple, concepts teal, files gray. Click nodes for details, drag to orbit, scroll to zoom.
+Outputs a standalone `graph.html` — zero dependencies, interactive 3D visualization (Three.js). Functions are blue, classes purple, concepts teal, clusters amber, files gray. Click nodes to highlight connections and dim unrelated nodes. Search bar for live keyword filtering. Drag to orbit, scroll to zoom.
+
+**Query overlay** (`--query`): Runs the pack_context scoring pipeline and color-codes nodes by relevance — ocean blue (high), teal (medium), sky blue (low), gray (unmatched). The in-browser search bar re-scores client-side for instant feedback.
+
+**Dual graph** (`--multi-index`): Merges multiple workspace indexes with repo-prefixed paths. Automatically detects shared types across repos (e.g., matching DTOs) and draws amber cross-repo links. Concept clustering groups symbols by CamelCase prefix (Voyage*, Fleet*) to break up blob nodes.
 
 If [Graphify](https://github.com/safishamsi/graphify) has been run in the workspace, `--graph` auto-detects `graphify-out/graph.json` and uses its richer call graphs, inheritance, and cross-language edges.
 
