@@ -44,6 +44,71 @@ def score_for_overlay(index: dict, query: str) -> dict:
     return scores
 
 
+def merge_indexes(indexes: list) -> dict:
+    """Merge multiple workspace indexes into one, prefixing paths with repo name."""
+    merged_files = []
+    total_tokens = 0
+    dirs = set()
+
+    for idx in indexes:
+        root = idx.get('root', 'unknown')
+        repo_name = Path(root).name
+        for f in idx.get('files', []):
+            new_path = f'{repo_name}/{f["path"]}'.replace('\\', '/')
+            new_file = {**f, 'path': new_path, 'repo': repo_name}
+            if 'tree' in new_file and new_file['tree']:
+                new_file['tree'] = {**new_file['tree'], 'title': new_path}
+            merged_files.append(new_file)
+            total_tokens += f.get('tokens', 0)
+        for d in idx.get('directories', []):
+            dirs.add(f'{repo_name}/{d}')
+
+    return {
+        'root': 'multi-repo',
+        'totalFiles': len(merged_files),
+        'totalTokens': total_tokens,
+        'files': merged_files,
+        'directories': sorted(dirs),
+    }
+
+
+def find_cross_repo_links(nodes: list) -> list:
+    """Find symbol nodes with the same label across different repos.
+
+    Creates 'shared_type' edges between matching DTOs/types/classes
+    in different repositories.
+    """
+    by_label = defaultdict(list)
+    for n in nodes:
+        if n.get('type') in ('type', 'class', 'interface', 'enum'):
+            by_label[n['label']].append(n)
+
+    links = []
+    for label, group in by_label.items():
+        if len(group) < 2:
+            continue
+        repos = set()
+        for n in group:
+            parts = n['path'].split('/')
+            if len(parts) >= 2:
+                repos.add(parts[0])
+        if len(repos) < 2:
+            continue
+
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                repo_i = group[i]['path'].split('/')[0]
+                repo_j = group[j]['path'].split('/')[0]
+                if repo_i != repo_j:
+                    links.append({
+                        'source': group[i]['id'],
+                        'target': group[j]['id'],
+                        'kind': 'shared_type',
+                        'weight': 0.8,
+                    })
+    return links
+
+
 CODE_EXTENSIONS = {
     '.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb',
     '.java', '.c', '.cpp', '.cs', '.kt', '.scala', '.php',
@@ -304,6 +369,7 @@ kbd {
   <div class="legend-item"><div class="legend-line" style="background:#7C3AED"></div> extends</div>
   <div class="legend-item"><div class="legend-line" style="background:#10B981"></div> tests</div>
   <div class="legend-item"><div class="legend-line" style="background:#F59E0B"></div> documents</div>
+  <div class="legend-item"><div class="legend-line" style="background:#F59E0B"></div> shared type</div>
 </div>
 
 <div id="detail">
@@ -339,6 +405,7 @@ const edgeColors = {
   contains: '#D1D5DB', related: '#CBD5E1',
   configured_by: '#94A3B8', depends_on: '#94A3B8',
   co_located: '#E2E8F0', defined_in: '#CBD5E1',
+  shared_type: '#F59E0B',
 };
 
 // Pre-build adjacency for detail panel
@@ -559,15 +626,25 @@ def main():
                         help='Graph title')
     parser.add_argument('--query', default=None,
                         help='Overlay relevance scores for a query')
+    parser.add_argument('--multi-index', nargs='+', default=None,
+                        help='Multiple workspace-index.json paths to merge')
     args = parser.parse_args()
 
-    # Locate index
+    # Load index (single or multi)
     script_dir = Path(__file__).resolve().parent.parent
-    index_path = args.index or str(script_dir / 'cache' / 'workspace-index.json')
-
-    print(f'Reading index: {index_path}', file=sys.stderr)
-    with open(index_path, encoding='utf-8') as f:
-        index = json.load(f)
+    if args.multi_index:
+        indexes = []
+        for path in args.multi_index:
+            print(f'Reading index: {path}', file=sys.stderr)
+            with open(path, encoding='utf-8') as f:
+                indexes.append(json.load(f))
+        index = merge_indexes(indexes)
+        print(f'Merged {len(indexes)} indexes: {index["totalFiles"]} files', file=sys.stderr)
+    else:
+        index_path = args.index or str(script_dir / 'cache' / 'workspace-index.json')
+        print(f'Reading index: {index_path}', file=sys.stderr)
+        with open(index_path, encoding='utf-8') as f:
+            index = json.load(f)
 
     # Query overlay scoring
     relevance_scores = {}
@@ -620,6 +697,13 @@ def main():
                 'kind': 'contains',
                 'weight': 0.1,
             })
+
+    # Cross-repo DTO linking
+    if args.multi_index:
+        cross_links = find_cross_repo_links(nodes)
+        edges.extend(cross_links)
+        if cross_links:
+            print(f'{len(cross_links)} cross-repo type links', file=sys.stderr)
 
     # Generate HTML
     root_name = Path(index.get('root', 'graph')).name
