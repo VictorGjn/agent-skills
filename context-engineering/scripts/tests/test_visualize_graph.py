@@ -21,3 +21,26 @@ def test_adjacency_built_from_edges():
 
     assert '"source": "a.ts"' in html or '"source":"a.ts"' in html
     assert 'highlightNodes' in html
+
+
+def test_score_for_overlay():
+    """score_for_overlay returns {path: relevance} dict."""
+    from visualize_graph import score_for_overlay
+
+    index = {
+        'files': [
+            {'path': 'src/auth/middleware.ts', 'tokens': 200,
+             'tree': {'title': 'src/auth/middleware.ts', 'depth': 0, 'tokens': 200, 'totalTokens': 200,
+                      'children': [{'title': 'authMiddleware', 'depth': 1, 'tokens': 100, 'totalTokens': 100,
+                                    'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}],
+                      'text': '', 'firstSentence': '', 'firstParagraph': ''},
+             'knowledge_type': 'ground_truth'},
+            {'path': 'README.md', 'tokens': 50,
+             'tree': {'title': 'README.md', 'depth': 0, 'tokens': 50, 'totalTokens': 50,
+                      'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+             'knowledge_type': 'artifact'},
+        ]
+    }
+    scores = score_for_overlay(index, 'auth middleware')
+    assert 'src/auth/middleware.ts' in scores
+    assert scores['src/auth/middleware.ts'] > 0

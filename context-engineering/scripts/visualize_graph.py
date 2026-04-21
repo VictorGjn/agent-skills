@@ -24,6 +24,24 @@ from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).parent))
 from code_graph import build_graph, build_graph_with_fallback
+from pack_context_lib import tokenize_query, score_file
+
+
+def score_for_overlay(index: dict, query: str) -> dict:
+    """Score all files against query, return {path: relevance} dict.
+
+    Used by --query flag to overlay relevance on the graph,
+    and embedded as JSON in the HTML for the search bar.
+    """
+    query_tokens = tokenize_query(query)
+    query_lower = query.lower()
+    scores = {}
+    for f in index.get('files', []):
+        rel = score_file(f, query_tokens, query_lower)
+        if rel > 0:
+            path = f['path'].replace('\\', '/')
+            scores[path] = round(rel, 4)
+    return scores
 
 
 CODE_EXTENSIONS = {
