@@ -310,6 +310,8 @@ Exposes tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings
 | `code_graph.py` | Import/dependency graph + BFS traversal + task presets |
 | `graphify_adapter.py` | Converts Graphify graph.json to code_graph format |
 | `visualize_graph.py` | 3D force-directed graph visualization → HTML |
+| `feature_map.py` | Bird's-eye feature map: community detection → D3 2D SVG |
+| `community_detect.py` | Label propagation community detection (pure Python) |
 | `embed_resolve.py` | Embedding resolver: build, resolve, hybrid |
 | `embeddingResolver.ts` | TypeScript port for Node.js agents |
 | `mcp_server.py` | MCP server (stdio + HTTP + optional auth) |
