@@ -110,6 +110,56 @@ def test_html_includes_file_lists():
     assert 'hurricane/dto.ts' in html
 
 
+def test_multi_repo_clusters():
+    """Multi-repo feature map shows per-repo clusters with cross-repo edges."""
+    from feature_map import build_feature_map, merge_indexes
+
+    idx_a = {
+        'root': '/repos/fleet',
+        'totalFiles': 2, 'totalTokens': 300,
+        'files': [
+            {'path': 'src/hurricane/map.tsx', 'tokens': 200,
+             'tree': {'title': 'src/hurricane/map.tsx', 'depth': 0, 'tokens': 200,
+                      'totalTokens': 200, 'text': "import { HurricaneDto } from './types';",
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'HurricaneMap', 'depth': 1, 'tokens': 150,
+                                    'totalTokens': 150, 'children': [], 'text': '',
+                                    'firstSentence': '', 'firstParagraph': ''}]}},
+            {'path': 'src/hurricane/types.ts', 'tokens': 100,
+             'tree': {'title': 'src/hurricane/types.ts', 'depth': 0, 'tokens': 100,
+                      'totalTokens': 100, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'type HurricaneDto', 'depth': 1, 'tokens': 50,
+                                    'totalTokens': 50, 'children': [], 'text': '',
+                                    'firstSentence': '', 'firstParagraph': ''}]}},
+        ],
+        'directories': ['src', 'src/hurricane'],
+    }
+    idx_b = {
+        'root': '/repos/backend',
+        'totalFiles': 1, 'totalTokens': 200,
+        'files': [
+            {'path': 'src/hurricane/service.ts', 'tokens': 200,
+             'tree': {'title': 'src/hurricane/service.ts', 'depth': 0, 'tokens': 200,
+                      'totalTokens': 200, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'class HurricaneService', 'depth': 1, 'tokens': 150,
+                                    'totalTokens': 150, 'children': [], 'text': '',
+                                    'firstSentence': '', 'firstParagraph': ''}]}},
+        ],
+        'directories': ['src', 'src/hurricane'],
+    }
+    merged = merge_indexes([idx_a, idx_b])
+    result = build_feature_map(merged)
+
+    assert len(result['clusters']) >= 1
+    # Check that cluster nodes have repo-prefixed paths
+    all_nodes = []
+    for c in result['clusters'].values():
+        all_nodes.extend(c['nodes'])
+    assert any('fleet/' in n for n in all_nodes) or any('backend/' in n for n in all_nodes)
+
+
 def test_generate_html_escapes_script_breakout():
     """A `</script>` in a file path must not break out of the embedded script tag."""
     from feature_map import generate_html

@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -20,6 +21,34 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from code_graph import build_graph_with_fallback
 from community_detect import build_meta_graph, label_clusters, label_propagation
+
+
+def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge multiple workspace indexes into one, prefixing paths with repo name."""
+    merged_files = []
+    total_tokens = 0
+    dirs = set()
+
+    for idx in indexes:
+        root = idx.get('root', 'unknown')
+        repo_name = Path(root).name
+        for f in idx.get('files', []):
+            new_path = f'{repo_name}/{f["path"]}'.replace('\\', '/')
+            new_file = {**f, 'path': new_path, 'repo': repo_name}
+            if 'tree' in new_file and new_file['tree']:
+                new_file['tree'] = {**new_file['tree'], 'title': new_path}
+            merged_files.append(new_file)
+            total_tokens += f.get('tokens', 0)
+        for d in idx.get('directories', []):
+            dirs.add(f'{repo_name}/{d}')
+
+    return {
+        'root': 'multi-repo',
+        'totalFiles': len(merged_files),
+        'totalTokens': total_tokens,
+        'files': merged_files,
+        'directories': sorted(dirs),
+    }
 
 
 def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -> dict[str, Any]:
@@ -422,3 +451,73 @@ def generate_html(feature_data: dict[str, Any], title: str) -> str:
         .replace('__TITLE__', safe_title)
         .replace('__GRAPH_DATA__', graph_json)
     )
+
+
+def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[str, Any]:
+    """Drop clusters smaller than min_cluster and any meta_edges referencing them."""
+    clusters = feature_data.get('clusters', {})
+    kept = {k: v for k, v in clusters.items() if v.get('file_count', 0) >= min_cluster}
+    kept_keys = set(kept.keys())
+    meta_edges = [
+        e for e in feature_data.get('meta_edges', [])
+        if e.get('source') in kept_keys and e.get('target') in kept_keys
+    ]
+    labels = feature_data.get('cluster_labels', {})
+    return {
+        **feature_data,
+        'clusters': kept,
+        'meta_edges': meta_edges,
+        'cluster_labels': {k: v for k, v in labels.items() if k in kept_keys},
+    }
+
+
+def _load_index(path: str) -> dict[str, Any]:
+    with open(path, encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+def _resolve_index_and_defaults(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], str, str]:
+    """Return (index, title, output_path) based on args, with sensible defaults."""
+    if args.multi_index:
+        indexes = [_load_index(p) for p in args.multi_index]
+        index = merge_indexes(indexes)
+        title = args.title or 'Multi-Repo Feature Map'
+        output = args.output or 'cache/multi-repo-features.html'
+        return index, title, output
+
+    index_path = args.index or 'cache/workspace-index.json'
+    index = _load_index(index_path)
+    repo_name = Path(index.get('root', '')).name or 'Feature Map'
+    title = args.title or repo_name
+    output = args.output or 'cache/feature-map.html'
+    return index, title, output
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Bird's-eye feature map of a codebase.")
+    parser.add_argument('--index', default=None, help='Path to workspace-index.json')
+    parser.add_argument('--multi-index', nargs='+', default=None, help='Multiple indexes to merge')
+    parser.add_argument('--graphify', default=None, help='Path to graphify graph.json')
+    parser.add_argument('-o', '--output', default=None, help='Output HTML path')
+    parser.add_argument('--title', default=None, help='Graph title')
+    parser.add_argument('--min-cluster', type=int, default=2, help='Min files per cluster')
+    args = parser.parse_args()
+
+    index, title, output = _resolve_index_and_defaults(args)
+    feature_data = build_feature_map(index, args.graphify)
+    feature_data = _apply_min_cluster(feature_data, args.min_cluster)
+
+    html = generate_html(feature_data, title)
+    out_path = Path(output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding='utf-8')
+
+    clusters = feature_data.get('clusters', {})
+    file_count = sum(c.get('file_count', 0) for c in clusters.values())
+    print(f'Feature map: {len(clusters)} clusters, {file_count} files -> {out_path}')
+
+
+if __name__ == '__main__':
+    main()
