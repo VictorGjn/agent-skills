@@ -164,7 +164,6 @@ def label_clusters(
         for path in nodes:
             normalized = path.replace('\\', '/')
             parts = normalized.rsplit('/', 1)
-            # parent segment: take the last component of the directory portion
             if len(parts) == 2:
                 dir_name = parts[0].rsplit('/', 1)[-1]
             else:
@@ -188,14 +187,14 @@ def label_clusters(
 
         if all_symbols:
             sym_counts: Counter[str] = Counter(all_symbols)
-            top_symbols = [s for s, _ in sorted(sym_counts.most_common(2), key=lambda x: (-x[1], x[0]))]
+            top_symbols = [s for s, _ in sorted(sym_counts.items(), key=lambda x: (-x[1], x[0]))[:2]]
             result[label] = ', '.join(top_symbols)
             continue
 
         # --- Knowledge-base (headings) fallback ---
         if all_headings:
             heading_counts: Counter[str] = Counter(all_headings)
-            top_headings = [h for h, _ in heading_counts.most_common(2)]
+            top_headings = [h for h, _ in sorted(heading_counts.items(), key=lambda x: (-x[1], x[0]))[:2]]
             result[label] = ', '.join(top_headings)
             continue
 

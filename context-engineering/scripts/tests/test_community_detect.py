@@ -169,16 +169,74 @@ def test_label_clusters_by_directory():
 
 
 def test_label_clusters_by_symbols():
-    """Cluster without clear directory → use top symbol names."""
+    """Cluster without clear directory → use top symbol names (highest count wins)."""
     from community_detect import label_clusters
 
     clusters = {
         0: {'nodes': ['src/auth/login.ts', 'src/middleware/jwt.ts', 'src/routes/auth.ts']},
     }
+    # 'verifyJwt' appears twice — should be the top pick.
     file_data = {
-        'src/auth/login.ts': {'symbols': ['loginUser', 'validateCredentials']},
+        'src/auth/login.ts': {'symbols': ['loginUser', 'verifyJwt']},
         'src/middleware/jwt.ts': {'symbols': ['verifyJwt', 'createToken']},
         'src/routes/auth.ts': {'symbols': ['authRouter']},
     }
     labels = label_clusters(clusters, file_data)
-    assert len(labels[0]) > 0  # should have a meaningful name
+    # Top symbol (count=2) must be first; remaining three tie at count=1,
+    # alphabetical tie-break puts 'authRouter' second.
+    assert labels[0] == 'verifyJwt, authRouter'
+
+
+def test_label_clusters_by_headings():
+    """Cluster with no clear dir and empty symbols → use top heading terms."""
+    from community_detect import label_clusters
+
+    clusters = {
+        0: {'nodes': ['a/intro.md', 'b/guide.md', 'c/ref.md']},
+    }
+    file_data = {
+        'a/intro.md': {'symbols': [], 'headings': ['Getting Started', 'Overview']},
+        'b/guide.md': {'symbols': [], 'headings': ['Getting Started']},
+        'c/ref.md': {'symbols': [], 'headings': ['Reference']},
+    }
+    labels = label_clusters(clusters, file_data)
+    assert 'Getting Started' in labels[0]
+
+
+def test_label_clusters_empty_cluster():
+    """A cluster with no nodes falls back to 'Cluster {label}'."""
+    from community_detect import label_clusters
+
+    clusters = {7: {'nodes': []}}
+    labels = label_clusters(clusters, {})
+    assert labels[7] == 'Cluster 7'
+
+
+def test_label_clusters_missing_file_data():
+    """Nodes present but file_data has no entries for them → final fallback, no crash."""
+    from community_detect import label_clusters
+
+    clusters = {
+        3: {'nodes': ['orphan1.xyz', 'orphan2.xyz']},
+    }
+    labels = label_clusters(clusters, {})
+    # No directory prefix (no '/'), no symbols, no headings → final fallback.
+    assert labels[3] == 'Cluster 3'
+
+
+def test_label_clusters_symbol_tiebreak_deterministic():
+    """When two symbols tie for top frequency, alphabetical order decides."""
+    from community_detect import label_clusters
+
+    clusters = {
+        0: {'nodes': ['x/a.ts', 'y/b.ts']},
+    }
+    # 'alpha' and 'zeta' both appear twice — 'alpha' must win on tie-break.
+    file_data = {
+        'x/a.ts': {'symbols': ['zeta', 'alpha']},
+        'y/b.ts': {'symbols': ['alpha', 'zeta']},
+    }
+    first = label_clusters(clusters, file_data)
+    second = label_clusters(clusters, file_data)
+    assert first == second
+    assert first[0] == 'alpha, zeta'
