@@ -54,4 +54,17 @@ def test_pipeline_produces_meta_graph():
     assert 'clusters' in result
     assert 'meta_edges' in result
     assert 'cluster_labels' in result
+    assert 'node_labels' in result
     assert len(result['clusters']) >= 1  # at least 1 cluster
+
+    for cluster in result['clusters'].values():
+        assert 'label' in cluster
+        assert 'file_count' in cluster
+        assert 'total_tokens' in cluster
+        assert cluster['total_tokens'] > 0
+        assert cluster['file_count'] == len(cluster['nodes'])
+
+    assert len(result['node_labels']) >= 1
+    input_paths = {f['path'].replace('\\', '/') for f in index['files']}
+    node_label_keys = set(result['node_labels'].keys())
+    assert input_paths & node_label_keys, 'input paths should appear as keys in node_labels'

@@ -29,22 +29,21 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
     meta = build_meta_graph(labels, graph['edges'])
 
     file_data: dict[str, dict[str, Any]] = {}
+    path_tokens: dict[str, int] = {}
     for f in files:
         path = f['path'].replace('\\', '/')
         tree = f.get('tree', {})
         symbols = [c.get('title', '') for c in tree.get('children', []) if c.get('title')]
         headings = [h.get('title', '') for h in f.get('headings', [])]
         file_data[path] = {'symbols': symbols, 'headings': headings}
+        path_tokens[path] = f.get('tokens', 0)
 
     cluster_labels = label_clusters(meta['clusters'], file_data)
 
     for label, cluster in meta['clusters'].items():
         cluster['label'] = cluster_labels.get(label, f'Cluster {label}')
         cluster['file_count'] = len(cluster['nodes'])
-        cluster['total_tokens'] = sum(
-            next((f['tokens'] for f in files if f['path'].replace('\\', '/') == n), 0)
-            for n in cluster['nodes']
-        )
+        cluster['total_tokens'] = sum(path_tokens.get(n, 0) for n in cluster['nodes'])
 
     return {
         'clusters': meta['clusters'],
