@@ -11,7 +11,7 @@ Algorithm:
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 import random
 
@@ -129,3 +129,76 @@ def build_meta_graph(labels: dict[str, int], edges: list[dict[str, Any]]) -> dic
         meta_edges.append({'source': s, 'target': t, 'weight': count})
 
     return {'clusters': dict(clusters), 'meta_edges': meta_edges}
+
+
+def label_clusters(
+    clusters: dict[int, dict[str, Any]],
+    file_data: dict[str, dict[str, Any]],
+) -> dict[int, str]:
+    """Assign human-readable labels to clusters.
+
+    Strategy (in priority order):
+    1. If >=70% of files share a directory prefix (and count >= 2) → directory name.
+    2. Otherwise → top 2 symbol names by frequency.
+    3. For doc-only clusters → top 2 heading titles by frequency.
+    4. Final fallback → "Cluster {label}".
+
+    Args:
+        clusters: {label: {'nodes': [path, ...]}} from build_meta_graph
+        file_data: {path: {'symbols': [...], 'headings': [...]}} from workspace index
+
+    Returns:
+        {label: human_readable_name}
+    """
+    result: dict[int, str] = {}
+
+    for label, data in clusters.items():
+        nodes: list[str] = data.get('nodes', [])
+
+        if not nodes:
+            result[label] = f"Cluster {label}"
+            continue
+
+        # --- Directory prefix strategy ---
+        dir_counts: Counter[str] = Counter()
+        for path in nodes:
+            normalized = path.replace('\\', '/')
+            parts = normalized.rsplit('/', 1)
+            # parent segment: take the last component of the directory portion
+            if len(parts) == 2:
+                dir_name = parts[0].rsplit('/', 1)[-1]
+            else:
+                dir_name = ''
+            if dir_name:
+                dir_counts[dir_name] += 1
+
+        if dir_counts:
+            top_dir, top_count = dir_counts.most_common(1)[0]
+            if top_count >= 2 and top_count >= 0.7 * len(nodes):
+                result[label] = top_dir.lower()
+                continue
+
+        # --- Symbol fallback ---
+        all_symbols: list[str] = []
+        all_headings: list[str] = []
+        for path in nodes:
+            entry = file_data.get(path, {})
+            all_symbols.extend(entry.get('symbols', []))
+            all_headings.extend(entry.get('headings', []))
+
+        if all_symbols:
+            sym_counts: Counter[str] = Counter(all_symbols)
+            top_symbols = [s for s, _ in sorted(sym_counts.most_common(2), key=lambda x: (-x[1], x[0]))]
+            result[label] = ', '.join(top_symbols)
+            continue
+
+        # --- Knowledge-base (headings) fallback ---
+        if all_headings:
+            heading_counts: Counter[str] = Counter(all_headings)
+            top_headings = [h for h, _ in heading_counts.most_common(2)]
+            result[label] = ', '.join(top_headings)
+            continue
+
+        result[label] = f"Cluster {label}"
+
+    return result

@@ -148,3 +148,37 @@ def test_determinism():
     r1 = label_propagation(edges, seed=42)
     r2 = label_propagation(edges, seed=42)
     assert r1 == r2
+
+
+def test_label_clusters_by_directory():
+    """Cluster where most files share a directory gets that directory as label."""
+    from community_detect import label_clusters
+
+    clusters = {
+        0: {'nodes': ['src/hurricane/service.ts', 'src/hurricane/controller.ts',
+                       'src/hurricane/dto.ts', 'src/shared/utils.ts']},
+    }
+    file_data = {
+        'src/hurricane/service.ts': {'symbols': ['HurricaneService', 'fetchWeather']},
+        'src/hurricane/controller.ts': {'symbols': ['HurricaneController']},
+        'src/hurricane/dto.ts': {'symbols': ['HurricaneDto', 'HurricaneAlert']},
+        'src/shared/utils.ts': {'symbols': ['formatDate']},
+    }
+    labels = label_clusters(clusters, file_data)
+    assert 'hurricane' in labels[0].lower()
+
+
+def test_label_clusters_by_symbols():
+    """Cluster without clear directory → use top symbol names."""
+    from community_detect import label_clusters
+
+    clusters = {
+        0: {'nodes': ['src/auth/login.ts', 'src/middleware/jwt.ts', 'src/routes/auth.ts']},
+    }
+    file_data = {
+        'src/auth/login.ts': {'symbols': ['loginUser', 'validateCredentials']},
+        'src/middleware/jwt.ts': {'symbols': ['verifyJwt', 'createToken']},
+        'src/routes/auth.ts': {'symbols': ['authRouter']},
+    }
+    labels = label_clusters(clusters, file_data)
+    assert len(labels[0]) > 0  # should have a meaningful name
