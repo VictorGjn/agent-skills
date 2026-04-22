@@ -68,3 +68,43 @@ def test_pipeline_produces_meta_graph():
     input_paths = {f['path'].replace('\\', '/') for f in index['files']}
     node_label_keys = set(result['node_labels'].keys())
     assert input_paths & node_label_keys, 'input paths should appear as keys in node_labels'
+
+
+def test_generate_html():
+    """generate_html produces valid HTML with D3 graph data."""
+    from feature_map import generate_html
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'Hurricane', 'nodes': ['a.ts', 'b.ts'],
+                'file_count': 2, 'total_tokens': 300, 'internal_edges': 1},
+            1: {'label': 'Voyage', 'nodes': ['c.ts', 'd.ts'],
+                'file_count': 2, 'total_tokens': 400, 'internal_edges': 1},
+        },
+        'meta_edges': [{'source': 0, 'target': 1, 'weight': 2}],
+        'cluster_labels': {0: 'Hurricane', 1: 'Voyage'},
+    }
+    html = generate_html(feature_data, 'Test Repo')
+
+    assert '<!DOCTYPE html>' in html
+    assert 'd3.js' in html or 'd3@' in html or 'd3.v' in html
+    assert 'Hurricane' in html
+    assert 'Voyage' in html
+    assert '<svg' in html or 'createSvg' in html or 'svg' in html.lower()
+
+
+def test_html_includes_file_lists():
+    """HTML embeds per-cluster file lists for the detail panel."""
+    from feature_map import generate_html
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'Hurricane', 'nodes': ['src/hurricane/service.ts', 'src/hurricane/dto.ts'],
+                'file_count': 2, 'total_tokens': 300, 'internal_edges': 1},
+        },
+        'meta_edges': [],
+        'cluster_labels': {0: 'Hurricane'},
+    }
+    html = generate_html(feature_data, 'Test')
+    assert 'hurricane/service.ts' in html
+    assert 'hurricane/dto.ts' in html
