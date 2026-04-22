@@ -137,14 +137,21 @@ def test_multi_repo_clusters():
     }
     idx_b = {
         'root': '/repos/backend',
-        'totalFiles': 1, 'totalTokens': 200,
+        'totalFiles': 2, 'totalTokens': 300,
         'files': [
             {'path': 'src/hurricane/service.ts', 'tokens': 200,
              'tree': {'title': 'src/hurricane/service.ts', 'depth': 0, 'tokens': 200,
-                      'totalTokens': 200, 'text': '',
+                      'totalTokens': 200, 'text': "import { HurricaneDto } from './dto';",
                       'firstSentence': '', 'firstParagraph': '',
                       'children': [{'title': 'class HurricaneService', 'depth': 1, 'tokens': 150,
                                     'totalTokens': 150, 'children': [], 'text': '',
+                                    'firstSentence': '', 'firstParagraph': ''}]}},
+            {'path': 'src/hurricane/dto.ts', 'tokens': 100,
+             'tree': {'title': 'src/hurricane/dto.ts', 'depth': 0, 'tokens': 100,
+                      'totalTokens': 100, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'type HurricaneDto', 'depth': 1, 'tokens': 50,
+                                    'totalTokens': 50, 'children': [], 'text': '',
                                     'firstSentence': '', 'firstParagraph': ''}]}},
         ],
         'directories': ['src', 'src/hurricane'],
@@ -157,7 +164,61 @@ def test_multi_repo_clusters():
     all_nodes = []
     for c in result['clusters'].values():
         all_nodes.extend(c['nodes'])
-    assert any('fleet/' in n for n in all_nodes) or any('backend/' in n for n in all_nodes)
+    assert any('fleet/' in n for n in all_nodes) and any('backend/' in n for n in all_nodes)
+
+
+def test_apply_min_cluster_drops_small_and_orphans():
+    """_apply_min_cluster drops undersized clusters, their edges, labels, and node_labels."""
+    from feature_map import _apply_min_cluster
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'Big', 'nodes': ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'],
+                'file_count': 5, 'total_tokens': 500, 'internal_edges': 4},
+            1: {'label': 'Mid', 'nodes': ['f.ts', 'g.ts'],
+                'file_count': 2, 'total_tokens': 200, 'internal_edges': 1},
+            2: {'label': 'Tiny', 'nodes': ['h.ts'],
+                'file_count': 1, 'total_tokens': 50, 'internal_edges': 0},
+        },
+        'meta_edges': [
+            {'source': 0, 'target': 1, 'weight': 3},
+            {'source': 1, 'target': 2, 'weight': 1},
+        ],
+        'cluster_labels': {0: 'Big', 1: 'Mid', 2: 'Tiny'},
+        'node_labels': {
+            'a.ts': 0, 'b.ts': 0, 'c.ts': 0, 'd.ts': 0, 'e.ts': 0,
+            'f.ts': 1, 'g.ts': 1,
+            'h.ts': 2,
+        },
+        'root': '/repos/test',
+    }
+
+    result = _apply_min_cluster(feature_data, 2)
+
+    # Tiny cluster dropped, Big and Mid remain
+    assert 2 not in result['clusters']
+    assert 0 in result['clusters']
+    assert 1 in result['clusters']
+
+    # Edge referencing dropped cluster is gone; edge between kept clusters remains
+    assert {'source': 0, 'target': 1, 'weight': 3} in result['meta_edges']
+    assert all(e.get('target') != 2 and e.get('source') != 2 for e in result['meta_edges'])
+
+    # cluster_labels pruned
+    assert 2 not in result['cluster_labels']
+    assert result['cluster_labels'][0] == 'Big'
+    assert result['cluster_labels'][1] == 'Mid'
+
+    # node_labels no longer references files in the dropped cluster
+    assert 'h.ts' not in result['node_labels']
+    assert result['node_labels']['a.ts'] == 0
+    assert result['node_labels']['f.ts'] == 1
+
+    # Original feature_data is not mutated
+    assert 2 in feature_data['clusters']
+    assert 'h.ts' in feature_data['node_labels']
+    assert len(feature_data['meta_edges']) == 2
+    assert feature_data['root'] == '/repos/test'
 
 
 def test_generate_html_escapes_script_breakout():

@@ -463,11 +463,13 @@ def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[s
         if e.get('source') in kept_keys and e.get('target') in kept_keys
     ]
     labels = feature_data.get('cluster_labels', {})
+    node_labels = feature_data.get('node_labels', {})
     return {
         **feature_data,
         'clusters': kept,
         'meta_edges': meta_edges,
         'cluster_labels': {k: v for k, v in labels.items() if k in kept_keys},
+        'node_labels': {path: label for path, label in node_labels.items() if label in kept_keys},
     }
 
 
