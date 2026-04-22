@@ -49,13 +49,11 @@ def test_single_cluster():
     assert communities['x'] == communities['y'] == communities['z']
 
 
-def test_isolated_nodes():
-    """Nodes with no edges stay singletons, then min_size merges them."""
+def test_minimal_pair():
+    """A single edge pair forms one community of size 2 with no merging needed."""
     from community_detect import label_propagation
 
-    # One edge pair plus one isolated node — isolated node has no adj entries
-    # so it won't appear in label_propagation output (adj only has connected nodes)
-    # Test that two weakly connected groups each form their own community
+    # One edge pair — both nodes form a community of size 2
     edges = [
         {'source': 'solo1', 'target': 'solo2', 'weight': 1.0},
     ]
@@ -63,6 +61,20 @@ def test_isolated_nodes():
     communities = label_propagation(edges, min_size=2)
     assert len(communities) == 2
     assert communities['solo1'] == communities['solo2']
+
+
+def test_nodes_absent_from_edges_not_in_output():
+    """Nodes that never appear in edges are not in the output (caller's responsibility)."""
+    from community_detect import label_propagation
+
+    edges = [
+        {'source': 'x', 'target': 'y', 'weight': 1.0},
+        {'source': 'y', 'target': 'z', 'weight': 1.0},
+    ]
+    result = label_propagation(edges)
+    assert set(result.keys()) == {'x', 'y', 'z'}
+    # 'w' was never mentioned in edges -> not present
+    assert 'w' not in result
 
 
 def test_build_meta_graph():
@@ -118,3 +130,21 @@ def test_min_size_merge():
     # 'd' must have merged into the same community (only one community total)
     labels = set(communities.values())
     assert len(labels) == 1
+
+
+def test_determinism():
+    """Same seed on same input produces identical labels."""
+    from community_detect import label_propagation
+
+    edges = [
+        {'source': 'a', 'target': 'b', 'weight': 1.0},
+        {'source': 'b', 'target': 'c', 'weight': 1.0},
+        {'source': 'c', 'target': 'a', 'weight': 0.5},
+        {'source': 'd', 'target': 'e', 'weight': 1.0},
+        {'source': 'e', 'target': 'f', 'weight': 1.0},
+        {'source': 'f', 'target': 'd', 'weight': 0.5},
+        {'source': 'c', 'target': 'd', 'weight': 0.2},
+    ]
+    r1 = label_propagation(edges, seed=42)
+    r2 = label_propagation(edges, seed=42)
+    assert r1 == r2

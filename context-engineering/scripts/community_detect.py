@@ -9,12 +9,15 @@ Algorithm:
 4. Merge tiny communities (< min_size) into their most-connected neighbor
 """
 
+from __future__ import annotations
+
 from collections import defaultdict
+from typing import Any
 import random
 
 
-def label_propagation(edges: list, max_iter: int = 15,
-                      min_size: int = 2, seed: int = 42) -> dict:
+def label_propagation(edges: list[dict[str, Any]], max_iter: int = 15,
+                      min_size: int = 2, seed: int = 42) -> dict[str, int]:
     """Run label propagation on an undirected weighted graph.
 
     Args:
@@ -24,8 +27,10 @@ def label_propagation(edges: list, max_iter: int = 15,
         seed: random seed for deterministic results
 
     Returns:
-        {node_id: community_label} mapping
+        {node_id: community_label} mapping. Returns {} if edges is empty.
     """
+    if not edges:
+        return {}
     random.seed(seed)
 
     # Build undirected adjacency list
@@ -62,23 +67,30 @@ def label_propagation(edges: list, max_iter: int = 15,
         if not changed:
             break
 
-    # Merge tiny communities into most-connected neighbor
-    community_sizes = defaultdict(int)
-    for label in labels.values():
-        community_sizes[label] += 1
+    # Merge tiny communities into most-connected non-tiny neighbor (iterate until stable)
+    for _ in range(max_iter):
+        community_sizes = defaultdict(int)
+        for label in labels.values():
+            community_sizes[label] += 1
+        tiny = {label for label, size in community_sizes.items() if size < min_size}
+        if not tiny:
+            break
 
-    tiny = {label for label, size in community_sizes.items() if size < min_size}
-    if tiny:
+        merged_any = False
         for node in all_nodes:
             if labels[node] in tiny:
-                # Find most-connected non-tiny neighbor community
                 label_weight = defaultdict(float)
                 for neighbor, weight in adj[node]:
                     nl = labels[neighbor]
                     if nl not in tiny:
                         label_weight[nl] += weight
                 if label_weight:
-                    labels[node] = max(label_weight, key=label_weight.get)
+                    new_label = max(label_weight, key=label_weight.get)
+                    if new_label != labels[node]:
+                        labels[node] = new_label
+                        merged_any = True
+        if not merged_any:
+            break
 
     # Normalize labels to 0-indexed integers
     unique = sorted(set(labels.values()))
@@ -86,13 +98,13 @@ def label_propagation(edges: list, max_iter: int = 15,
     return {node: label_map[label] for node, label in labels.items()}
 
 
-def build_meta_graph(labels: dict, edges: list) -> dict:
+def build_meta_graph(labels: dict[str, int], edges: list[dict[str, Any]]) -> dict[str, Any]:
     """Build a cluster-level meta-graph from node labels and edges.
 
     Returns:
         {
             'clusters': {label: {'nodes': [...], 'internal_edges': int}},
-            'meta_edges': [{'source': label, 'target': label, 'weight': int}]
+            'meta_edges': [{'source': label, 'target': label, 'weight': int}]  # weight = cross-cluster edge count, not sum of original float weights
         }
     """
     clusters = defaultdict(lambda: {'nodes': [], 'internal_edges': 0})
