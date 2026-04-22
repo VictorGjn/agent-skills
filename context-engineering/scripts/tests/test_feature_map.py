@@ -108,3 +108,23 @@ def test_html_includes_file_lists():
     html = generate_html(feature_data, 'Test')
     assert 'hurricane/service.ts' in html
     assert 'hurricane/dto.ts' in html
+
+
+def test_generate_html_escapes_script_breakout():
+    """A `</script>` in a file path must not break out of the embedded script tag."""
+    from feature_map import generate_html
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'Evil', 'nodes': ['</script><img src=x>evil.ts'],
+                'file_count': 1, 'total_tokens': 10, 'internal_edges': 0},
+        },
+        'meta_edges': [],
+        'cluster_labels': {0: 'Evil'},
+    }
+    html = generate_html(feature_data, 'Test')
+
+    # The dangerous literal must NOT appear raw in the output.
+    assert '</script><img' not in html
+    # The escaped form proves the escaping ran.
+    assert '\\u003c/script' in html or 'u003c/script' in html

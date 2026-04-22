@@ -392,9 +392,25 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def generate_html(feature_data: dict, title: str) -> str:
+def _js_safe_json(obj: Any) -> str:
+    """Serialize to JSON with HTML-sensitive chars escaped so a `</script>` in
+    the data cannot break out of the embedding `<script>` tag. The escaped
+    `\\uXXXX` sequences parse back to the original chars in JSON, so JS sees
+    the real string at runtime."""
+    raw = json.dumps(obj, default=str)
+    return (
+        raw
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace('&', '\\u0026')
+        .replace(' ', '\\u2028')
+        .replace(' ', '\\u2029')
+    )
+
+
+def generate_html(feature_data: dict[str, Any], title: str) -> str:
     """Render feature_data as an interactive D3 force-directed HTML document."""
-    graph_json = json.dumps(feature_data, default=str)
+    graph_json = _js_safe_json(feature_data)
     safe_title = (
         str(title)
         .replace('&', '&amp;')
@@ -403,6 +419,6 @@ def generate_html(feature_data: dict, title: str) -> str:
     )
     return (
         _HTML_TEMPLATE
-        .replace('__GRAPH_DATA__', graph_json)
         .replace('__TITLE__', safe_title)
+        .replace('__GRAPH_DATA__', graph_json)
     )
