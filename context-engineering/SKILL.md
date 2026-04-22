@@ -129,6 +129,26 @@ Outputs a standalone `graph.html` — zero dependencies, interactive 3D visualiz
 
 If [Graphify](https://github.com/safishamsi/graphify) has been run in the workspace, `--graph` auto-detects `graphify-out/graph.json` and uses its richer call graphs, inheritance, and cross-language edges.
 
+### Feature map (bird's-eye)
+
+```bash
+# Single repo — shows feature clusters and how they depend on each other
+python3 scripts/feature_map.py --index cache/workspace-index.json
+
+# Multi-repo
+python3 scripts/feature_map.py --multi-index cache/fleet-index.json cache/backend-index.json
+
+# Custom output
+python3 scripts/feature_map.py --index cache/workspace-index.json -o my-features.html
+
+# Tune cluster granularity on large repos (default 2)
+python3 scripts/feature_map.py --index cache/backend-index.json --min-cluster 5
+```
+
+Uses label propagation community detection on the import graph to discover natural feature clusters. Each cluster is labeled by its dominant directory or top symbol names. Renders as interactive 2D SVG (D3 force-directed). Click a cluster to see its files and connections; type in the search box to highlight clusters by label.
+
+On large repos (2000+ files) the default `--min-cluster 2` produces many small clusters; raise to `5` or `10` to focus on the backbone modules.
+
 ## Features
 
 ### Multi-language code indexing
