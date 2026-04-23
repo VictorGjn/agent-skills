@@ -61,6 +61,7 @@ def test_pipeline_produces_meta_graph():
         assert 'label' in cluster
         assert 'file_count' in cluster
         assert 'total_tokens' in cluster
+        assert 'symbols' in cluster
         assert cluster['total_tokens'] > 0
         assert cluster['file_count'] == len(cluster['nodes'])
 
@@ -219,6 +220,67 @@ def test_apply_min_cluster_drops_small_and_orphans():
     assert 'h.ts' in feature_data['node_labels']
     assert len(feature_data['meta_edges']) == 2
     assert feature_data['root'] == '/repos/test'
+
+
+def test_cluster_symbols_populated():
+    """Each cluster exposes a `symbols` list aggregated from file_data, used by the HTML detail panel."""
+    from feature_map import build_feature_map
+
+    index = {
+        'root': '/repos/test',
+        'totalFiles': 4,
+        'files': [
+            {'path': 'src/hurricane/service.ts', 'tokens': 200,
+             'tree': {'title': 'src/hurricane/service.ts', 'depth': 0,
+                      'tokens': 200, 'totalTokens': 200,
+                      'text': "import { HurricaneDto } from './dto';",
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'class HurricaneService', 'depth': 1,
+                                    'tokens': 150, 'totalTokens': 150, 'children': [],
+                                    'text': '', 'firstSentence': '', 'firstParagraph': ''}]}},
+            {'path': 'src/hurricane/dto.ts', 'tokens': 100,
+             'tree': {'title': 'src/hurricane/dto.ts', 'depth': 0,
+                      'tokens': 100, 'totalTokens': 100, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'type HurricaneDto', 'depth': 1,
+                                    'tokens': 50, 'totalTokens': 50, 'children': [],
+                                    'text': '', 'firstSentence': '', 'firstParagraph': ''}]}},
+            {'path': 'src/voyage/manager.ts', 'tokens': 300,
+             'tree': {'title': 'src/voyage/manager.ts', 'depth': 0,
+                      'tokens': 300, 'totalTokens': 300,
+                      'text': "import { VoyageDto } from './dto';",
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'class VoyageManager', 'depth': 1,
+                                    'tokens': 200, 'totalTokens': 200, 'children': [],
+                                    'text': '', 'firstSentence': '', 'firstParagraph': ''}]}},
+            {'path': 'src/voyage/dto.ts', 'tokens': 100,
+             'tree': {'title': 'src/voyage/dto.ts', 'depth': 0,
+                      'tokens': 100, 'totalTokens': 100, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '',
+                      'children': [{'title': 'type VoyageDto', 'depth': 1,
+                                    'tokens': 50, 'totalTokens': 50, 'children': [],
+                                    'text': '', 'firstSentence': '', 'firstParagraph': ''}]}},
+        ],
+    }
+    result = build_feature_map(index)
+
+    input_symbols = set()
+    for f in index['files']:
+        for child in f['tree'].get('children', []):
+            title = child.get('title')
+            if title:
+                input_symbols.add(title)
+
+    for cluster in result['clusters'].values():
+        assert 'symbols' in cluster
+        assert isinstance(cluster['symbols'], list)
+        assert len(cluster['symbols']) <= 8
+
+    non_empty = [c for c in result['clusters'].values() if c['symbols']]
+    assert non_empty, 'at least one cluster should have non-empty symbols'
+    for cluster in non_empty:
+        for sym in cluster['symbols']:
+            assert sym in input_symbols
 
 
 def test_generate_html_escapes_script_breakout():

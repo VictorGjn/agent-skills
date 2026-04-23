@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,14 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
         cluster['label'] = cluster_labels.get(label, f'Cluster {label}')
         cluster['file_count'] = len(cluster['nodes'])
         cluster['total_tokens'] = sum(path_tokens.get(n, 0) for n in cluster['nodes'])
+        sym_counts: Counter[str] = Counter()
+        for path in cluster['nodes']:
+            for sym in file_data.get(path, {}).get('symbols', []):
+                if sym:
+                    sym_counts[sym] += 1
+        cluster['symbols'] = [
+            s for s, _ in sorted(sym_counts.items(), key=lambda x: (-x[1], x[0]))[:8]
+        ]
 
     return {
         'clusters': meta['clusters'],
