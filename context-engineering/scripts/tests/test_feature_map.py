@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -336,6 +337,246 @@ def test_disconnected_files_get_singleton_clusters():
     # Total file_count across clusters must equal input file count
     total_files_in_clusters = sum(c['file_count'] for c in result['clusters'].values())
     assert total_files_in_clusters == len(index['files'])
+
+
+def test_build_feature_map_with_concept_labeler():
+    """concept_llm output propagates as concept/description/sub_features per cluster."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'src/nav/side.ts', 'tokens': 100,
+         'tree': {'title': 'src/nav/side.ts', 'depth': 0, 'tokens': 100,
+                   'totalTokens': 100, 'text': '', 'firstSentence': '',
+                   'firstParagraph': '',
+                   'children': [{'title': 'SideNavbar', 'depth': 1,
+                                  'tokens': 50, 'totalTokens': 50,
+                                  'children': [], 'text': '',
+                                  'firstSentence': '', 'firstParagraph': ''}]}},
+    ]}
+
+    def fake_concept_llm(cluster, file_data, current_label, **_):
+        return {'concept': 'Navigation', 'description': 'Top + side menu',
+                'sub_features': ['Vessel List', 'Profile']}
+
+    result = build_feature_map(index, concept_llm=fake_concept_llm)
+
+    for c in result['clusters'].values():
+        assert c['concept'] == 'Navigation'
+        assert c['description'] == 'Top + side menu'
+        assert c['sub_features'] == ['Vessel List', 'Profile']
+
+
+def test_concept_fields_default_when_no_llm():
+    """Without concept_llm, every cluster still has concept/description/sub_features keys."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'a.ts', 'tokens': 10,
+         'tree': {'title': 'a.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+    ]}
+    result = build_feature_map(index)
+    for c in result['clusters'].values():
+        assert 'concept' in c
+        assert 'description' in c
+        assert c['description'] == ''
+        assert c['sub_features'] == []
+
+
+def test_build_domain_layer_groups_clusters():
+    """Heavily inter-connected clusters fold into one domain; weak links stay separate."""
+    from feature_map import build_domain_layer
+
+    feature_data = {
+        'clusters': {
+            0: {'concept': 'Navigation', 'nodes': ['a'], 'file_count': 1},
+            1: {'concept': 'Menus', 'nodes': ['b'], 'file_count': 1},
+            2: {'concept': 'Telemetry Ingest', 'nodes': ['c'], 'file_count': 1},
+        },
+        'meta_edges': [
+            {'source': 0, 'target': 1, 'weight': 5},  # Nav <-> Menus strong
+            {'source': 2, 'target': 0, 'weight': 1},  # Telemetry barely connected
+        ],
+    }
+    domains = build_domain_layer(feature_data)
+
+    assert domains[0] == domains[1], 'tightly connected clusters must share a domain'
+    assert domains[0] != domains[2], 'weak link must not pull cluster 2 in'
+
+
+def test_build_domain_layer_isolated_clusters_get_own_domain():
+    """Clusters with no meta_edges still get a domain id."""
+    from feature_map import build_domain_layer
+
+    feature_data = {
+        'clusters': {7: {'nodes': ['x'], 'file_count': 1}},
+        'meta_edges': [],
+    }
+    domains = build_domain_layer(feature_data)
+    assert 7 in domains  # has a domain assignment
+
+
+def test_build_domain_layer_isolated_ids_do_not_collide():
+    """An isolated cluster must not be merged with a propagated domain whose
+    normalized id (0..k-1) happens to equal the isolated cluster's raw id."""
+    from feature_map import build_domain_layer
+
+    # Clusters 5 and 6 are strongly connected — label_propagation normalizes
+    # them to a single domain (id 0). Cluster 0 is isolated; if we naively
+    # used setdefault(0, 0) it would silently merge into the propagated domain.
+    feature_data = {
+        'clusters': {
+            0: {'nodes': ['solo.ts'], 'file_count': 1},
+            5: {'nodes': ['a.ts'], 'file_count': 1},
+            6: {'nodes': ['b.ts'], 'file_count': 1},
+        },
+        'meta_edges': [{'source': 5, 'target': 6, 'weight': 5}],
+    }
+    domains = build_domain_layer(feature_data)
+    assert domains[5] == domains[6], 'strong-edge clusters must share a domain'
+    assert domains[0] != domains[5], 'isolated cluster must not collide with propagated domain id'
+
+
+def test_build_feature_map_attaches_domain_field():
+    """Every cluster in the result has a domain field, and result['domains'] exists."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'a.ts', 'tokens': 10,
+         'tree': {'title': 'a.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+        {'path': 'b.ts', 'tokens': 10,
+         'tree': {'title': 'b.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+    ]}
+    result = build_feature_map(index)
+    assert 'domains' in result
+    for c in result['clusters'].values():
+        assert 'domain' in c
+    for entry in result['domains'].values():
+        assert 'name' in entry
+        assert 'cluster_ids' in entry
+        assert 'color_index' in entry
+        assert 0 <= entry['color_index'] < 16
+
+
+def test_html_renders_domain_legend_and_subfeatures():
+    """Generated HTML embeds the domain registry plus per-cluster concept fields."""
+    from feature_map import generate_html
+
+    feature_data = {
+        'clusters': {
+            0: {'concept': 'Navigation', 'description': 'Menus',
+                'sub_features': ['Vessel List', 'Profile'],
+                'label': 'Navigation',
+                'nodes': ['a.ts'], 'file_count': 1, 'total_tokens': 10,
+                'internal_edges': 0, 'domain': 0, 'symbols': []},
+            1: {'concept': 'Map Layers', 'description': 'Overlays',
+                'sub_features': ['Weather Layers', 'Map Styles'],
+                'label': 'Map Layers',
+                'nodes': ['b.ts'], 'file_count': 1, 'total_tokens': 10,
+                'internal_edges': 0, 'domain': 1, 'symbols': []},
+        },
+        'meta_edges': [{'source': 0, 'target': 1, 'weight': 3}],
+        'cluster_labels': {0: 'Navigation', 1: 'Map Layers'},
+        'domains': {
+            0: {'name': 'Product UI', 'cluster_ids': [0], 'color_index': 0},
+            1: {'name': 'Map Stack', 'cluster_ids': [1], 'color_index': 1},
+        },
+    }
+    html = generate_html(feature_data, 'Test')
+
+    assert 'Product UI' in html
+    assert 'Map Stack' in html
+    assert 'Vessel List' in html
+    assert 'Weather Layers' in html
+    assert 'legend' in html.lower()
+    assert 'domain-list' in html  # legend container present
+    assert 'clusterColor' in html  # domain-driven coloring fn present
+    assert 'isCrossDomain' in html  # cross-domain edge styling present
+
+
+def test_cli_end_to_end_with_fake_llm(tmp_path, monkeypatch, capsys):
+    """main() runs end-to-end with a fake concept labeler — no live API call."""
+    import feature_map
+
+    index = {
+        'root': str(tmp_path / 'fake-repo'),
+        'totalFiles': 1, 'totalTokens': 50,
+        'files': [{
+            'path': 'src/nav/side.ts', 'tokens': 50,
+            'tree': {'title': 'src/nav/side.ts', 'depth': 0, 'tokens': 50,
+                      'totalTokens': 50, 'text': '', 'firstSentence': '',
+                      'firstParagraph': '',
+                      'children': [{'title': 'SideNavbar', 'depth': 1,
+                                     'tokens': 30, 'totalTokens': 30,
+                                     'children': [], 'text': '',
+                                     'firstSentence': '', 'firstParagraph': ''}]}},
+        ],
+    }
+    index_path = tmp_path / 'index.json'
+    index_path.write_text(json.dumps(index), encoding='utf-8')
+    output_path = tmp_path / 'feature-map.html'
+
+    # Substitute the live LLM builder with a deterministic fake.
+    def fake_builder(model):
+        def call(*, cluster, file_data, current_label, cache_dir=None, **_):
+            return {'concept': 'Navigation',
+                    'description': 'Top + side menu',
+                    'sub_features': ['Vessel List']}
+        return call
+
+    monkeypatch.setattr(feature_map, '_build_concept_llm_callable', fake_builder)
+    monkeypatch.setattr(sys, 'argv', [
+        'feature_map.py',
+        '--index', str(index_path),
+        '-o', str(output_path),
+        '--concept-llm',
+        '--concept-cache-dir', str(tmp_path / 'cache'),
+    ])
+
+    feature_map.main()
+
+    assert output_path.exists()
+    html = output_path.read_text(encoding='utf-8')
+    assert 'Navigation' in html
+    assert 'Vessel List' in html
+
+
+def test_apply_min_cluster_prunes_domains():
+    """_apply_min_cluster must drop domains that lose all their member clusters
+    and prune cluster_ids of any cluster that was filtered out — otherwise the
+    legend / color_index keeps stale entries pointing at clusters that no
+    longer exist."""
+    from feature_map import _apply_min_cluster
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'A', 'nodes': ['a.ts', 'b.ts'],
+                'file_count': 2, 'total_tokens': 100, 'internal_edges': 1, 'domain': 'D1'},
+            1: {'label': 'B', 'nodes': ['solo.ts'],
+                'file_count': 1, 'total_tokens': 50, 'internal_edges': 0, 'domain': 'D2'},
+        },
+        'meta_edges': [],
+        'cluster_labels': {0: 'A', 1: 'B'},
+        'node_labels': {'a.ts': 0, 'b.ts': 0, 'solo.ts': 1},
+        'domains': {
+            'D1': {'name': 'Alpha', 'cluster_ids': [0], 'color_index': 0},
+            'D2': {'name': 'Beta', 'cluster_ids': [1], 'color_index': 1},
+            'D3': {'name': 'Mixed', 'cluster_ids': [0, 1], 'color_index': 2},
+        },
+    }
+    result = _apply_min_cluster(feature_data, 2)
+
+    # Cluster 1 was dropped (file_count=1). D2 had only cluster 1 → drop entirely.
+    assert 'D2' not in result['domains']
+    # D1 keeps cluster 0
+    assert result['domains']['D1']['cluster_ids'] == [0]
+    # D3 referenced both — only cluster 0 should survive
+    assert result['domains']['D3']['cluster_ids'] == [0]
+    # color_index re-stamped consecutively
+    indices = sorted(d['color_index'] for d in result['domains'].values())
+    assert indices == list(range(len(result['domains'])))
 
 
 def test_apply_min_cluster_default_keeps_singletons():

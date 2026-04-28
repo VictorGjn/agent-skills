@@ -14,14 +14,45 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 from code_graph import build_graph_with_fallback
 from community_detect import build_meta_graph, label_clusters, label_propagation
+
+
+def build_domain_layer(feature_data: dict[str, Any],
+                        min_edge_weight: int = 2) -> dict[Any, Any]:
+    """Group feature clusters into domains via a second pass of label propagation.
+
+    The meta-graph (cluster ↔ cluster, weighted by cross-cluster edge count)
+    is fed back into label_propagation. Only edges with weight ≥ `min_edge_weight`
+    count as structural coupling — incidental single-import links between two
+    otherwise-separate clusters do not pull them into the same domain. Isolated
+    clusters with no qualifying edges each get a fresh domain id offset above
+    the propagated id range so they cannot collide with a propagated domain.
+    """
+    edges = [
+        {'source': e['source'], 'target': e['target'], 'weight': e.get('weight', 1)}
+        for e in feature_data.get('meta_edges', [])
+        if e.get('weight', 1) >= min_edge_weight
+    ]
+    domain_map: dict[Any, Any] = label_propagation(edges, min_size=1)
+    # label_propagation normalizes labels to 0..k-1; reusing a raw cluster id
+    # for an isolated cluster could collide with a propagated domain when the
+    # connected components only involve higher-numbered clusters. Reserve ids
+    # starting at max(propagated)+1 for the isolated namespace.
+    next_iso = (max(domain_map.values()) + 1) if domain_map else 0
+    for cid in feature_data.get('clusters', {}):
+        if cid not in domain_map:
+            domain_map[cid] = next_iso
+            next_iso += 1
+    return domain_map
 
 
 def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -52,8 +83,17 @@ def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -> dict[str, Any]:
-    """Full pipeline: index → graph → communities → labeled meta-graph."""
+def build_feature_map(index: dict[str, Any], graphify_path: str | None = None, *,
+                      concept_llm: Callable[..., dict[str, Any]] | None = None,
+                      cache_dir: Path | None = None,
+                      concept_workers: int = 4) -> dict[str, Any]:
+    """Full pipeline: index → graph → communities → labeled meta-graph.
+
+    When `concept_llm` is provided, each cluster also gets an LLM-assigned
+    concept, description, and sub_features. Without it, those fields are
+    populated with the mechanical label / empty defaults so downstream
+    rendering can treat every cluster uniformly.
+    """
     files = index.get('files', [])
     graph = build_graph_with_fallback(files, graphify_path)
     labels = label_propagation(graph['edges'])
@@ -79,13 +119,36 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
         tree = f.get('tree', {})
         symbols = [c.get('title', '') for c in tree.get('children', []) if c.get('title')]
         headings = [h.get('title', '') for h in f.get('headings', [])]
-        file_data[path] = {'symbols': symbols, 'headings': headings}
+        file_data[path] = {
+            'symbols': symbols,
+            'headings': headings,
+            'first_sentence': f.get('firstSentence', '') or tree.get('firstSentence', ''),
+        }
         path_tokens[path] = f.get('tokens', 0)
 
     cluster_labels = label_clusters(meta['clusters'], file_data)
 
+    concept_results: dict[Any, dict[str, Any]] = {}
+    if concept_llm is not None and meta['clusters']:
+        def _label_one(item: tuple) -> tuple:
+            cid, cluster = item
+            try:
+                return cid, concept_llm(
+                    cluster=cluster,
+                    file_data=file_data,
+                    current_label=cluster_labels.get(cid, f'Cluster {cid}'),
+                    cache_dir=cache_dir,
+                )
+            except TypeError:
+                return cid, {}
+
+        with ThreadPoolExecutor(max_workers=max(1, concept_workers)) as pool:
+            for cid, result in pool.map(_label_one, meta['clusters'].items()):
+                concept_results[cid] = result
+
     for label, cluster in meta['clusters'].items():
-        cluster['label'] = cluster_labels.get(label, f'Cluster {label}')
+        mechanical = cluster_labels.get(label, f'Cluster {label}')
+        cluster['label'] = mechanical
         cluster['file_count'] = len(cluster['nodes'])
         cluster['total_tokens'] = sum(path_tokens.get(n, 0) for n in cluster['nodes'])
         sym_counts: Counter[str] = Counter()
@@ -96,12 +159,39 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
         cluster['symbols'] = [
             s for s, _ in sorted(sym_counts.items(), key=lambda x: (-x[1], x[0]))[:8]
         ]
+        # Concept fields — always present, populated from LLM when available
+        concept = concept_results.get(label, {})
+        cluster['concept'] = concept.get('concept', mechanical)
+        cluster['description'] = concept.get('description', '')
+        cluster['sub_features'] = concept.get('sub_features', [])
+
+    # Hierarchical fold: feature clusters → domains via label propagation on the meta-graph.
+    domain_map = build_domain_layer({'clusters': meta['clusters'],
+                                       'meta_edges': meta['meta_edges']})
+    domains: dict[Any, dict[str, Any]] = {}
+    for cid, cluster in meta['clusters'].items():
+        did = domain_map.get(cid, cid)
+        cluster['domain'] = did
+        entry = domains.setdefault(did, {'name': '', 'cluster_ids': [], 'color_index': 0})
+        entry['cluster_ids'].append(cid)
+    # Stable color_index by first appearance order; default name from the
+    # largest member cluster's concept so v2 has something readable until
+    # a future v3 adds a domain-naming LLM pass.
+    for idx, (did, entry) in enumerate(domains.items()):
+        entry['color_index'] = idx % 16
+        members = [meta['clusters'][cid] for cid in entry['cluster_ids']]
+        biggest = max(members, key=lambda c: c.get('file_count', 0), default=None)
+        if biggest is not None and biggest.get('concept'):
+            entry['name'] = biggest['concept']
+        else:
+            entry['name'] = f'Domain {did}'
 
     return {
         'clusters': meta['clusters'],
         'meta_edges': meta['meta_edges'],
         'cluster_labels': cluster_labels,
         'node_labels': labels,
+        'domains': domains,
     }
 
 
@@ -164,6 +254,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     color: var(--muted);
     font-size: 12px;
   }
+  #stats .domain-list {
+    margin-top: 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  .legend-row:hover { background: var(--bg); }
+  .legend-row.active {
+    background: var(--bg);
+    border: 1px solid var(--blue);
+    padding: 3px 3px;
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .legend-name { flex: 1; font-weight: 500; }
+  .legend-count {
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  #detail .desc {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 4px 0 8px;
+    font-style: italic;
+  }
+  #detail details summary {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    margin-top: 10px;
+  }
+  #detail details[open] summary { margin-bottom: 4px; }
   #search {
     top: 16px;
     right: 16px;
@@ -244,6 +385,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="stats">
   <h1>__TITLE__</h1>
   <div class="legend" id="legend">Loading...</div>
+  <div class="domain-list" id="domainList"></div>
 </div>
 <div id="search">
   <input type="text" id="searchInput" placeholder="Search clusters..." autocomplete="off">
@@ -259,12 +401,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   const clusters = data.clusters || {};
   const metaEdges = data.meta_edges || [];
+  const domains = data.domains || {};
+
+  // Domain → ordered position of cluster in domain (for lightness offset)
+  const clusterIdxInDomain = {};
+  Object.keys(domains).forEach(function (did) {
+    (domains[did].cluster_ids || []).forEach(function (cid, i) {
+      clusterIdxInDomain[String(cid)] = i;
+    });
+  });
+
+  function hexToHsl(hex) {
+    const m = hex.replace('#', '');
+    const r = parseInt(m.substring(0, 2), 16) / 255;
+    const g = parseInt(m.substring(2, 4), 16) / 255;
+    const b = parseInt(m.substring(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = ((g - b) / d + (g < b ? 6 : 0)); break;
+        case g: h = ((b - r) / d + 2); break;
+        case b: h = ((r - g) / d + 4); break;
+      }
+      h /= 6;
+    }
+    return { h: h * 360, s: s * 100, l: l * 100 };
+  }
+
+  function clusterColor(cluster) {
+    const did = String(cluster.domain);
+    const dom = domains[did];
+    const baseIdx = (dom && typeof dom.color_index === 'number') ? dom.color_index : 0;
+    const base = palette[baseIdx % palette.length];
+    const hsl = hexToHsl(base);
+    const offset = (clusterIdxInDomain[String(cluster.id)] || 0) * 6;
+    const l = Math.max(20, Math.min(85, hsl.l + offset - 6));
+    return 'hsl(' + Math.round(hsl.h) + ', ' + Math.round(hsl.s) + '%, ' + Math.round(l) + '%)';
+  }
 
   const nodes = Object.keys(clusters).map(function (key) {
     const c = clusters[key];
     return {
       id: key,
       label: c.label || ('Cluster ' + key),
+      concept: c.concept || c.label || ('Cluster ' + key),
+      description: c.description || '',
+      sub_features: c.sub_features || [],
+      domain: c.domain != null ? c.domain : key,
       nodes: c.nodes || [],
       file_count: c.file_count || 0,
       total_tokens: c.total_tokens || 0,
@@ -286,8 +473,54 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     .filter(function (e) { return nodeById.has(e.source) && nodeById.has(e.target); });
 
   const totalFiles = nodes.reduce(function (sum, n) { return sum + n.file_count; }, 0);
+  const domainCount = Object.keys(domains).length;
   document.getElementById('legend').textContent =
-    nodes.length + ' clusters · ' + totalFiles + ' files';
+    nodes.length + ' clusters · ' + totalFiles + ' files · ' + domainCount + ' domains';
+
+  // Render domain legend rows — clickable to filter to one domain.
+  let activeDomain = null;
+  const domainList = document.getElementById('domainList');
+  Object.keys(domains).forEach(function (did) {
+    const dom = domains[did];
+    const memberClusters = (dom.cluster_ids || []).map(function (cid) {
+      return clusters[String(cid)] || {};
+    });
+    const fileCount = memberClusters.reduce(function (s, c) { return s + (c.file_count || 0); }, 0);
+    const swatchColor = palette[(dom.color_index || 0) % palette.length];
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+    row.dataset.domain = String(did);
+    row.innerHTML =
+      '<span class="legend-swatch" style="background:' + swatchColor + '"></span>' +
+      '<span class="legend-name"></span>' +
+      '<span class="legend-count"></span>';
+    row.querySelector('.legend-name').textContent = dom.name || ('Domain ' + did);
+    row.querySelector('.legend-count').textContent =
+      (dom.cluster_ids || []).length + ' · ' + fileCount + 'f';
+    row.addEventListener('click', function () {
+      const dStr = row.dataset.domain;
+      activeDomain = (activeDomain === dStr) ? null : dStr;
+      applyDomainFilter();
+    });
+    domainList.appendChild(row);
+  });
+
+  function applyDomainFilter() {
+    document.querySelectorAll('.legend-row').forEach(function (r) {
+      r.classList.toggle('active', r.dataset.domain === activeDomain);
+    });
+    nodeSel.classed('dimmed', function (d) {
+      return activeDomain !== null && String(d.domain) !== activeDomain;
+    });
+    linkSel.style('opacity', function (d) {
+      if (activeDomain === null) return null;
+      const sId = typeof d.source === 'object' ? d.source.id : d.source;
+      const tId = typeof d.target === 'object' ? d.target.id : d.target;
+      const s = nodeById.get(sId), t = nodeById.get(tId);
+      const inDomain = s && t && String(s.domain) === activeDomain && String(t.domain) === activeDomain;
+      return inDomain ? null : 0.05;
+    });
+  }
 
   const svg = d3.select('#graph');
   const width = window.innerWidth;
@@ -304,13 +537,22 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       })
   );
 
+  function isCrossDomain(e) {
+    const sId = typeof e.source === 'object' ? e.source.id : e.source;
+    const tId = typeof e.target === 'object' ? e.target.id : e.target;
+    const s = nodeById.get(sId), t = nodeById.get(tId);
+    return !!(s && t && String(s.domain) !== String(t.domain));
+  }
+
   const linkSel = container.append('g')
     .attr('class', 'edges')
     .selectAll('line')
     .data(links)
     .enter().append('line')
     .attr('class', 'edge')
-    .attr('stroke-width', function (d) { return 1 + Math.log(d.weight + 1); });
+    .attr('stroke-width', function (d) { return 1 + Math.log(d.weight + 1) * 1.5; })
+    .attr('stroke-opacity', function (d) { return isCrossDomain(d) ? 0.85 : 0.45; })
+    .attr('stroke', function (d) { return isCrossDomain(d) ? '#475569' : '#94A3B8'; });
 
   const nodeSel = container.append('g')
     .attr('class', 'nodes')
@@ -338,11 +580,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   nodeSel.append('circle')
     .attr('r', function (d) { return 8 + Math.sqrt(d.file_count) * 4; })
-    .attr('fill', function (d, i) { return palette[i % palette.length]; });
+    .attr('fill', function (d) { return clusterColor(d); });
 
   nodeSel.append('text')
     .attr('dy', function (d) { return -(8 + Math.sqrt(d.file_count) * 4 + 6); })
-    .text(function (d) { return d.label; });
+    .text(function (d) { return d.concept; });
 
   nodeSel.on('click', function (event, d) { showDetail(d); });
 
@@ -384,16 +626,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const panel = document.getElementById('detail');
     const conns = connectionsFor(d.id);
     const parts = [];
-    parts.push('<h2>' + escapeHtml(d.label) + '</h2>');
+    parts.push('<h2>' + escapeHtml(d.concept) + '</h2>');
+    if (d.description) {
+      parts.push('<p class="desc">' + escapeHtml(d.description) + '</p>');
+    }
     parts.push('<div class="legend">' + d.file_count + ' files · ' +
       d.total_tokens + ' tokens · ' + d.internal_edges + ' internal edges</div>');
-    parts.push('<h3>Files</h3><ul>');
-    d.nodes.forEach(function (f) { parts.push('<li>' + escapeHtml(f) + '</li>'); });
-    parts.push('</ul>');
-    if (d.symbols && d.symbols.length) {
-      parts.push('<h3>Symbols</h3><ul>');
-      d.symbols.forEach(function (s) { parts.push('<li>' + escapeHtml(s) + '</li>'); });
+    if (d.sub_features && d.sub_features.length) {
+      parts.push('<h3>Sub-features</h3><ul>');
+      d.sub_features.forEach(function (s) {
+        parts.push('<li>' + escapeHtml(s) + '</li>');
+      });
       parts.push('</ul>');
+    }
+    parts.push('<details><summary>Files (' + d.file_count + ')</summary><ul>');
+    d.nodes.forEach(function (f) { parts.push('<li>' + escapeHtml(f) + '</li>'); });
+    parts.push('</ul></details>');
+    if (d.symbols && d.symbols.length) {
+      parts.push('<details><summary>Symbols (' + d.symbols.length + ')</summary><ul>');
+      d.symbols.forEach(function (s) { parts.push('<li>' + escapeHtml(s) + '</li>'); });
+      parts.push('</ul></details>');
     }
     parts.push('<h3>Connections</h3>');
     if (conns.length === 0) {
@@ -421,9 +673,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   searchInput.addEventListener('input', function () {
     const q = searchInput.value.trim().toLowerCase();
     nodeSel.classed('highlight', false).classed('dimmed', false);
-    if (!q) return;
+    if (!q) {
+      // Search cleared — restore the active domain filter (if any) so the UI
+      // stays consistent with the legend's selected row.
+      applyDomainFilter();
+      return;
+    }
     nodeSel.each(function (d) {
-      const matches = d.label.toLowerCase().indexOf(q) !== -1;
+      const haystack = (d.concept + ' ' + d.label + ' ' + d.description + ' ' +
+                        (d.sub_features || []).join(' ')).toLowerCase();
+      const matches = haystack.indexOf(q) !== -1;
       d3.select(this)
         .classed('highlight', matches)
         .classed('dimmed', !matches);
@@ -476,7 +735,7 @@ def generate_html(feature_data: dict[str, Any], title: str) -> str:
 
 
 def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[str, Any]:
-    """Drop clusters smaller than min_cluster and any meta_edges referencing them."""
+    """Drop clusters smaller than min_cluster and any meta_edges / domains referencing them."""
     clusters = feature_data.get('clusters', {})
     kept = {k: v for k, v in clusters.items() if v.get('file_count', 0) >= min_cluster}
     kept_keys = set(kept.keys())
@@ -486,12 +745,25 @@ def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[s
     ]
     labels = feature_data.get('cluster_labels', {})
     node_labels = feature_data.get('node_labels', {})
+
+    # Prune the domain registry: drop empty domains, prune cluster_ids of any
+    # cluster that was filtered out, and re-stamp color_index so the legend
+    # palette stays consecutive from 0 with no holes.
+    pruned_domains: dict[Any, dict[str, Any]] = {}
+    for did, entry in feature_data.get('domains', {}).items():
+        kept_members = [cid for cid in entry.get('cluster_ids', []) if cid in kept_keys]
+        if kept_members:
+            pruned_domains[did] = {**entry, 'cluster_ids': kept_members}
+    for new_idx, entry in enumerate(pruned_domains.values()):
+        entry['color_index'] = new_idx % 16
+
     return {
         **feature_data,
         'clusters': kept,
         'meta_edges': meta_edges,
         'cluster_labels': {k: v for k, v in labels.items() if k in kept_keys},
         'node_labels': {path: label for path, label in node_labels.items() if label in kept_keys},
+        'domains': pruned_domains,
     }
 
 
@@ -519,6 +791,21 @@ def _resolve_index_and_defaults(
     return index, title, output
 
 
+def _build_concept_llm_callable(model: str) -> Callable[..., dict[str, Any]]:
+    """Build a per-cluster concept-labeling callable backed by Anthropic + concept_labeler."""
+    if not os.environ.get('ANTHROPIC_API_KEY'):
+        raise SystemExit('--concept-llm requires ANTHROPIC_API_KEY in the environment.')
+    from concept_labeler import _build_anthropic_llm, label_cluster
+    llm = _build_anthropic_llm(model)
+
+    def call(*, cluster, file_data, current_label, cache_dir=None, **_):
+        return label_cluster(cluster, file_data,
+                             llm=llm, cache_dir=cache_dir,
+                             current_label=current_label,
+                             model=model)
+    return call
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bird's-eye feature map of a codebase.")
     parser.add_argument('--index', default=None, help='Path to workspace-index.json')
@@ -529,10 +816,30 @@ def main() -> None:
     parser.add_argument('--min-cluster', type=int, default=1,
                         help='Min files per cluster (default 1 keeps singleton clusters '
                              'for disconnected files; raise to filter noise)')
+    parser.add_argument('--concept-llm', action='store_true',
+                        help='Enable LLM concept labeling (requires ANTHROPIC_API_KEY)')
+    parser.add_argument('--concept-model', default='claude-haiku-4-5-20251001',
+                        help='Claude model id for concept labeling')
+    parser.add_argument('--concept-cache-dir', default='cache/concept-labels',
+                        help='Disk cache directory for concept labels')
+    parser.add_argument('--concept-workers', type=int, default=4,
+                        help='Parallel LLM calls')
     args = parser.parse_args()
 
     index, title, output = _resolve_index_and_defaults(args)
-    feature_data = build_feature_map(index, args.graphify)
+
+    concept_llm = None
+    cache_dir = None
+    if args.concept_llm:
+        concept_llm = _build_concept_llm_callable(args.concept_model)
+        cache_dir = Path(args.concept_cache_dir)
+
+    feature_data = build_feature_map(
+        index, args.graphify,
+        concept_llm=concept_llm,
+        cache_dir=cache_dir,
+        concept_workers=args.concept_workers,
+    )
     feature_data = _apply_min_cluster(feature_data, args.min_cluster)
 
     html = generate_html(feature_data, title)
@@ -542,7 +849,10 @@ def main() -> None:
 
     clusters = feature_data.get('clusters', {})
     file_count = sum(c.get('file_count', 0) for c in clusters.values())
-    print(f'Feature map: {len(clusters)} clusters, {file_count} files -> {out_path}')
+    domain_count = len(feature_data.get('domains', {}))
+    suffix = f', concept-labeled' if args.concept_llm else ''
+    print(f'Feature map: {len(clusters)} clusters, {domain_count} domains, '
+          f'{file_count} files{suffix} -> {out_path}')
 
 
 if __name__ == '__main__':
