@@ -438,6 +438,42 @@ def test_build_feature_map_attaches_domain_field():
         assert 0 <= entry['color_index'] < 16
 
 
+def test_html_renders_domain_legend_and_subfeatures():
+    """Generated HTML embeds the domain registry plus per-cluster concept fields."""
+    from feature_map import generate_html
+
+    feature_data = {
+        'clusters': {
+            0: {'concept': 'Navigation', 'description': 'Menus',
+                'sub_features': ['Vessel List', 'Profile'],
+                'label': 'Navigation',
+                'nodes': ['a.ts'], 'file_count': 1, 'total_tokens': 10,
+                'internal_edges': 0, 'domain': 0, 'symbols': []},
+            1: {'concept': 'Map Layers', 'description': 'Overlays',
+                'sub_features': ['Weather Layers', 'Map Styles'],
+                'label': 'Map Layers',
+                'nodes': ['b.ts'], 'file_count': 1, 'total_tokens': 10,
+                'internal_edges': 0, 'domain': 1, 'symbols': []},
+        },
+        'meta_edges': [{'source': 0, 'target': 1, 'weight': 3}],
+        'cluster_labels': {0: 'Navigation', 1: 'Map Layers'},
+        'domains': {
+            0: {'name': 'Product UI', 'cluster_ids': [0], 'color_index': 0},
+            1: {'name': 'Map Stack', 'cluster_ids': [1], 'color_index': 1},
+        },
+    }
+    html = generate_html(feature_data, 'Test')
+
+    assert 'Product UI' in html
+    assert 'Map Stack' in html
+    assert 'Vessel List' in html
+    assert 'Weather Layers' in html
+    assert 'legend' in html.lower()
+    assert 'domain-list' in html  # legend container present
+    assert 'clusterColor' in html  # domain-driven coloring fn present
+    assert 'isCrossDomain' in html  # cross-domain edge styling present
+
+
 def test_apply_min_cluster_default_keeps_singletons():
     """Default CLI behaviour (min_cluster=1) must NOT drop singleton clusters
     seeded for disconnected files — otherwise the build-time fix is undone."""

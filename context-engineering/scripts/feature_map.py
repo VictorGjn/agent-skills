@@ -243,6 +243,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     color: var(--muted);
     font-size: 12px;
   }
+  #stats .domain-list {
+    margin-top: 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--ink);
+  }
+  .legend-row:hover { background: var(--bg); }
+  .legend-row.active {
+    background: var(--bg);
+    border: 1px solid var(--blue);
+    padding: 3px 3px;
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .legend-name { flex: 1; font-weight: 500; }
+  .legend-count {
+    color: var(--muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  #detail .desc {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 4px 0 8px;
+    font-style: italic;
+  }
+  #detail details summary {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    margin-top: 10px;
+  }
+  #detail details[open] summary { margin-bottom: 4px; }
   #search {
     top: 16px;
     right: 16px;
@@ -323,6 +374,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="stats">
   <h1>__TITLE__</h1>
   <div class="legend" id="legend">Loading...</div>
+  <div class="domain-list" id="domainList"></div>
 </div>
 <div id="search">
   <input type="text" id="searchInput" placeholder="Search clusters..." autocomplete="off">
@@ -338,12 +390,57 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   const clusters = data.clusters || {};
   const metaEdges = data.meta_edges || [];
+  const domains = data.domains || {};
+
+  // Domain → ordered position of cluster in domain (for lightness offset)
+  const clusterIdxInDomain = {};
+  Object.keys(domains).forEach(function (did) {
+    (domains[did].cluster_ids || []).forEach(function (cid, i) {
+      clusterIdxInDomain[String(cid)] = i;
+    });
+  });
+
+  function hexToHsl(hex) {
+    const m = hex.replace('#', '');
+    const r = parseInt(m.substring(0, 2), 16) / 255;
+    const g = parseInt(m.substring(2, 4), 16) / 255;
+    const b = parseInt(m.substring(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = ((g - b) / d + (g < b ? 6 : 0)); break;
+        case g: h = ((b - r) / d + 2); break;
+        case b: h = ((r - g) / d + 4); break;
+      }
+      h /= 6;
+    }
+    return { h: h * 360, s: s * 100, l: l * 100 };
+  }
+
+  function clusterColor(cluster) {
+    const did = String(cluster.domain);
+    const dom = domains[did];
+    const baseIdx = (dom && typeof dom.color_index === 'number') ? dom.color_index : 0;
+    const base = palette[baseIdx % palette.length];
+    const hsl = hexToHsl(base);
+    const offset = (clusterIdxInDomain[String(cluster.id)] || 0) * 6;
+    const l = Math.max(20, Math.min(85, hsl.l + offset - 6));
+    return 'hsl(' + Math.round(hsl.h) + ', ' + Math.round(hsl.s) + '%, ' + Math.round(l) + '%)';
+  }
 
   const nodes = Object.keys(clusters).map(function (key) {
     const c = clusters[key];
     return {
       id: key,
       label: c.label || ('Cluster ' + key),
+      concept: c.concept || c.label || ('Cluster ' + key),
+      description: c.description || '',
+      sub_features: c.sub_features || [],
+      domain: c.domain != null ? c.domain : key,
       nodes: c.nodes || [],
       file_count: c.file_count || 0,
       total_tokens: c.total_tokens || 0,
@@ -365,8 +462,54 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     .filter(function (e) { return nodeById.has(e.source) && nodeById.has(e.target); });
 
   const totalFiles = nodes.reduce(function (sum, n) { return sum + n.file_count; }, 0);
+  const domainCount = Object.keys(domains).length;
   document.getElementById('legend').textContent =
-    nodes.length + ' clusters · ' + totalFiles + ' files';
+    nodes.length + ' clusters · ' + totalFiles + ' files · ' + domainCount + ' domains';
+
+  // Render domain legend rows — clickable to filter to one domain.
+  let activeDomain = null;
+  const domainList = document.getElementById('domainList');
+  Object.keys(domains).forEach(function (did) {
+    const dom = domains[did];
+    const memberClusters = (dom.cluster_ids || []).map(function (cid) {
+      return clusters[String(cid)] || {};
+    });
+    const fileCount = memberClusters.reduce(function (s, c) { return s + (c.file_count || 0); }, 0);
+    const swatchColor = palette[(dom.color_index || 0) % palette.length];
+    const row = document.createElement('div');
+    row.className = 'legend-row';
+    row.dataset.domain = String(did);
+    row.innerHTML =
+      '<span class="legend-swatch" style="background:' + swatchColor + '"></span>' +
+      '<span class="legend-name"></span>' +
+      '<span class="legend-count"></span>';
+    row.querySelector('.legend-name').textContent = dom.name || ('Domain ' + did);
+    row.querySelector('.legend-count').textContent =
+      (dom.cluster_ids || []).length + ' · ' + fileCount + 'f';
+    row.addEventListener('click', function () {
+      const dStr = row.dataset.domain;
+      activeDomain = (activeDomain === dStr) ? null : dStr;
+      applyDomainFilter();
+    });
+    domainList.appendChild(row);
+  });
+
+  function applyDomainFilter() {
+    document.querySelectorAll('.legend-row').forEach(function (r) {
+      r.classList.toggle('active', r.dataset.domain === activeDomain);
+    });
+    nodeSel.classed('dimmed', function (d) {
+      return activeDomain !== null && String(d.domain) !== activeDomain;
+    });
+    linkSel.style('opacity', function (d) {
+      if (activeDomain === null) return null;
+      const sId = typeof d.source === 'object' ? d.source.id : d.source;
+      const tId = typeof d.target === 'object' ? d.target.id : d.target;
+      const s = nodeById.get(sId), t = nodeById.get(tId);
+      const inDomain = s && t && String(s.domain) === activeDomain && String(t.domain) === activeDomain;
+      return inDomain ? null : 0.05;
+    });
+  }
 
   const svg = d3.select('#graph');
   const width = window.innerWidth;
@@ -383,13 +526,22 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       })
   );
 
+  function isCrossDomain(e) {
+    const sId = typeof e.source === 'object' ? e.source.id : e.source;
+    const tId = typeof e.target === 'object' ? e.target.id : e.target;
+    const s = nodeById.get(sId), t = nodeById.get(tId);
+    return !!(s && t && String(s.domain) !== String(t.domain));
+  }
+
   const linkSel = container.append('g')
     .attr('class', 'edges')
     .selectAll('line')
     .data(links)
     .enter().append('line')
     .attr('class', 'edge')
-    .attr('stroke-width', function (d) { return 1 + Math.log(d.weight + 1); });
+    .attr('stroke-width', function (d) { return 1 + Math.log(d.weight + 1) * 1.5; })
+    .attr('stroke-opacity', function (d) { return isCrossDomain(d) ? 0.85 : 0.45; })
+    .attr('stroke', function (d) { return isCrossDomain(d) ? '#475569' : '#94A3B8'; });
 
   const nodeSel = container.append('g')
     .attr('class', 'nodes')
@@ -417,11 +569,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
   nodeSel.append('circle')
     .attr('r', function (d) { return 8 + Math.sqrt(d.file_count) * 4; })
-    .attr('fill', function (d, i) { return palette[i % palette.length]; });
+    .attr('fill', function (d) { return clusterColor(d); });
 
   nodeSel.append('text')
     .attr('dy', function (d) { return -(8 + Math.sqrt(d.file_count) * 4 + 6); })
-    .text(function (d) { return d.label; });
+    .text(function (d) { return d.concept; });
 
   nodeSel.on('click', function (event, d) { showDetail(d); });
 
@@ -463,16 +615,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     const panel = document.getElementById('detail');
     const conns = connectionsFor(d.id);
     const parts = [];
-    parts.push('<h2>' + escapeHtml(d.label) + '</h2>');
+    parts.push('<h2>' + escapeHtml(d.concept) + '</h2>');
+    if (d.description) {
+      parts.push('<p class="desc">' + escapeHtml(d.description) + '</p>');
+    }
     parts.push('<div class="legend">' + d.file_count + ' files · ' +
       d.total_tokens + ' tokens · ' + d.internal_edges + ' internal edges</div>');
-    parts.push('<h3>Files</h3><ul>');
-    d.nodes.forEach(function (f) { parts.push('<li>' + escapeHtml(f) + '</li>'); });
-    parts.push('</ul>');
-    if (d.symbols && d.symbols.length) {
-      parts.push('<h3>Symbols</h3><ul>');
-      d.symbols.forEach(function (s) { parts.push('<li>' + escapeHtml(s) + '</li>'); });
+    if (d.sub_features && d.sub_features.length) {
+      parts.push('<h3>Sub-features</h3><ul>');
+      d.sub_features.forEach(function (s) {
+        parts.push('<li>' + escapeHtml(s) + '</li>');
+      });
       parts.push('</ul>');
+    }
+    parts.push('<details><summary>Files (' + d.file_count + ')</summary><ul>');
+    d.nodes.forEach(function (f) { parts.push('<li>' + escapeHtml(f) + '</li>'); });
+    parts.push('</ul></details>');
+    if (d.symbols && d.symbols.length) {
+      parts.push('<details><summary>Symbols (' + d.symbols.length + ')</summary><ul>');
+      d.symbols.forEach(function (s) { parts.push('<li>' + escapeHtml(s) + '</li>'); });
+      parts.push('</ul></details>');
     }
     parts.push('<h3>Connections</h3>');
     if (conns.length === 0) {
@@ -502,7 +664,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     nodeSel.classed('highlight', false).classed('dimmed', false);
     if (!q) return;
     nodeSel.each(function (d) {
-      const matches = d.label.toLowerCase().indexOf(q) !== -1;
+      const haystack = (d.concept + ' ' + d.label + ' ' + d.description + ' ' +
+                        (d.sub_features || []).join(' ')).toLowerCase();
+      const matches = haystack.indexOf(q) !== -1;
       d3.select(this)
         .classed('highlight', matches)
         .classed('dimmed', !matches);
