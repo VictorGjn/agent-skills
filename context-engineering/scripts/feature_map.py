@@ -34,7 +34,8 @@ def build_domain_layer(feature_data: dict[str, Any],
     is fed back into label_propagation. Only edges with weight ≥ `min_edge_weight`
     count as structural coupling — incidental single-import links between two
     otherwise-separate clusters do not pull them into the same domain. Isolated
-    clusters with no qualifying edges get their own domain id (cluster id reused).
+    clusters with no qualifying edges each get a fresh domain id offset above
+    the propagated id range so they cannot collide with a propagated domain.
     """
     edges = [
         {'source': e['source'], 'target': e['target'], 'weight': e.get('weight', 1)}
@@ -42,8 +43,15 @@ def build_domain_layer(feature_data: dict[str, Any],
         if e.get('weight', 1) >= min_edge_weight
     ]
     domain_map: dict[Any, Any] = label_propagation(edges, min_size=1)
+    # label_propagation normalizes labels to 0..k-1; reusing a raw cluster id
+    # for an isolated cluster could collide with a propagated domain when the
+    # connected components only involve higher-numbered clusters. Reserve ids
+    # starting at max(propagated)+1 for the isolated namespace.
+    next_iso = (max(domain_map.values()) + 1) if domain_map else 0
     for cid in feature_data.get('clusters', {}):
-        domain_map.setdefault(cid, cid)
+        if cid not in domain_map:
+            domain_map[cid] = next_iso
+            next_iso += 1
     return domain_map
 
 
@@ -722,7 +730,7 @@ def generate_html(feature_data: dict[str, Any], title: str) -> str:
 
 
 def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[str, Any]:
-    """Drop clusters smaller than min_cluster and any meta_edges referencing them."""
+    """Drop clusters smaller than min_cluster and any meta_edges / domains referencing them."""
     clusters = feature_data.get('clusters', {})
     kept = {k: v for k, v in clusters.items() if v.get('file_count', 0) >= min_cluster}
     kept_keys = set(kept.keys())
@@ -732,12 +740,25 @@ def _apply_min_cluster(feature_data: dict[str, Any], min_cluster: int) -> dict[s
     ]
     labels = feature_data.get('cluster_labels', {})
     node_labels = feature_data.get('node_labels', {})
+
+    # Prune the domain registry: drop empty domains, prune cluster_ids of any
+    # cluster that was filtered out, and re-stamp color_index so the legend
+    # palette stays consecutive from 0 with no holes.
+    pruned_domains: dict[Any, dict[str, Any]] = {}
+    for did, entry in feature_data.get('domains', {}).items():
+        kept_members = [cid for cid in entry.get('cluster_ids', []) if cid in kept_keys]
+        if kept_members:
+            pruned_domains[did] = {**entry, 'cluster_ids': kept_members}
+    for new_idx, entry in enumerate(pruned_domains.values()):
+        entry['color_index'] = new_idx % 16
+
     return {
         **feature_data,
         'clusters': kept,
         'meta_edges': meta_edges,
         'cluster_labels': {k: v for k, v in labels.items() if k in kept_keys},
         'node_labels': {path: label for path, label in node_labels.items() if label in kept_keys},
+        'domains': pruned_domains,
     }
 
 

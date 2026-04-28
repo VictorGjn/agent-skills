@@ -405,7 +405,7 @@ def test_build_domain_layer_groups_clusters():
 
 
 def test_build_domain_layer_isolated_clusters_get_own_domain():
-    """Clusters with no meta_edges still get a domain id (their own cluster id)."""
+    """Clusters with no meta_edges still get a domain id."""
     from feature_map import build_domain_layer
 
     feature_data = {
@@ -413,7 +413,28 @@ def test_build_domain_layer_isolated_clusters_get_own_domain():
         'meta_edges': [],
     }
     domains = build_domain_layer(feature_data)
-    assert domains[7] == 7
+    assert 7 in domains  # has a domain assignment
+
+
+def test_build_domain_layer_isolated_ids_do_not_collide():
+    """An isolated cluster must not be merged with a propagated domain whose
+    normalized id (0..k-1) happens to equal the isolated cluster's raw id."""
+    from feature_map import build_domain_layer
+
+    # Clusters 5 and 6 are strongly connected — label_propagation normalizes
+    # them to a single domain (id 0). Cluster 0 is isolated; if we naively
+    # used setdefault(0, 0) it would silently merge into the propagated domain.
+    feature_data = {
+        'clusters': {
+            0: {'nodes': ['solo.ts'], 'file_count': 1},
+            5: {'nodes': ['a.ts'], 'file_count': 1},
+            6: {'nodes': ['b.ts'], 'file_count': 1},
+        },
+        'meta_edges': [{'source': 5, 'target': 6, 'weight': 5}],
+    }
+    domains = build_domain_layer(feature_data)
+    assert domains[5] == domains[6], 'strong-edge clusters must share a domain'
+    assert domains[0] != domains[5], 'isolated cluster must not collide with propagated domain id'
 
 
 def test_build_feature_map_attaches_domain_field():
@@ -520,6 +541,42 @@ def test_cli_end_to_end_with_fake_llm(tmp_path, monkeypatch, capsys):
     html = output_path.read_text(encoding='utf-8')
     assert 'Navigation' in html
     assert 'Vessel List' in html
+
+
+def test_apply_min_cluster_prunes_domains():
+    """_apply_min_cluster must drop domains that lose all their member clusters
+    and prune cluster_ids of any cluster that was filtered out — otherwise the
+    legend / color_index keeps stale entries pointing at clusters that no
+    longer exist."""
+    from feature_map import _apply_min_cluster
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'A', 'nodes': ['a.ts', 'b.ts'],
+                'file_count': 2, 'total_tokens': 100, 'internal_edges': 1, 'domain': 'D1'},
+            1: {'label': 'B', 'nodes': ['solo.ts'],
+                'file_count': 1, 'total_tokens': 50, 'internal_edges': 0, 'domain': 'D2'},
+        },
+        'meta_edges': [],
+        'cluster_labels': {0: 'A', 1: 'B'},
+        'node_labels': {'a.ts': 0, 'b.ts': 0, 'solo.ts': 1},
+        'domains': {
+            'D1': {'name': 'Alpha', 'cluster_ids': [0], 'color_index': 0},
+            'D2': {'name': 'Beta', 'cluster_ids': [1], 'color_index': 1},
+            'D3': {'name': 'Mixed', 'cluster_ids': [0, 1], 'color_index': 2},
+        },
+    }
+    result = _apply_min_cluster(feature_data, 2)
+
+    # Cluster 1 was dropped (file_count=1). D2 had only cluster 1 → drop entirely.
+    assert 'D2' not in result['domains']
+    # D1 keeps cluster 0
+    assert result['domains']['D1']['cluster_ids'] == [0]
+    # D3 referenced both — only cluster 0 should survive
+    assert result['domains']['D3']['cluster_ids'] == [0]
+    # color_index re-stamped consecutively
+    indices = sorted(d['color_index'] for d in result['domains'].values())
+    assert indices == list(range(len(result['domains'])))
 
 
 def test_apply_min_cluster_default_keeps_singletons():
