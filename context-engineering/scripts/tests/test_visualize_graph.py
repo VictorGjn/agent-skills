@@ -311,3 +311,28 @@ def test_full_pipeline_multi_index():
     html = generate_html(nodes, all_edges, 'Dual Graph', query='VoyageReport', relevance_scores=scores)
     assert 'VoyageReport' in html
     assert len(html) > 1000
+
+
+def test_generate_html_escapes_script_breakout():
+    """A node label/path containing </script> must not break out of the embedding script tag."""
+    from visualize_graph import generate_html, _js_safe_json
+
+    # Raw escape helper must turn `<` into <
+    payload = {'evil': '</script><script>alert(1)</script>'}
+    serialized = _js_safe_json(payload)
+    assert '</script>' not in serialized
+    assert '\\u003c' in serialized
+
+    # Full pipeline: count of literal `</script>` in output must equal the count in
+    # the empty-data baseline — i.e. no leakage from injected node data.
+    safe_html = generate_html([], [], 'Safe', query=None, relevance_scores=None)
+    baseline_count = safe_html.count('</script>')
+
+    evil_nodes = [
+        {'id': '</script><script>alert(1)</script>',
+         'label': '</script>', 'type': 'file', 'path': '</script>',
+         'tokens': 1, 'val': 1},
+    ]
+    evil_html = generate_html(evil_nodes, [], 'Evil', query='</script>',
+                              relevance_scores={'</script>': 0.5})
+    assert evil_html.count('</script>') == baseline_count

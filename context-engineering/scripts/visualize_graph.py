@@ -830,6 +830,20 @@ document.getElementById('search-input').addEventListener('input', e => {
 </html>"""
 
 
+def _js_safe_json(obj):
+    """JSON with HTML-sensitive chars escaped so a `</script>` in any value
+    cannot break out of the embedding <script> tag. The \\uXXXX sequences
+    parse back to the original chars in JSON at runtime."""
+    return (
+        json.dumps(obj, ensure_ascii=False)
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace('&', '\\u0026')
+        .replace(' ', '\\u2028')
+        .replace(' ', '\\u2029')
+    )
+
+
 def generate_html(nodes, edges, title, query=None, relevance_scores=None):
     """Fill in the HTML template with graph data."""
     graph_data = {'nodes': nodes, 'links': edges}
@@ -843,9 +857,9 @@ def generate_html(nodes, edges, title, query=None, relevance_scores=None):
     html = html.replace('{{EDGE_COUNT}}', str(len(edges)))
     html = html.replace('{{FILE_COUNT}}', str(file_count))
     html = html.replace('{{SYMBOL_COUNT}}', str(symbol_count))
-    html = html.replace('{{GRAPH_DATA}}', json.dumps(graph_data, ensure_ascii=False))
-    html = html.replace('{{QUERY}}', json.dumps(query or ''))
-    html = html.replace('{{RELEVANCE_SCORES}}', json.dumps(relevance_scores or {}, ensure_ascii=False))
+    html = html.replace('{{GRAPH_DATA}}', _js_safe_json(graph_data))
+    html = html.replace('{{QUERY}}', _js_safe_json(query or ''))
+    html = html.replace('{{RELEVANCE_SCORES}}', _js_safe_json(relevance_scores or {}))
 
     return html
 

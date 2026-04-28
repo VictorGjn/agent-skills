@@ -301,3 +301,38 @@ def test_generate_html_escapes_script_breakout():
     assert '</script><img' not in html
     # The escaped form proves the escaping ran.
     assert '\\u003c/script' in html or 'u003c/script' in html
+
+
+def test_disconnected_files_get_singleton_clusters():
+    """Files with no graph edges must still appear in the feature map as singleton clusters."""
+    from feature_map import build_feature_map
+
+    # Three files, no imports between them — purely disconnected
+    index = {
+        'root': '/repos/sparse',
+        'totalFiles': 3,
+        'files': [
+            {'path': 'README.md', 'tokens': 50,
+             'tree': {'title': 'README.md', 'depth': 0,
+                      'tokens': 50, 'totalTokens': 50, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '', 'children': []}},
+            {'path': 'utils/orphan.ts', 'tokens': 80,
+             'tree': {'title': 'utils/orphan.ts', 'depth': 0,
+                      'tokens': 80, 'totalTokens': 80, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '', 'children': []}},
+            {'path': 'docs/notes.md', 'tokens': 30,
+             'tree': {'title': 'docs/notes.md', 'depth': 0,
+                      'tokens': 30, 'totalTokens': 30, 'text': '',
+                      'firstSentence': '', 'firstParagraph': '', 'children': []}},
+        ],
+    }
+    result = build_feature_map(index)
+
+    # Every file must appear as a labeled node (otherwise it gets dropped from the map)
+    expected = {f['path'].replace('\\', '/') for f in index['files']}
+    assert expected.issubset(result['node_labels'].keys()), \
+        f'disconnected files dropped: missing {expected - set(result["node_labels"].keys())}'
+
+    # Total file_count across clusters must equal input file count
+    total_files_in_clusters = sum(c['file_count'] for c in result['clusters'].values())
+    assert total_files_in_clusters == len(index['files'])

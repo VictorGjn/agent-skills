@@ -57,6 +57,19 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
     files = index.get('files', [])
     graph = build_graph_with_fallback(files, graphify_path)
     labels = label_propagation(graph['edges'])
+
+    # Seed singleton clusters for files with no graph edges so sparse / disconnected
+    # repos still produce a meaningful map. Each isolated file gets its own label.
+    if labels:
+        next_label = max(labels.values()) + 1
+    else:
+        next_label = 0
+    for f in files:
+        path = f['path'].replace('\\', '/')
+        if path not in labels:
+            labels[path] = next_label
+            next_label += 1
+
     meta = build_meta_graph(labels, graph['edges'])
 
     file_data: dict[str, dict[str, Any]] = {}
