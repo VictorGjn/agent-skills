@@ -84,6 +84,13 @@ def should_consolidate(*,
         return ShiftReport(True, 'no prior centroid', 1.0, n, True)
 
     new_centroid = _centroid(new_event_embeddings)
+    # If every new embedding was dim-incompatible with the others, _centroid
+    # returns []. cosine_distance on an empty vector returns 1.0 — which would
+    # falsely trigger consolidation as if the entity had drifted to the max.
+    # Treat "no comparable embeddings" as "can't measure drift, hold off".
+    if not new_centroid or len(new_centroid) != len(entity_centroid):
+        return ShiftReport(False, 'no comparable embeddings (dim mismatch)',
+                           0.0, n, False)
     drift = cosine_distance(entity_centroid, new_centroid)
     if drift >= drift_threshold:
         return ShiftReport(True, f'drift {drift:.3f} ≥ {drift_threshold}', drift, n, True)

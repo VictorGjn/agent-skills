@@ -76,6 +76,11 @@ def read_events(events_dir: Path, *, since_ts: int = 0,
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    # JSON scalars / arrays / nulls also parse cleanly but
+                    # would AttributeError on `.get(...)`. Skip non-objects —
+                    # `append_event` only ever writes dicts.
+                    if not isinstance(rec, dict):
+                        continue
                     if rec.get('ts', 0) < since_ts:
                         continue
                     if entity_hint is not None and rec.get('entity_hint') != entity_hint:
