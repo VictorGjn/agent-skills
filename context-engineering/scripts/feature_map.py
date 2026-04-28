@@ -673,7 +673,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   searchInput.addEventListener('input', function () {
     const q = searchInput.value.trim().toLowerCase();
     nodeSel.classed('highlight', false).classed('dimmed', false);
-    if (!q) return;
+    if (!q) {
+      // Search cleared — restore the active domain filter (if any) so the UI
+      // stays consistent with the legend's selected row.
+      applyDomainFilter();
+      return;
+    }
     nodeSel.each(function (d) {
       const haystack = (d.concept + ' ' + d.label + ' ' + d.description + ' ' +
                         (d.sub_features || []).join(' ')).toLowerCase();

@@ -97,6 +97,17 @@ def test_empty_cluster_skips_llm():
     assert calls['n'] == 0
 
 
+def test_label_all_clusters_empty_skips_llm_setup():
+    """Empty clusters must short-circuit before _build_anthropic_llm runs,
+    so a missing SDK / API key does not blow up no-op calls."""
+    from concept_labeler import label_all_clusters
+
+    # llm is None → would normally trigger _build_anthropic_llm. With no
+    # clusters the function must return {} before that ever happens.
+    out = label_all_clusters({}, {}, {}, llm=None, cache_dir=None)
+    assert out == {}
+
+
 def test_label_all_clusters_concurrent(tmp_path):
     """label_all_clusters fans out and merges results keyed by cluster id."""
     from concept_labeler import label_all_clusters

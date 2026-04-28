@@ -161,6 +161,8 @@ def label_all_clusters(clusters: dict[Any, dict[str, Any]],
                        model: str = 'claude-haiku-4-5-20251001',
                        max_workers: int = 4) -> dict[Any, dict[str, Any]]:
     """Label every cluster concurrently. Returns {cluster_id: {concept, ...}}."""
+    if not clusters:
+        return {}
     if llm is None:
         llm = _build_anthropic_llm(model)
 
