@@ -65,6 +65,23 @@ def test_malformed_json_falls_back():
     assert result['sub_features'] == []
 
 
+def test_non_dict_json_falls_back():
+    """If the LLM returns valid JSON that isn't an object (e.g. `[]` or `"oops"`),
+    label_cluster must fall back rather than crashing on parsed.get(...)."""
+    from concept_labeler import label_cluster
+
+    cluster = {'nodes': ['x.ts']}
+    file_data = {'x.ts': {'symbols': ['X'], 'first_sentence': ''}}
+
+    for raw in ('[]', '"just a string"', '42'):
+        def llm(prompt: str, _raw=raw) -> str:
+            return _raw
+        result = label_cluster(cluster, file_data, llm=llm,
+                                cache_dir=None, current_label='Foo')
+        assert result['concept'] == 'Foo'
+        assert result['sub_features'] == []
+
+
 def test_llm_exception_falls_back():
     """If the LLM callable raises, return the fallback label."""
     from concept_labeler import label_cluster

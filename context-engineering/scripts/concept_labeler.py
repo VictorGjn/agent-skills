@@ -104,13 +104,18 @@ def label_cluster(cluster: dict[str, Any], file_data: dict[str, dict], *,
 
     try:
         parsed = json.loads(raw)
-        result = {
-            'concept': str(parsed.get('concept', current_label)).strip() or current_label,
-            'description': str(parsed.get('description', '')).strip(),
-            'sub_features': [str(x) for x in parsed.get('sub_features', [])][:6],
-        }
     except (json.JSONDecodeError, TypeError):
         return _fallback(current_label)
+    # The LLM can return valid JSON that is not an object (e.g. `[]` or
+    # `"oops"`); .get(...) on those would raise AttributeError and bubble
+    # out of the thread pool, aborting a whole --concept-llm run.
+    if not isinstance(parsed, dict):
+        return _fallback(current_label)
+    result = {
+        'concept': str(parsed.get('concept', current_label)).strip() or current_label,
+        'description': str(parsed.get('description', '')).strip(),
+        'sub_features': [str(x) for x in parsed.get('sub_features', [])][:6],
+    }
 
     if cache_dir is not None:
         try:
