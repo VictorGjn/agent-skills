@@ -41,14 +41,27 @@ def cosine_distance(a: list[float], b: list[float]) -> float:
 
 
 def _centroid(vectors: list[list[float]]) -> list[float]:
+    """Mean of equal-length vectors. Vectors with mismatched dimensions are
+    skipped instead of crashing — embedding model/version drift can leak
+    differently-sized vectors into a cached event stream, and we'd rather
+    return a slightly stale centroid than IndexError out of consolidation.
+    """
     if not vectors:
         return []
     dim = len(vectors[0])
+    if dim == 0:
+        return []
     out = [0.0] * dim
+    valid = 0
     for v in vectors:
+        if len(v) != dim:
+            continue
         for i, x in enumerate(v):
             out[i] += x
-    return [x / len(vectors) for x in out]
+        valid += 1
+    if valid == 0:
+        return []
+    return [x / valid for x in out]
 
 
 def should_consolidate(*,

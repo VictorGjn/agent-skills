@@ -18,8 +18,14 @@ Schema:
 """
 from __future__ import annotations
 import json
+import re
 import time
 from pathlib import Path
+
+# Match canonical event-log filenames: <YYYY-MM-DD>.jsonl. Sidecar files like
+# <YYYY-MM-DD>.embeddings.jsonl must NOT be picked up by read_events — those
+# rows have a different schema and would corrupt downstream consolidation.
+_EVENT_FILE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}\.jsonl$')
 
 
 def _today_path(events_dir: Path) -> Path:
@@ -56,6 +62,10 @@ def read_events(events_dir: Path, *, since_ts: int = 0,
         return []
     out: list[dict] = []
     for jsonl in sorted(events_dir.glob('*.jsonl')):
+        # Skip sidecar files (e.g. <date>.embeddings.jsonl) that share the
+        # parent directory but have a different schema.
+        if not _EVENT_FILE_RE.match(jsonl.name):
+            continue
         try:
             with open(jsonl, encoding='utf-8') as f:
                 for line in f:
