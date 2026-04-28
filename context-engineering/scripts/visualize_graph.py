@@ -369,9 +369,14 @@ def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
         is_doc = ext in DOC_EXTENSIONS
         tokens = f.get('tokens', 0)
 
-        # File node
+        # File node — include symbol names for tooltip
         file_ids.add(path)
-        nodes.append({
+        sym_names = []
+        for child in children:
+            t = child.get('title', '')
+            if t:
+                sym_names.append(t)
+        file_node = {
             'id': path,
             'label': Path(path).name,
             'type': 'file',
@@ -379,7 +384,10 @@ def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
             'group': str(PurePosixPath(path).parent) if '/' in path else '',
             'tokens': tokens,
             'val': _node_size(tokens, True),
-        })
+        }
+        if sym_names:
+            file_node['symbols'] = sym_names
+        nodes.append(file_node)
 
         if not include_symbols or not children:
             continue
@@ -427,7 +435,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>{{TITLE}}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/three@0.175.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.175.0/examples/jsm/renderers/CSS2DRenderer.js" type="module"></script>
 <script src="https://unpkg.com/3d-force-graph@1"></script>
+<script src="https://unpkg.com/three-spritetext@1"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -629,57 +640,108 @@ function selectNode(node) {
   }
 }
 
+function refreshSprites() {
+  // Re-render node sprites with updated highlight state
+  Graph.nodeThreeObject(Graph.nodeThreeObject());
+}
+
 const Graph = ForceGraph3D()
   (document.getElementById('graph'))
   .backgroundColor('#FAFBFC')
   .graphData(graphData)
   .nodeLabel(n => {
-    if (n.type === 'repo') return `<b>${n.label}</b> <span style="color:#94A3B8">${n.fileCount} files, ${n.symbolCount} symbols</span>`;
-    if (n.type === 'file') return `<b>${n.label}</b> <span style="color:#94A3B8">(${n.tokens} tok)</span>`;
-    return `<b>${n.label}</b> <span style="color:#94A3B8">${n.type}</span>`;
+    if (n.type === 'repo') return `<b>${n.label}</b><br/>${n.fileCount} files, ${n.symbolCount} types`;
+    let tip = `<b>${n.label}</b>`;
+    if (n.tokens) tip += ` (${n.tokens} tok)`;
+    if (n.type !== 'file') tip += ` <span style="color:#94A3B8">${n.type}</span>`;
+    // Show symbol list in tooltip for files
+    if (n.type === 'file' && n.symbols && n.symbols.length) {
+      tip += '<br/><span style="color:#94A3B8">';
+      n.symbols.slice(0, 12).forEach(s => { tip += s + '<br/>'; });
+      if (n.symbols.length > 12) tip += '... +' + (n.symbols.length - 12) + ' more';
+      tip += '</span>';
+    }
+    return tip;
   })
-  .nodeColor(n => {
-    if (selectedNode && !highlightNodes.has(n)) return '#E2E8F0';
-    return nodeColors[n.type] || '#94A3B8';
+  .nodeThreeObject(n => {
+    const sprite = new SpriteText(n.label);
+    let color = nodeColors[n.type] || '#94A3B8';
+    // Highlight state
+    if (selectedNode && !highlightNodes.has(n)) color = '#CBD5E1';
+    // Query overlay
+    if (activeOverlay) {
+      const filePath = n.parent || n.id;
+      const rel = activeOverlay.scores[filePath] || 0;
+      if (rel > 0) {
+        const t = rel / activeOverlay.maxRel;
+        color = t > 0.6 ? '#2563EB' : t > 0.3 ? '#0D9488' : '#38BDF8';
+      } else {
+        color = '#CBD5E1';
+      }
+    }
+    sprite.color = color;
+    sprite.backgroundColor = n.type === 'repo' ? 'rgba(30,41,59,0.9)' :
+                              n.type === 'cluster' ? 'rgba(245,158,11,0.12)' : false;
+    sprite.borderRadius = 3;
+    sprite.padding = n.type === 'repo' ? [3, 6] : [1, 3];
+    sprite.textHeight = n.type === 'repo' ? 7 :
+                        n.type === 'file' ? 4 :
+                        n.type === 'cluster' ? 5 : 3;
+    sprite.fontWeight = n.type === 'repo' ? '700' :
+                        n.type === 'file' ? '500' : '400';
+    sprite.fontFace = 'Roboto, sans-serif';
+    if (n.clustered) sprite.color = 'rgba(148,163,184,0.15)';
+    return sprite;
   })
-  .nodeVal(n => n.val || 2)
-  .nodeOpacity(n => n.clustered ? 0.08 : 0.92)
-  .nodeResolution(graphData.nodes.length > 500 ? 6 : 12)
+  .nodeThreeObjectExtend(false)
   .linkColor(l => {
-    if (selectedNode && !highlightLinks.has(l)) return 'rgba(203,213,225,0.15)';
+    if (selectedNode && !highlightLinks.has(l)) return 'rgba(203,213,225,0.08)';
     if (selectedNode && highlightLinks.has(l)) return edgeColors[l.kind] || '#2563EB';
     return edgeColors[l.kind] || '#CBD5E1';
   })
   .linkWidth(l => {
     if (selectedNode && highlightLinks.has(l)) return Math.max(1.5, (l.weight || 0.3) * 4);
-    return l.kind === 'contains' ? 0.2 : Math.max(0.4, (l.weight || 0.3) * 2.5);
+    return l.kind === 'contains' ? 0.15 : Math.max(0.3, (l.weight || 0.3) * 2);
   })
   .linkOpacity(l => {
-    if (selectedNode && !highlightLinks.has(l)) return 0.05;
-    return l.kind === 'contains' ? 0.12 : 0.35;
+    if (selectedNode && !highlightLinks.has(l)) return 0.04;
+    return l.kind === 'contains' ? 0.1 : 0.3;
   })
-  .linkDirectionalArrowLength(l => l.kind === 'contains' ? 0 : 3.5)
+  .linkDirectionalArrowLength(l => l.kind === 'contains' ? 0 : 3)
   .linkDirectionalArrowRelPos(1)
   .linkDirectionalArrowColor(l => edgeColors[l.kind] || '#CBD5E1')
-  .d3AlphaDecay(0.015)
-  .d3VelocityDecay(0.35)
-  .warmupTicks(graphData.nodes.length > 500 ? 40 : 80)
+  .d3AlphaDecay(0.02)
+  .d3VelocityDecay(0.4)
+  .warmupTicks(graphData.nodes.length > 200 ? 60 : 120)
+  .cooldownTime(graphData.nodes.length > 200 ? 5000 : 15000)
   .onNodeClick(node => {
     selectNode(node);
-    Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
+    refreshSprites();
+    Graph.linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
     const detail = document.getElementById('detail');
     document.getElementById('d-name').textContent = node.label;
     document.getElementById('d-path').textContent = node.path;
     const badge = document.getElementById('d-type');
     badge.textContent = node.type;
     badge.style.background = nodeColors[node.type] || '#94A3B8';
-    document.getElementById('d-tokens').textContent = node.tokens + ' tokens';
+    document.getElementById('d-tokens').textContent = node.type === 'repo'
+      ? node.fileCount + ' files, ' + node.symbolCount + ' types'
+      : node.tokens + ' tokens';
+
+    // Symbols list (for file nodes)
+    let html = '';
+    if (node.type === 'file' && node.symbols && node.symbols.length) {
+      html += '<h3>Symbols (' + node.symbols.length + ')</h3>';
+      node.symbols.slice(0, 30).forEach(s => {
+        html += '<div class="conn" style="color:#475569">' + s + '</div>';
+      });
+      if (node.symbols.length > 30) html += '<div class="conn" style="color:#94A3B8">... +' + (node.symbols.length - 30) + ' more</div>';
+    }
 
     // Connections (skip containment, limit to 20)
     const conns = (adj[node.id] || []).filter(c => c.kind !== 'contains');
-    let html = '';
     if (conns.length) {
-      html = '<h3>Connections (' + conns.length + ')</h3>';
+      html += '<h3>Connections (' + conns.length + ')</h3>';
       conns.slice(0, 20).forEach(c => {
         const name = c.node.split('/').pop().split('::').pop();
         const arrow = c.dir === 'out' ? '&rarr;' : '&larr;';
@@ -701,7 +763,8 @@ const Graph = ForceGraph3D()
   })
   .onBackgroundClick(() => {
     selectNode(null);
-    Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
+    refreshSprites();
+    Graph.linkColor(Graph.linkColor()).linkWidth(Graph.linkWidth()).linkOpacity(Graph.linkOpacity());
     document.getElementById('detail').style.display = 'none';
   });
 
@@ -710,41 +773,26 @@ Graph.d3Force('link').distance(link =>
   link.kind === 'contains' ? 12 : 50 + (1 - (link.weight || 0.3)) * 50
 );
 Graph.d3Force('charge').strength(n =>
-  n.type === 'repo' ? -300 : n.type === 'file' ? -120 : -40
+  n.type === 'repo' ? -400 : n.type === 'cluster' ? -200 : n.type === 'file' ? -150 : -50
 );
 
 // ── Query Overlay ──
 const relevanceScores = {{RELEVANCE_SCORES}};
 const initialQuery = {{QUERY}};
 
+let activeOverlay = null;  // {scores, maxRel} or null
 function applyRelevanceOverlay(scores) {
   if (!scores || Object.keys(scores).length === 0) {
-    Graph.nodeColor(n => {
-      if (selectedNode && !highlightNodes.has(n)) return '#E2E8F0';
-      return nodeColors[n.type] || '#94A3B8';
-    });
-    Graph.nodeVal(n => n.val || 2);
+    activeOverlay = null;
     document.getElementById('search-info').textContent = '';
+    refreshSprites();
     return;
   }
   const maxRel = Math.max(...Object.values(scores), 0.01);
   const matchCount = Object.keys(scores).length;
   document.getElementById('search-info').textContent = matchCount + ' matches';
-  Graph.nodeColor(n => {
-    const filePath = n.parent || n.id;
-    const rel = scores[filePath] || 0;
-    if (rel > 0) {
-      const t = rel / maxRel;
-      return t > 0.6 ? '#2563EB' : t > 0.3 ? '#0D9488' : '#38BDF8';
-    }
-    return '#E2E8F0';
-  });
-  Graph.nodeVal(n => {
-    const filePath = n.parent || n.id;
-    const rel = scores[filePath] || 0;
-    if (rel > 0) return (n.val || 2) * (1 + rel * 2);
-    return (n.val || 2) * 0.5;
-  });
+  activeOverlay = { scores, maxRel };
+  refreshSprites();
 }
 
 if (initialQuery) {
@@ -823,6 +871,8 @@ def main():
                         help='Multiple workspace-index.json paths to merge')
     parser.add_argument('--focus', default=None,
                         help='Focus on one repo (expand it, collapse others into bubbles)')
+    parser.add_argument('--top-symbols', type=int, default=0,
+                        help='Max symbols per file to show (0 = file-level only, default in focus mode)')
     args = parser.parse_args()
 
     # Load index (single or multi)
@@ -863,10 +913,12 @@ def main():
     # Extract nodes
     repo_bubbles = {}
     if args.focus and args.multi_index:
-        # Focus mode: expand one repo, collapse others into bubbles
+        # Focus mode defaults: file-level only (no symbols), top 40
+        focus_top = args.top or 40
+        focus_symbols = args.top_symbols > 0 and not args.no_symbols
         nodes, file_ids, repo_bubbles = extract_focused(
-            index, args.focus, top=args.top,
-            include_symbols=not args.no_symbols, graph_edges=all_graph_edges)
+            index, args.focus, top=focus_top,
+            include_symbols=focus_symbols, graph_edges=all_graph_edges)
         print(f'Focus: {args.focus} ({sum(1 for n in nodes if n["type"] != "repo")} nodes) '
               f'+ {len(repo_bubbles)} repo bubbles', file=sys.stderr)
     else:
