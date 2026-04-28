@@ -314,9 +314,9 @@ if __name__ == '__main__':
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     index_path = cache_dir / 'workspace-index.json'
-    with open(index_path, 'w') as f:
+    with open(index_path, 'w', encoding='utf-8') as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
-    
+
     # Also save a lightweight version (no tree, just headings + metadata)
     light_index = {
         'root': index['root'],
@@ -330,9 +330,9 @@ if __name__ == '__main__':
             'headings': f['headings'],
         } for f in index['files']],
     }
-    
+
     light_path = cache_dir / 'workspace-index-light.json'
-    with open(light_path, 'w') as f:
+    with open(light_path, 'w', encoding='utf-8') as f:
         json.dump(light_index, f, indent=2, ensure_ascii=False)
     
     # Print summary
