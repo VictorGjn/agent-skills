@@ -338,6 +338,50 @@ def test_disconnected_files_get_singleton_clusters():
     assert total_files_in_clusters == len(index['files'])
 
 
+def test_build_feature_map_with_concept_labeler():
+    """concept_llm output propagates as concept/description/sub_features per cluster."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'src/nav/side.ts', 'tokens': 100,
+         'tree': {'title': 'src/nav/side.ts', 'depth': 0, 'tokens': 100,
+                   'totalTokens': 100, 'text': '', 'firstSentence': '',
+                   'firstParagraph': '',
+                   'children': [{'title': 'SideNavbar', 'depth': 1,
+                                  'tokens': 50, 'totalTokens': 50,
+                                  'children': [], 'text': '',
+                                  'firstSentence': '', 'firstParagraph': ''}]}},
+    ]}
+
+    def fake_concept_llm(cluster, file_data, current_label, **_):
+        return {'concept': 'Navigation', 'description': 'Top + side menu',
+                'sub_features': ['Vessel List', 'Profile']}
+
+    result = build_feature_map(index, concept_llm=fake_concept_llm)
+
+    for c in result['clusters'].values():
+        assert c['concept'] == 'Navigation'
+        assert c['description'] == 'Top + side menu'
+        assert c['sub_features'] == ['Vessel List', 'Profile']
+
+
+def test_concept_fields_default_when_no_llm():
+    """Without concept_llm, every cluster still has concept/description/sub_features keys."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'a.ts', 'tokens': 10,
+         'tree': {'title': 'a.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+    ]}
+    result = build_feature_map(index)
+    for c in result['clusters'].values():
+        assert 'concept' in c
+        assert 'description' in c
+        assert c['description'] == ''
+        assert c['sub_features'] == []
+
+
 def test_apply_min_cluster_default_keeps_singletons():
     """Default CLI behaviour (min_cluster=1) must NOT drop singleton clusters
     seeded for disconnected files — otherwise the build-time fix is undone."""

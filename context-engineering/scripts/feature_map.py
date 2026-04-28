@@ -17,7 +17,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 from code_graph import build_graph_with_fallback
@@ -52,8 +52,16 @@ def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -> dict[str, Any]:
-    """Full pipeline: index → graph → communities → labeled meta-graph."""
+def build_feature_map(index: dict[str, Any], graphify_path: str | None = None, *,
+                      concept_llm: Callable[..., dict[str, Any]] | None = None,
+                      cache_dir: Path | None = None) -> dict[str, Any]:
+    """Full pipeline: index → graph → communities → labeled meta-graph.
+
+    When `concept_llm` is provided, each cluster also gets an LLM-assigned
+    concept, description, and sub_features. Without it, those fields are
+    populated with the mechanical label / empty defaults so downstream
+    rendering can treat every cluster uniformly.
+    """
     files = index.get('files', [])
     graph = build_graph_with_fallback(files, graphify_path)
     labels = label_propagation(graph['edges'])
@@ -79,13 +87,36 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
         tree = f.get('tree', {})
         symbols = [c.get('title', '') for c in tree.get('children', []) if c.get('title')]
         headings = [h.get('title', '') for h in f.get('headings', [])]
-        file_data[path] = {'symbols': symbols, 'headings': headings}
+        file_data[path] = {
+            'symbols': symbols,
+            'headings': headings,
+            'first_sentence': f.get('firstSentence', '') or tree.get('firstSentence', ''),
+        }
         path_tokens[path] = f.get('tokens', 0)
 
     cluster_labels = label_clusters(meta['clusters'], file_data)
 
+    concept_results: dict[Any, dict[str, Any]] = {}
+    if concept_llm is not None and meta['clusters']:
+        # concept_llm is the user-facing seam: it can be either a
+        # label_all_clusters-shaped function (cluster, file_data, current_label)
+        # → dict, or the already-fanned-out dict produced upstream. The first
+        # form is what tests pass; we adapt to label_all_clusters here.
+        for cid, cluster in meta['clusters'].items():
+            try:
+                concept_results[cid] = concept_llm(
+                    cluster=cluster,
+                    file_data=file_data,
+                    current_label=cluster_labels.get(cid, f'Cluster {cid}'),
+                    cache_dir=cache_dir,
+                )
+            except TypeError:
+                # concept_llm signature mismatch — skip silently and use defaults.
+                concept_results[cid] = {}
+
     for label, cluster in meta['clusters'].items():
-        cluster['label'] = cluster_labels.get(label, f'Cluster {label}')
+        mechanical = cluster_labels.get(label, f'Cluster {label}')
+        cluster['label'] = mechanical
         cluster['file_count'] = len(cluster['nodes'])
         cluster['total_tokens'] = sum(path_tokens.get(n, 0) for n in cluster['nodes'])
         sym_counts: Counter[str] = Counter()
@@ -96,6 +127,11 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None) -
         cluster['symbols'] = [
             s for s, _ in sorted(sym_counts.items(), key=lambda x: (-x[1], x[0]))[:8]
         ]
+        # Concept fields — always present, populated from LLM when available
+        concept = concept_results.get(label, {})
+        cluster['concept'] = concept.get('concept', mechanical)
+        cluster['description'] = concept.get('description', '')
+        cluster['sub_features'] = concept.get('sub_features', [])
 
     return {
         'clusters': meta['clusters'],
