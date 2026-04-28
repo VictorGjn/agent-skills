@@ -217,5 +217,26 @@ class GraphDisplacementTests(unittest.TestCase):
         self.assertIn('c.py', result_paths)
 
 
+class ResolveMdLinkTests(unittest.TestCase):
+    def test_resolves_with_forward_slash_keys_on_any_platform(self):
+        """_resolve_md_link must return forward-slash paths so lookup hits the
+        normalized file_index keys regardless of host OS."""
+        import code_graph
+
+        file_index = {
+            'docs/guide.md': {'path': 'docs/guide.md'},
+            'docs/sub/inner.md': {'path': 'docs/sub/inner.md'},
+        }
+        # Relative link from docs/index.md → guide.md
+        resolved = code_graph._resolve_md_link('guide.md', 'docs', file_index)
+        self.assertEqual(resolved, 'docs/guide.md')
+        self.assertNotIn('\\', resolved)
+
+        # Nested relative link
+        nested = code_graph._resolve_md_link('sub/inner.md', 'docs', file_index)
+        self.assertEqual(nested, 'docs/sub/inner.md')
+        self.assertNotIn('\\', nested)
+
+
 if __name__ == '__main__':
     unittest.main()

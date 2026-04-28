@@ -191,8 +191,8 @@ def _resolve_md_link(link_target: str, source_dir: str, file_index: dict) -> str
         full = str(Path(source_dir) / target)
     else:
         full = target.lstrip('/')
-    # Normalize
-    full = str(Path(full))
+    # Normalize to forward slashes — file_index keys are forward-slash on Windows
+    full = str(Path(full)).replace('\\', '/')
     if full in file_index:
         return full
     for fp in file_index:
@@ -209,9 +209,10 @@ def build_graph(files: list) -> dict:
     Returns:
         {nodes, edges, outgoing, incoming, stats}
     """
+    # Normalize paths to forward slashes (Windows indexes store backslashes)
     file_index = {}
     for f in files:
-        file_index[f['path']] = f
+        file_index[f['path'].replace('\\', '/')] = f
 
     nodes = {}
     edges = []
@@ -220,7 +221,7 @@ def build_graph(files: list) -> dict:
 
     # Phase 1: Extract node metadata
     for f in files:
-        path = f['path']
+        path = f['path'].replace('\\', '/')
         ext = Path(path).suffix.lower()
         content = f.get('content', '')
         if not content and f.get('tree'):
@@ -249,12 +250,12 @@ def build_graph(files: list) -> dict:
 
     # Phase 2: Extract relations
     for f in files:
-        path = f['path']
+        path = f['path'].replace('\\', '/')
         ext = Path(path).suffix.lower()
         content = f.get('content', '')
         if not content and f.get('tree'):
             content = f['tree'].get('text', '')
-        source_dir = str(Path(path).parent)
+        source_dir = str(Path(path).parent).replace('\\', '/')
 
         # Code imports
         import_patterns = []
