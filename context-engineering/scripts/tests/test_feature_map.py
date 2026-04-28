@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -472,6 +473,53 @@ def test_html_renders_domain_legend_and_subfeatures():
     assert 'domain-list' in html  # legend container present
     assert 'clusterColor' in html  # domain-driven coloring fn present
     assert 'isCrossDomain' in html  # cross-domain edge styling present
+
+
+def test_cli_end_to_end_with_fake_llm(tmp_path, monkeypatch, capsys):
+    """main() runs end-to-end with a fake concept labeler — no live API call."""
+    import feature_map
+
+    index = {
+        'root': str(tmp_path / 'fake-repo'),
+        'totalFiles': 1, 'totalTokens': 50,
+        'files': [{
+            'path': 'src/nav/side.ts', 'tokens': 50,
+            'tree': {'title': 'src/nav/side.ts', 'depth': 0, 'tokens': 50,
+                      'totalTokens': 50, 'text': '', 'firstSentence': '',
+                      'firstParagraph': '',
+                      'children': [{'title': 'SideNavbar', 'depth': 1,
+                                     'tokens': 30, 'totalTokens': 30,
+                                     'children': [], 'text': '',
+                                     'firstSentence': '', 'firstParagraph': ''}]}},
+        ],
+    }
+    index_path = tmp_path / 'index.json'
+    index_path.write_text(json.dumps(index), encoding='utf-8')
+    output_path = tmp_path / 'feature-map.html'
+
+    # Substitute the live LLM builder with a deterministic fake.
+    def fake_builder(model):
+        def call(*, cluster, file_data, current_label, cache_dir=None, **_):
+            return {'concept': 'Navigation',
+                    'description': 'Top + side menu',
+                    'sub_features': ['Vessel List']}
+        return call
+
+    monkeypatch.setattr(feature_map, '_build_concept_llm_callable', fake_builder)
+    monkeypatch.setattr(sys, 'argv', [
+        'feature_map.py',
+        '--index', str(index_path),
+        '-o', str(output_path),
+        '--concept-llm',
+        '--concept-cache-dir', str(tmp_path / 'cache'),
+    ])
+
+    feature_map.main()
+
+    assert output_path.exists()
+    html = output_path.read_text(encoding='utf-8')
+    assert 'Navigation' in html
+    assert 'Vessel List' in html
 
 
 def test_apply_min_cluster_default_keeps_singletons():

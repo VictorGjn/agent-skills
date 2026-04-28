@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -75,7 +77,8 @@ def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
 
 def build_feature_map(index: dict[str, Any], graphify_path: str | None = None, *,
                       concept_llm: Callable[..., dict[str, Any]] | None = None,
-                      cache_dir: Path | None = None) -> dict[str, Any]:
+                      cache_dir: Path | None = None,
+                      concept_workers: int = 4) -> dict[str, Any]:
     """Full pipeline: index → graph → communities → labeled meta-graph.
 
     When `concept_llm` is provided, each cluster also gets an LLM-assigned
@@ -119,21 +122,21 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None, *
 
     concept_results: dict[Any, dict[str, Any]] = {}
     if concept_llm is not None and meta['clusters']:
-        # concept_llm is the user-facing seam: it can be either a
-        # label_all_clusters-shaped function (cluster, file_data, current_label)
-        # → dict, or the already-fanned-out dict produced upstream. The first
-        # form is what tests pass; we adapt to label_all_clusters here.
-        for cid, cluster in meta['clusters'].items():
+        def _label_one(item: tuple) -> tuple:
+            cid, cluster = item
             try:
-                concept_results[cid] = concept_llm(
+                return cid, concept_llm(
                     cluster=cluster,
                     file_data=file_data,
                     current_label=cluster_labels.get(cid, f'Cluster {cid}'),
                     cache_dir=cache_dir,
                 )
             except TypeError:
-                # concept_llm signature mismatch — skip silently and use defaults.
-                concept_results[cid] = {}
+                return cid, {}
+
+        with ThreadPoolExecutor(max_workers=max(1, concept_workers)) as pool:
+            for cid, result in pool.map(_label_one, meta['clusters'].items()):
+                concept_results[cid] = result
 
     for label, cluster in meta['clusters'].items():
         mechanical = cluster_labels.get(label, f'Cluster {label}')
@@ -762,6 +765,20 @@ def _resolve_index_and_defaults(
     return index, title, output
 
 
+def _build_concept_llm_callable(model: str) -> Callable[..., dict[str, Any]]:
+    """Build a per-cluster concept-labeling callable backed by Anthropic + concept_labeler."""
+    if not os.environ.get('ANTHROPIC_API_KEY'):
+        raise SystemExit('--concept-llm requires ANTHROPIC_API_KEY in the environment.')
+    from concept_labeler import _build_anthropic_llm, label_cluster
+    llm = _build_anthropic_llm(model)
+
+    def call(*, cluster, file_data, current_label, cache_dir=None, **_):
+        return label_cluster(cluster, file_data,
+                             llm=llm, cache_dir=cache_dir,
+                             current_label=current_label)
+    return call
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bird's-eye feature map of a codebase.")
     parser.add_argument('--index', default=None, help='Path to workspace-index.json')
@@ -772,10 +789,30 @@ def main() -> None:
     parser.add_argument('--min-cluster', type=int, default=1,
                         help='Min files per cluster (default 1 keeps singleton clusters '
                              'for disconnected files; raise to filter noise)')
+    parser.add_argument('--concept-llm', action='store_true',
+                        help='Enable LLM concept labeling (requires ANTHROPIC_API_KEY)')
+    parser.add_argument('--concept-model', default='claude-haiku-4-5-20251001',
+                        help='Claude model id for concept labeling')
+    parser.add_argument('--concept-cache-dir', default='cache/concept-labels',
+                        help='Disk cache directory for concept labels')
+    parser.add_argument('--concept-workers', type=int, default=4,
+                        help='Parallel LLM calls')
     args = parser.parse_args()
 
     index, title, output = _resolve_index_and_defaults(args)
-    feature_data = build_feature_map(index, args.graphify)
+
+    concept_llm = None
+    cache_dir = None
+    if args.concept_llm:
+        concept_llm = _build_concept_llm_callable(args.concept_model)
+        cache_dir = Path(args.concept_cache_dir)
+
+    feature_data = build_feature_map(
+        index, args.graphify,
+        concept_llm=concept_llm,
+        cache_dir=cache_dir,
+        concept_workers=args.concept_workers,
+    )
     feature_data = _apply_min_cluster(feature_data, args.min_cluster)
 
     html = generate_html(feature_data, title)
@@ -785,7 +822,10 @@ def main() -> None:
 
     clusters = feature_data.get('clusters', {})
     file_count = sum(c.get('file_count', 0) for c in clusters.values())
-    print(f'Feature map: {len(clusters)} clusters, {file_count} files -> {out_path}')
+    domain_count = len(feature_data.get('domains', {}))
+    suffix = f', concept-labeled' if args.concept_llm else ''
+    print(f'Feature map: {len(clusters)} clusters, {domain_count} domains, '
+          f'{file_count} files{suffix} -> {out_path}')
 
 
 if __name__ == '__main__':

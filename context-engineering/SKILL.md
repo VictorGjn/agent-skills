@@ -141,13 +141,18 @@ python3 scripts/feature_map.py --multi-index cache/fleet-index.json cache/backen
 # Custom output
 python3 scripts/feature_map.py --index cache/workspace-index.json -o my-features.html
 
-# Tune cluster granularity on large repos (default 2)
+# Tune cluster granularity on large repos (default 1, keeps singleton clusters)
 python3 scripts/feature_map.py --index cache/backend-index.json --min-cluster 5
+
+# v2: LLM-named concepts + sub-features per cluster, domain-tier coloring
+python3 scripts/feature_map.py --index cache/fleet-index.json --concept-llm
 ```
 
-Uses label propagation community detection on the import graph to discover natural feature clusters. Each cluster is labeled by its dominant directory or top symbol names. Renders as interactive 2D SVG (D3 force-directed). Click a cluster to see its files and connections; type in the search box to highlight clusters by label.
+Uses label propagation community detection on the import graph to discover natural feature clusters. Each cluster is labeled by its dominant directory or top symbol names. A second label-propagation pass folds clusters into **domains** (only edges with weight ≥ 2 count as structural coupling); the renderer colors each cluster by domain palette slot with lightness offsets for distinct members. Renders as interactive 2D SVG (D3 force-directed). Click a domain row in the legend to filter; click a cluster to see its concept, description, sub-features, and files.
 
-On large repos (2000+ files) the default `--min-cluster 2` produces many small clusters; raise to `5` or `10` to focus on the backbone modules.
+On large repos (2000+ files) the default `--min-cluster 1` keeps every disconnected file visible; raise to `5` or `10` to focus on the backbone modules.
+
+**Concept labeling (v2):** Add `--concept-llm` to use Claude Haiku to assign product-level concept names ("Navigation" instead of "SideNavbar, TopNavBar") plus a sub-feature list shown in the click-detail panel. Labels are cached per cluster content hash under `cache/concept-labels/` — the same cluster shape reuses the same label until files move between clusters. Defaults: model `claude-haiku-4-5-20251001`, 4 parallel workers, cache dir `cache/concept-labels/`. Budget: roughly $0.05 and ~1 min on a 100-cluster repo. Requires `ANTHROPIC_API_KEY`; fails fast if missing.
 
 ## Features
 
