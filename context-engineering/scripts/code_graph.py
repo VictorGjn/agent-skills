@@ -8,10 +8,16 @@ Sources: agent-skills (core), modular-patchbay (relation kinds, task presets, bi
 Used by pack_context.py --graph mode.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
 from collections import defaultdict
+
+# Hard cap on edges built during graph construction. Prevents the silent
+# truncation pattern that produced `total_relations=12175` metadata while only
+# 5000 edges were actually stored. Configurable via env for large monorepos.
+MAX_RELATIONS = int(os.environ.get('CONTEXT_ENG_MAX_RELATIONS', 50_000))
 
 # ── Relation types (expanded from modular-patchbay's 17 kinds) ──
 

@@ -280,62 +280,78 @@ def resolve_semantic(query: str, cache_path: str = CACHE_FILE,
     return results[:top_k]
 
 
+RRF_K = 60  # Cormack 2009; canonical RRF default. Insensitive in [10..100].
+
+
+def _rrf_score(rank: int, k: int = RRF_K) -> float:
+    """Reciprocal Rank Fusion contribution for a given 1-based rank."""
+    return 1.0 / (k + rank)
+
+
 def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
-                   top_k: int = 15, semantic_weight: float = SEMANTIC_WEIGHT,
+                   top_k: int = 15, semantic_weight: float = None,
                    api_key: str = None) -> list:
     """
-    Hybrid resolution: combine keyword scores with semantic scores.
+    Hybrid resolution via Reciprocal Rank Fusion (RRF).
 
-    Args:
-        query: the user query
-        scored_files: [{path, relevance, ...}] from keyword scoring (pack_context_lib.score_file)
-        cache_path: path to embedding cache
-        top_k: max results
-        semantic_weight: weight for semantic score (keyword_weight = 1 - semantic_weight)
+    Replaces the previous tuned linear blend (semantic_weight × sem +
+    keyword_weight × kw). RRF is parameter-free, robust to score-scale
+    mismatches between keyword/semantic, and beats tuned linear fusion on
+    most TREC-style benchmarks.
 
-    Returns: [{path, confidence, keyword_score, semantic_score, reason}] sorted by confidence desc.
+    `semantic_weight` is accepted for backward compatibility but ignored —
+    pass it if you must, but it does nothing in this implementation.
+
+    Returns: [{path, confidence, keyword_score, semantic_score, reason}]
+    sorted by confidence desc. `confidence` is the RRF score (small absolute
+    number; only the ranking is meaningful).
     """
-    keyword_weight = 1.0 - semantic_weight
-
-    # Get semantic scores
     cache = load_cache(cache_path)
     query_embedding = embed_single(query, api_key) if cache else None
 
-    semantic_scores = {}
+    # Semantic ranking
+    semantic_pairs = []
     if query_embedding:
         for path, entry in cache.items():
             emb = entry.get('embedding')
             if emb:
-                semantic_scores[path] = cosine_similarity(query_embedding, emb)
+                semantic_pairs.append((path, cosine_similarity(query_embedding, emb)))
+    semantic_pairs.sort(key=lambda x: -x[1])
+    semantic_rank = {p: i + 1 for i, (p, _) in enumerate(semantic_pairs)}
+    semantic_raw = dict(semantic_pairs)
 
-    # Build keyword score map
-    keyword_scores = {sf['path']: sf['relevance'] for sf in scored_files}
+    # Keyword ranking
+    keyword_pairs = sorted(
+        ((sf['path'], sf['relevance']) for sf in scored_files if sf.get('relevance', 0) > 0),
+        key=lambda x: -x[1],
+    )
+    keyword_rank = {p: i + 1 for i, (p, _) in enumerate(keyword_pairs)}
+    keyword_raw = dict(keyword_pairs)
 
-    # Merge all paths
-    all_paths = set(keyword_scores.keys()) | set(semantic_scores.keys())
-
+    all_paths = set(keyword_rank) | set(semantic_rank)
     results = []
     for path in all_paths:
-        kw = keyword_scores.get(path, 0.0)
-        sem = semantic_scores.get(path, 0.0)
-        combined = kw * keyword_weight + sem * semantic_weight
+        rrf = 0.0
+        if path in keyword_rank:
+            rrf += _rrf_score(keyword_rank[path])
+        if path in semantic_rank:
+            rrf += _rrf_score(semantic_rank[path])
 
-        if combined < 0.1:
-            continue
+        kw_raw = keyword_raw.get(path, 0.0)
+        sem_raw = semantic_raw.get(path, 0.0)
 
-        # Determine primary reason
-        if kw > 0 and sem > 0:
-            reason = f'hybrid (kw={kw:.2f}, sem={sem:.2f})'
-        elif sem > 0:
-            reason = 'semantic only'  # this is the gap we're fixing
+        if path in keyword_rank and path in semantic_rank:
+            reason = f'rrf hybrid (kw#{keyword_rank[path]}, sem#{semantic_rank[path]})'
+        elif path in semantic_rank:
+            reason = f'semantic only (rank #{semantic_rank[path]})'
         else:
-            reason = 'keyword only'
+            reason = f'keyword only (rank #{keyword_rank[path]})'
 
         results.append({
             'path': path,
-            'confidence': round(combined, 4),
-            'keyword_score': round(kw, 4),
-            'semantic_score': round(sem, 4),
+            'confidence': round(rrf, 6),
+            'keyword_score': round(kw_raw, 4),
+            'semantic_score': round(sem_raw, 4),
             'reason': reason,
         })
 
