@@ -255,6 +255,13 @@ def main():
                         help='Graph-enhanced: follow imports/deps from entry points')
     parser.add_argument('--semantic', action='store_true',
                         help='Semantic-enhanced: hybrid keyword + embedding similarity')
+    parser.add_argument('--mode', type=str, default=None,
+                        choices=['auto', 'keyword', 'semantic', 'graph', 'deep', 'wide'],
+                        help='Backwards-compat alias: maps to --semantic/--graph. auto=keyword.')
+    parser.add_argument('--why', action='store_true',
+                        help='Backwards-compat alias for --confidence (prints trace)')
+    parser.add_argument('--no-auto-index', action='store_true',
+                        help='No-op (kept for backwards compat)')
     parser.add_argument('--task', type=str, default=None,
                         choices=['fix', 'review', 'explain', 'build', 'document', 'research'],
                         help='Task-type preset for graph traversal (auto-detects if not set with --graph)')
@@ -268,6 +275,15 @@ def main():
                         help='Path to graphify graph.json (auto-discovers at {workspace}/graphify-out/graph.json)')
     args = parser.parse_args()
 
+    if args.mode == 'graph':
+        args.graph = True
+    elif args.mode == 'semantic':
+        args.semantic = True
+    elif args.mode == 'deep':
+        args.semantic = True; args.graph = True
+    if args.why:
+        args.confidence = True
+
     if args.quality and args.top is None:
         args.top = 15
     if args.top is None:
@@ -278,7 +294,7 @@ def main():
         print(f'Index not found at {index_path}. Run index_workspace.py first.', file=sys.stderr)
         sys.exit(1)
 
-    with open(index_path) as f:
+    with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
 
     query_tokens = tokenize_query(args.query)

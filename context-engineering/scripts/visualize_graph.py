@@ -447,10 +447,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>{{TITLE}}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/three@0.175.0/build/three.min.js"></script>
-<script src="https://unpkg.com/three@0.175.0/examples/jsm/renderers/CSS2DRenderer.js" type="module"></script>
-<script src="https://unpkg.com/3d-force-graph@1"></script>
-<script src="https://unpkg.com/three-spritetext@1"></script>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three-spritetext@1.6.5/dist/three-spritetext.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
