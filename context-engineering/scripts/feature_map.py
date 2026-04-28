@@ -24,6 +24,27 @@ from code_graph import build_graph_with_fallback
 from community_detect import build_meta_graph, label_clusters, label_propagation
 
 
+def build_domain_layer(feature_data: dict[str, Any],
+                        min_edge_weight: int = 2) -> dict[Any, Any]:
+    """Group feature clusters into domains via a second pass of label propagation.
+
+    The meta-graph (cluster ↔ cluster, weighted by cross-cluster edge count)
+    is fed back into label_propagation. Only edges with weight ≥ `min_edge_weight`
+    count as structural coupling — incidental single-import links between two
+    otherwise-separate clusters do not pull them into the same domain. Isolated
+    clusters with no qualifying edges get their own domain id (cluster id reused).
+    """
+    edges = [
+        {'source': e['source'], 'target': e['target'], 'weight': e.get('weight', 1)}
+        for e in feature_data.get('meta_edges', [])
+        if e.get('weight', 1) >= min_edge_weight
+    ]
+    domain_map: dict[Any, Any] = label_propagation(edges, min_size=1)
+    for cid in feature_data.get('clusters', {}):
+        domain_map.setdefault(cid, cid)
+    return domain_map
+
+
 def merge_indexes(indexes: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge multiple workspace indexes into one, prefixing paths with repo name."""
     merged_files = []
@@ -133,11 +154,33 @@ def build_feature_map(index: dict[str, Any], graphify_path: str | None = None, *
         cluster['description'] = concept.get('description', '')
         cluster['sub_features'] = concept.get('sub_features', [])
 
+    # Hierarchical fold: feature clusters → domains via label propagation on the meta-graph.
+    domain_map = build_domain_layer({'clusters': meta['clusters'],
+                                       'meta_edges': meta['meta_edges']})
+    domains: dict[Any, dict[str, Any]] = {}
+    for cid, cluster in meta['clusters'].items():
+        did = domain_map.get(cid, cid)
+        cluster['domain'] = did
+        entry = domains.setdefault(did, {'name': '', 'cluster_ids': [], 'color_index': 0})
+        entry['cluster_ids'].append(cid)
+    # Stable color_index by first appearance order; default name from the
+    # largest member cluster's concept so v2 has something readable until
+    # a future v3 adds a domain-naming LLM pass.
+    for idx, (did, entry) in enumerate(domains.items()):
+        entry['color_index'] = idx % 16
+        members = [meta['clusters'][cid] for cid in entry['cluster_ids']]
+        biggest = max(members, key=lambda c: c.get('file_count', 0), default=None)
+        if biggest is not None and biggest.get('concept'):
+            entry['name'] = biggest['concept']
+        else:
+            entry['name'] = f'Domain {did}'
+
     return {
         'clusters': meta['clusters'],
         'meta_edges': meta['meta_edges'],
         'cluster_labels': cluster_labels,
         'node_labels': labels,
+        'domains': domains,
     }
 
 

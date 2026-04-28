@@ -382,6 +382,62 @@ def test_concept_fields_default_when_no_llm():
         assert c['sub_features'] == []
 
 
+def test_build_domain_layer_groups_clusters():
+    """Heavily inter-connected clusters fold into one domain; weak links stay separate."""
+    from feature_map import build_domain_layer
+
+    feature_data = {
+        'clusters': {
+            0: {'concept': 'Navigation', 'nodes': ['a'], 'file_count': 1},
+            1: {'concept': 'Menus', 'nodes': ['b'], 'file_count': 1},
+            2: {'concept': 'Telemetry Ingest', 'nodes': ['c'], 'file_count': 1},
+        },
+        'meta_edges': [
+            {'source': 0, 'target': 1, 'weight': 5},  # Nav <-> Menus strong
+            {'source': 2, 'target': 0, 'weight': 1},  # Telemetry barely connected
+        ],
+    }
+    domains = build_domain_layer(feature_data)
+
+    assert domains[0] == domains[1], 'tightly connected clusters must share a domain'
+    assert domains[0] != domains[2], 'weak link must not pull cluster 2 in'
+
+
+def test_build_domain_layer_isolated_clusters_get_own_domain():
+    """Clusters with no meta_edges still get a domain id (their own cluster id)."""
+    from feature_map import build_domain_layer
+
+    feature_data = {
+        'clusters': {7: {'nodes': ['x'], 'file_count': 1}},
+        'meta_edges': [],
+    }
+    domains = build_domain_layer(feature_data)
+    assert domains[7] == 7
+
+
+def test_build_feature_map_attaches_domain_field():
+    """Every cluster in the result has a domain field, and result['domains'] exists."""
+    from feature_map import build_feature_map
+
+    index = {'root': '/repos/test', 'files': [
+        {'path': 'a.ts', 'tokens': 10,
+         'tree': {'title': 'a.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+        {'path': 'b.ts', 'tokens': 10,
+         'tree': {'title': 'b.ts', 'depth': 0, 'tokens': 10, 'totalTokens': 10,
+                   'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}},
+    ]}
+    result = build_feature_map(index)
+    assert 'domains' in result
+    for c in result['clusters'].values():
+        assert 'domain' in c
+    for entry in result['domains'].values():
+        assert 'name' in entry
+        assert 'cluster_ids' in entry
+        assert 'color_index' in entry
+        assert 0 <= entry['color_index'] < 16
+
+
 def test_apply_min_cluster_default_keeps_singletons():
     """Default CLI behaviour (min_cluster=1) must NOT drop singleton clusters
     seeded for disconnected files — otherwise the build-time fix is undone."""
