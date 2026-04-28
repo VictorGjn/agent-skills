@@ -110,7 +110,8 @@ def find_cross_repo_links(nodes: list) -> list:
 
 
 def extract_focused(index: dict, focus_repo: str, top=None,
-                     include_symbols=True, graph_edges=None) -> tuple:
+                     include_symbols=True, graph_edges=None,
+                     max_symbols=None) -> tuple:
     """Extract nodes in focus mode: expand one repo, collapse others into bubbles.
 
     The focused repo gets full file + symbol extraction (same as extract_nodes).
@@ -132,7 +133,7 @@ def extract_focused(index: dict, focus_repo: str, top=None,
     focus_index = {**index, 'files': focus_files}
     nodes, file_ids = extract_nodes(
         focus_index, top=top, include_symbols=include_symbols,
-        graph_edges=graph_edges)
+        graph_edges=graph_edges, max_symbols=max_symbols)
 
     # Create repo bubble nodes for non-focus repos
     repo_bubbles = {}
@@ -314,7 +315,8 @@ def _classify_symbol(title):
     return 'function', t.split('(')[0].strip()
 
 
-def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
+def extract_nodes(index, top=None, include_symbols=True, graph_edges=None,
+                  max_symbols=None):
     """Extract graph nodes from workspace index.
 
     Code files  → function/class/interface nodes (from AST children)
@@ -322,7 +324,8 @@ def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
     Other files → file-level nodes
 
     If top is set and graph_edges is provided, picks the most-connected files
-    rather than the largest by tokens.
+    rather than the largest by tokens. If max_symbols is set, each file emits
+    at most that many symbol nodes (largest by token count).
     """
     nodes = []
     file_ids = set()
@@ -392,7 +395,16 @@ def extract_nodes(index, top=None, include_symbols=True, graph_edges=None):
         if not include_symbols or not children:
             continue
 
-        for child in children:
+        # Optionally cap to top-N symbols per file by token count
+        symbol_children = children
+        if max_symbols is not None and len(children) > max_symbols:
+            symbol_children = sorted(
+                children,
+                key=lambda c: c.get('tokens', c.get('totalTokens', 0)),
+                reverse=True,
+            )[:max_symbols]
+
+        for child in symbol_children:
             title = child.get('title', '')
             if not title:
                 continue
@@ -610,6 +622,19 @@ const edgeColors = {
   shared_type: '#EF4444',
 };
 
+// Escape user-controlled strings before they enter innerHTML or HTML
+// template literals. Symbol/heading/path text comes from indexed repos and
+// must not execute as markup when rendered into the detail panel or tooltip.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Pre-build adjacency for detail panel
 const adj = {};
 graphData.links.forEach(l => {
@@ -650,14 +675,14 @@ const Graph = ForceGraph3D()
   .backgroundColor('#FAFBFC')
   .graphData(graphData)
   .nodeLabel(n => {
-    if (n.type === 'repo') return `<b>${n.label}</b><br/>${n.fileCount} files, ${n.symbolCount} types`;
-    let tip = `<b>${n.label}</b>`;
+    if (n.type === 'repo') return `<b>${escapeHtml(n.label)}</b><br/>${n.fileCount} files, ${n.symbolCount} types`;
+    let tip = `<b>${escapeHtml(n.label)}</b>`;
     if (n.tokens) tip += ` (${n.tokens} tok)`;
-    if (n.type !== 'file') tip += ` <span style="color:#94A3B8">${n.type}</span>`;
+    if (n.type !== 'file') tip += ` <span style="color:#94A3B8">${escapeHtml(n.type)}</span>`;
     // Show symbol list in tooltip for files
     if (n.type === 'file' && n.symbols && n.symbols.length) {
       tip += '<br/><span style="color:#94A3B8">';
-      n.symbols.slice(0, 12).forEach(s => { tip += s + '<br/>'; });
+      n.symbols.slice(0, 12).forEach(s => { tip += escapeHtml(s) + '<br/>'; });
       if (n.symbols.length > 12) tip += '... +' + (n.symbols.length - 12) + ' more';
       tip += '</span>';
     }
@@ -728,12 +753,12 @@ const Graph = ForceGraph3D()
       ? node.fileCount + ' files, ' + node.symbolCount + ' types'
       : node.tokens + ' tokens';
 
-    // Symbols list (for file nodes)
+    // Symbols list (for file nodes) — escape every value before innerHTML.
     let html = '';
     if (node.type === 'file' && node.symbols && node.symbols.length) {
       html += '<h3>Symbols (' + node.symbols.length + ')</h3>';
       node.symbols.slice(0, 30).forEach(s => {
-        html += '<div class="conn" style="color:#475569">' + s + '</div>';
+        html += '<div class="conn" style="color:#475569">' + escapeHtml(s) + '</div>';
       });
       if (node.symbols.length > 30) html += '<div class="conn" style="color:#94A3B8">... +' + (node.symbols.length - 30) + ' more</div>';
     }
@@ -745,8 +770,8 @@ const Graph = ForceGraph3D()
       conns.slice(0, 20).forEach(c => {
         const name = c.node.split('/').pop().split('::').pop();
         const arrow = c.dir === 'out' ? '&rarr;' : '&larr;';
-        html += '<div class="conn"><span class="kind">' + c.kind + '</span> '
-              + arrow + ' ' + name + '</div>';
+        html += '<div class="conn"><span class="kind">' + escapeHtml(c.kind) + '</span> '
+              + arrow + ' ' + escapeHtml(name) + '</div>';
       });
       if (conns.length > 20) html += '<div class="conn" style="color:#94A3B8">... and ' + (conns.length - 20) + ' more</div>';
     }
@@ -926,19 +951,21 @@ def main():
 
     # Extract nodes
     repo_bubbles = {}
+    max_symbols = args.top_symbols if args.top_symbols > 0 else None
     if args.focus and args.multi_index:
         # Focus mode defaults: file-level only (no symbols), top 40
         focus_top = args.top or 40
         focus_symbols = args.top_symbols > 0 and not args.no_symbols
         nodes, file_ids, repo_bubbles = extract_focused(
             index, args.focus, top=focus_top,
-            include_symbols=focus_symbols, graph_edges=all_graph_edges)
+            include_symbols=focus_symbols, max_symbols=max_symbols,
+            graph_edges=all_graph_edges)
         print(f'Focus: {args.focus} ({sum(1 for n in nodes if n["type"] != "repo")} nodes) '
               f'+ {len(repo_bubbles)} repo bubbles', file=sys.stderr)
     else:
         nodes, file_ids = extract_nodes(
             index, top=args.top, include_symbols=not args.no_symbols,
-            graph_edges=all_graph_edges)
+            max_symbols=max_symbols, graph_edges=all_graph_edges)
 
     if not nodes:
         print('No files found in index.', file=sys.stderr)

@@ -313,6 +313,59 @@ def test_full_pipeline_multi_index():
     assert len(html) > 1000
 
 
+def test_max_symbols_caps_symbol_extraction():
+    """extract_nodes(max_symbols=N) must emit at most N symbol nodes per file."""
+    from visualize_graph import extract_nodes
+
+    # File with 10 symbols of varying token sizes
+    children = [
+        {'title': f'sym_{i}', 'depth': 1, 'tokens': i * 10, 'totalTokens': i * 10,
+         'children': [], 'text': '', 'firstSentence': '', 'firstParagraph': ''}
+        for i in range(1, 11)
+    ]
+    index = {
+        'files': [{
+            'path': 'big.ts', 'tokens': 1000,
+            'tree': {'title': 'big.ts', 'depth': 0, 'tokens': 1000, 'totalTokens': 1000,
+                     'children': children, 'text': '', 'firstSentence': '', 'firstParagraph': ''},
+        }],
+    }
+
+    # Without cap: 1 file + 10 symbols
+    nodes_uncapped, _ = extract_nodes(index, include_symbols=True, max_symbols=None)
+    assert sum(1 for n in nodes_uncapped if n['type'] != 'file') == 10
+
+    # With cap=3: 1 file + 3 symbols (largest by tokens)
+    nodes_capped, _ = extract_nodes(index, include_symbols=True, max_symbols=3)
+    sym_nodes = [n for n in nodes_capped if n['type'] != 'file']
+    assert len(sym_nodes) == 3
+    # Largest tokens = sym_10, sym_9, sym_8
+    sym_labels = {n['label'] for n in sym_nodes}
+    assert 'sym_10' in sym_labels
+    assert 'sym_9' in sym_labels
+    assert 'sym_8' in sym_labels
+
+
+def test_html_escapes_symbol_text_in_detail_panel():
+    """Symbol text containing HTML must be escaped before being rendered into the detail panel."""
+    from visualize_graph import generate_html
+
+    nodes = [
+        {'id': 'evil.ts', 'label': 'evil.ts', 'type': 'file', 'path': 'evil.ts',
+         'tokens': 100, 'val': 2,
+         'symbols': ['<img src=x onerror=alert(1)>', 'normal_symbol']},
+    ]
+    html = generate_html(nodes, [], 'XSS Detail')
+
+    # The escapeHtml helper must be present so runtime concatenation is safe.
+    assert 'function escapeHtml' in html
+    # Detail-panel concatenation paths must call escapeHtml on every symbol slice.
+    assert 'escapeHtml(s)' in html
+    # Connection rendering must escape both kind and name.
+    assert 'escapeHtml(c.kind)' in html
+    assert 'escapeHtml(name)' in html
+
+
 def test_generate_html_escapes_script_breakout():
     """A node label/path containing </script> must not break out of the embedding script tag."""
     from visualize_graph import generate_html, _js_safe_json
