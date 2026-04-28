@@ -247,7 +247,19 @@ def build_graph(files: list) -> dict:
             'dir': str(Path(path).parent),
         }
 
+    _truncated = [False]
+
     def _add_edge(source, target, kind):
+        # Hard cap to prevent the silent truncation pattern that left
+        # `metadata.total_relations: 12175` mismatched with `relations[]` of
+        # 5000. Past the cap we stop appending and warn once on stderr.
+        if len(edges) >= MAX_RELATIONS:
+            if not _truncated[0]:
+                _truncated[0] = True
+                print(f"<!-- code_graph: hit MAX_RELATIONS={MAX_RELATIONS}, "
+                      f"edges truncated. Set CONTEXT_ENG_MAX_RELATIONS to raise. -->",
+                      file=sys.stderr)
+            return
         edge = {'source': source, 'target': target, 'kind': kind,
                 'weight': RELATION_KINDS.get(kind, 0.3)}
         edges.append(edge)

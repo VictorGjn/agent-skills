@@ -433,11 +433,11 @@ def main():
                       time_ms=int((time.time() - t_start) * 1000),
                       ok=False, error='no_index')
             sys.exit(1)
-        # Auto-index the current working directory
+        # Auto-index the current working directory using source's scan_directory
         try:
-            from index_workspace import build_index as _build_workspace_index
+            from index_workspace import scan_directory as _scan_workspace
             print(f'No index at {index_path}. Auto-indexing {Path.cwd()}...', file=sys.stderr)
-            built = _build_workspace_index(Path.cwd())
+            built = _scan_workspace(str(Path.cwd()))
             index_path.parent.mkdir(parents=True, exist_ok=True)
             with open(index_path, 'w', encoding='utf-8') as f:
                 json.dump(built, f, ensure_ascii=False)
@@ -529,6 +529,13 @@ def main():
             'tokens': it['tokens'], 'knowledge_type': it.get('knowledge_type', 'evidence'),
         } for it in packed]
         print(json.dumps(output, indent=2, ensure_ascii=False))
+        # Telemetry on the JSON path too — JSON callers (programmatic agents)
+        # are exactly the consumers we most want activation/retention data on.
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=len(packed),
+                  tokens_used=sum(p['tokens'] for p in packed),
+                  budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000), ok=True)
         return
 
     sections = {'Full': [], 'Detail': [], 'Summary': [], 'Headlines': [], 'Mention': []}
