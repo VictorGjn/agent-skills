@@ -74,6 +74,14 @@ def detect_mode(query: str, semantic_available: bool) -> tuple:
     ql = q.lower()
     first = q.split(' ')[0] if q else ''
 
+    # Question form first — sentence-cased questions ("How does auth work?")
+    # would otherwise match the proper-noun heuristic on "How" and route to
+    # graph mode. Question routing takes priority.
+    if any(ql.startswith(lead) for lead in _QUESTION_LEADS):
+        if semantic_available:
+            return 'semantic', 'question form → semantic'
+        return 'keyword', 'question form, no OPENAI_API_KEY → keyword'
+
     has_camel = (any(c.isupper() for c in first[1:])
                  and any(c.islower() for c in first))
     has_snake = '_' in first and first.upper() != first
@@ -81,11 +89,6 @@ def detect_mode(query: str, semantic_available: bool) -> tuple:
                   and not first.endswith('?'))
     if has_camel or has_snake or has_proper:
         return 'graph', f'identifier "{first}" → graph'
-
-    if any(ql.startswith(lead) for lead in _QUESTION_LEADS):
-        if semantic_available:
-            return 'semantic', 'question form → semantic'
-        return 'keyword', 'question form, no OPENAI_API_KEY → keyword'
 
     return 'keyword', 'default keyword scan'
 

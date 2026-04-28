@@ -281,6 +281,10 @@ def resolve_semantic(query: str, cache_path: str = CACHE_FILE,
 
 
 RRF_K = 60  # Cormack 2009; canonical RRF default. Insensitive in [10..100].
+# Theoretical max RRF score: rank 1 in BOTH the keyword and semantic lists.
+# Used to normalise raw RRF values into a 0..1 scale so downstream
+# `relevance_to_depth` cutoffs (0.15/0.25/0.40/0.65) keep working.
+_RRF_MAX = 2.0 / (RRF_K + 1)
 
 
 def _rrf_score(rank: int, k: int = RRF_K) -> float:
@@ -347,9 +351,15 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
         else:
             reason = f'keyword only (rank #{keyword_rank[path]})'
 
+        # Normalise raw RRF (~0.016 max) to 0..1 so downstream
+        # `relevance_to_depth` cutoffs keep firing across Full/Detail/Summary
+        # depth bands. 1.0 = rank 1 in both rankings; ~0.5 = rank 1 in one only.
+        # Ordering is preserved exactly.
+        confidence = round(min(1.0, rrf / _RRF_MAX), 4)
+
         results.append({
             'path': path,
-            'confidence': round(rrf, 6),
+            'confidence': confidence,
             'keyword_score': round(kw_raw, 4),
             'semantic_score': round(sem_raw, 4),
             'reason': reason,
