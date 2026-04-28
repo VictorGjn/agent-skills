@@ -59,17 +59,23 @@ def _fallback(current_label: str) -> dict[str, Any]:
 def label_cluster(cluster: dict[str, Any], file_data: dict[str, dict], *,
                   llm: Callable[[str], str] | None = None,
                   cache_dir: Path | None = None,
-                  current_label: str = '') -> dict[str, Any]:
+                  current_label: str = '',
+                  model: str = '') -> dict[str, Any]:
     """Label one cluster. Returns {concept, description, sub_features}.
 
     On any failure (empty cluster, LLM exception, malformed JSON) returns the
     safe fallback derived from current_label so the caller never sees a None.
+
+    `model` is folded into the cache key so swapping the labeling model (or
+    bumping SYSTEM_PROMPT) does not silently reuse stale labels from a
+    previous run.
     """
     if not cluster.get('nodes'):
         return _fallback(current_label)
 
     prompt = build_prompt(cluster, file_data, current_label)
-    key = hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:32]
+    cache_seed = f'{model}\n{SYSTEM_PROMPT}\n{prompt}'
+    key = hashlib.sha256(cache_seed.encode('utf-8')).hexdigest()[:32]
 
     if cache_dir is not None:
         cache_dir = Path(cache_dir)
@@ -109,7 +115,7 @@ def label_cluster(cluster: dict[str, Any], file_data: dict[str, dict], *,
     if cache_dir is not None:
         try:
             payload = {**result,
-                       'model': 'unknown',
+                       'model': model or 'unknown',
                        'timestamp': datetime.now(timezone.utc).isoformat()}
             _cache_path(cache_dir, key).write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -172,6 +178,7 @@ def label_all_clusters(clusters: dict[Any, dict[str, Any]],
             cluster, file_data,
             llm=llm, cache_dir=cache_dir,
             current_label=str(cluster_labels.get(cid, '')),
+            model=model,
         )
         return cid, result
 

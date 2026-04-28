@@ -801,7 +801,8 @@ def _build_concept_llm_callable(model: str) -> Callable[..., dict[str, Any]]:
     def call(*, cluster, file_data, current_label, cache_dir=None, **_):
         return label_cluster(cluster, file_data,
                              llm=llm, cache_dir=cache_dir,
-                             current_label=current_label)
+                             current_label=current_label,
+                             model=model)
     return call
 
 

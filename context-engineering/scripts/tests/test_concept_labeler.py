@@ -97,6 +97,38 @@ def test_empty_cluster_skips_llm():
     assert calls['n'] == 0
 
 
+def test_cache_key_includes_model(tmp_path):
+    """Switching model id must invalidate the cache so a new model actually runs."""
+    from concept_labeler import label_cluster
+
+    calls = {'n': 0}
+    def fake_llm(prompt: str) -> str:
+        calls['n'] += 1
+        # Different responses so we can detect cache reuse.
+        return ('{"concept": "FromHaiku", "description": "", "sub_features": []}'
+                if calls['n'] == 1
+                else '{"concept": "FromSonnet", "description": "", "sub_features": []}')
+
+    cluster = {'nodes': ['a.ts']}
+    file_data = {'a.ts': {'symbols': ['A'], 'first_sentence': ''}}
+
+    r1 = label_cluster(cluster, file_data, llm=fake_llm,
+                        cache_dir=tmp_path, current_label='X', model='haiku')
+    r2 = label_cluster(cluster, file_data, llm=fake_llm,
+                        cache_dir=tmp_path, current_label='X', model='sonnet')
+
+    # Different model must produce a fresh LLM call (no stale cache hit).
+    assert calls['n'] == 2
+    assert r1['concept'] == 'FromHaiku'
+    assert r2['concept'] == 'FromSonnet'
+
+    # Same model, same prompt → cache hit.
+    r3 = label_cluster(cluster, file_data, llm=fake_llm,
+                        cache_dir=tmp_path, current_label='X', model='haiku')
+    assert calls['n'] == 2
+    assert r3['concept'] == 'FromHaiku'
+
+
 def test_label_all_clusters_empty_skips_llm_setup():
     """Empty clusters must short-circuit before _build_anthropic_llm runs,
     so a missing SDK / API key does not blow up no-op calls."""
