@@ -526,7 +526,9 @@ def main() -> None:
     parser.add_argument('--graphify', default=None, help='Path to graphify graph.json')
     parser.add_argument('-o', '--output', default=None, help='Output HTML path')
     parser.add_argument('--title', default=None, help='Graph title')
-    parser.add_argument('--min-cluster', type=int, default=2, help='Min files per cluster')
+    parser.add_argument('--min-cluster', type=int, default=1,
+                        help='Min files per cluster (default 1 keeps singleton clusters '
+                             'for disconnected files; raise to filter noise)')
     args = parser.parse_args()
 
     index, title, output = _resolve_index_and_defaults(args)

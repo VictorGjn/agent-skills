@@ -191,8 +191,8 @@ def _resolve_md_link(link_target: str, source_dir: str, file_index: dict) -> str
         full = str(Path(source_dir) / target)
     else:
         full = target.lstrip('/')
-    # Normalize
-    full = str(Path(full))
+    # Normalize to forward slashes — file_index keys are forward-slash on Windows
+    full = str(Path(full)).replace('\\', '/')
     if full in file_index:
         return full
     for fp in file_index:

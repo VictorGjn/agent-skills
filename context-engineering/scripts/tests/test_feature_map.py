@@ -336,3 +336,25 @@ def test_disconnected_files_get_singleton_clusters():
     # Total file_count across clusters must equal input file count
     total_files_in_clusters = sum(c['file_count'] for c in result['clusters'].values())
     assert total_files_in_clusters == len(index['files'])
+
+
+def test_apply_min_cluster_default_keeps_singletons():
+    """Default CLI behaviour (min_cluster=1) must NOT drop singleton clusters
+    seeded for disconnected files — otherwise the build-time fix is undone."""
+    from feature_map import _apply_min_cluster
+
+    feature_data = {
+        'clusters': {
+            0: {'label': 'A', 'nodes': ['a.ts', 'b.ts'],
+                'file_count': 2, 'total_tokens': 100, 'internal_edges': 1},
+            1: {'label': 'B', 'nodes': ['solo.ts'],
+                'file_count': 1, 'total_tokens': 50, 'internal_edges': 0},
+        },
+        'meta_edges': [],
+        'cluster_labels': {0: 'A', 1: 'B'},
+        'node_labels': {'a.ts': 0, 'b.ts': 0, 'solo.ts': 1},
+    }
+    kept = _apply_min_cluster(feature_data, 1)
+    assert 0 in kept['clusters']
+    assert 1 in kept['clusters'], 'singleton cluster must survive default min_cluster=1'
+    assert kept['node_labels']['solo.ts'] == 1
