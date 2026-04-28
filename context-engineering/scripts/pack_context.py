@@ -375,19 +375,27 @@ def main():
     semantic_available = bool(os.environ.get('OPENAI_API_KEY'))
 
     # ── Resolve mode ───────────────────────────────────────────────────────
+    # Precedence: `--mode` is the first-class flag and wins over the legacy
+    # `--graph` / `--semantic` shortcuts when both are passed. Wrappers that
+    # always append legacy flags can still be overridden with `--mode`.
     explicit_mode = None
-    if args.graph and args.semantic:
+    mode_source = ''
+    if args.mode != 'auto':
+        explicit_mode = args.mode
+        mode_source = f'explicit --mode {args.mode}'
+    elif args.graph and args.semantic:
         explicit_mode = 'deep'
+        mode_source = 'legacy --graph --semantic → deep'
     elif args.graph:
         explicit_mode = 'graph'
+        mode_source = 'legacy --graph'
     elif args.semantic:
         explicit_mode = 'semantic'
-    elif args.mode != 'auto':
-        explicit_mode = args.mode
+        mode_source = 'legacy --semantic'
 
     if explicit_mode:
         effective_mode = explicit_mode
-        why_trace['mode_reason'] = f'explicit --mode {explicit_mode}'
+        why_trace['mode_reason'] = mode_source
     else:
         effective_mode, why_trace['mode_reason'] = detect_mode(args.query, semantic_available)
     why_trace['mode'] = effective_mode
