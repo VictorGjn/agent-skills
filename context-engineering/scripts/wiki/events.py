@@ -81,7 +81,14 @@ def read_events(events_dir: Path, *, since_ts: int = 0,
                     # `append_event` only ever writes dicts.
                     if not isinstance(rec, dict):
                         continue
-                    if rec.get('ts', 0) < since_ts:
+                    # `ts` may be a string or other non-numeric value if a
+                    # different producer / hand-edit slipped one through.
+                    # `<` would raise TypeError and abort the whole scan, so
+                    # silently skip the row instead.
+                    ts_val = rec.get('ts', 0)
+                    if not isinstance(ts_val, (int, float)) or isinstance(ts_val, bool):
+                        continue
+                    if ts_val < since_ts:
                         continue
                     if entity_hint is not None and rec.get('entity_hint') != entity_hint:
                         continue

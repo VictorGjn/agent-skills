@@ -41,20 +41,29 @@ def cosine_distance(a: list[float], b: list[float]) -> float:
 
 
 def _centroid(vectors: list[list[float]]) -> list[float]:
-    """Mean of equal-length vectors. Vectors with mismatched dimensions are
-    skipped instead of crashing — embedding model/version drift can leak
-    differently-sized vectors into a cached event stream, and we'd rather
-    return a slightly stale centroid than IndexError out of consolidation.
+    """Mean of equal-length vectors. Pick the most common dimension as the
+    canonical one (so a single outlier in first position can't discard all
+    otherwise-compatible embeddings), and skip vectors that don't match it.
+    Returns [] when no usable vectors remain.
+
+    Embedding model/version drift can leak differently-sized vectors into a
+    cached event stream — we'd rather return a slightly stale centroid than
+    IndexError out of consolidation, AND we'd rather not silently drop the
+    majority just because one bad sample arrived first.
     """
     if not vectors:
         return []
-    dim = len(vectors[0])
-    if dim == 0:
+    from collections import Counter
+    dim_counts = Counter(len(v) for v in vectors if v)
+    if not dim_counts:
         return []
-    out = [0.0] * dim
+    canonical_dim, _ = dim_counts.most_common(1)[0]
+    if canonical_dim == 0:
+        return []
+    out = [0.0] * canonical_dim
     valid = 0
     for v in vectors:
-        if len(v) != dim:
+        if len(v) != canonical_dim:
             continue
         for i, x in enumerate(v):
             out[i] += x
