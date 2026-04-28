@@ -26,10 +26,13 @@ all = [
 ]
 
 [project.scripts]
+# Only scripts that already define a `def main()` get a console-script entry.
+# `index_workspace` and `mcp_server` use only `if __name__ == '__main__'` blocks
+# today, so invoke them via `python -m scripts.<module>` until they grow
+# callable mains. Otherwise `pip install` would expose entry points that
+# ImportError on first run.
 ce-pack = "scripts.pack_context:main"
-ce-index = "scripts.index_workspace:main"
 ce-embed = "scripts.embed_resolve:main"
-ce-mcp = "scripts.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
