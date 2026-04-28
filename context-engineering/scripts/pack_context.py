@@ -378,11 +378,15 @@ def main():
     # Precedence: `--mode` is the first-class flag and wins over the legacy
     # `--graph` / `--semantic` shortcuts when both are passed. Wrappers that
     # always append legacy flags can still be overridden with `--mode`.
+    # IMPORTANT: when --mode is explicit, RESET the legacy booleans so they
+    # don't leak into the downstream dispatch (which still inspects them).
     explicit_mode = None
     mode_source = ''
     if args.mode != 'auto':
         explicit_mode = args.mode
         mode_source = f'explicit --mode {args.mode}'
+        args.graph = False
+        args.semantic = False
     elif args.graph and args.semantic:
         explicit_mode = 'deep'
         mode_source = 'legacy --graph --semantic → deep'
