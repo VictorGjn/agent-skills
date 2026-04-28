@@ -1,0 +1,77 @@
+"""Semantic-shift detector — when to re-consolidate an entity (per GAM).
+
+The synthesizer (Phase 2) does not run on every new event. It runs when, for a
+given entity, EITHER:
+
+  1. Drift threshold: the cosine distance between the centroid of new
+     unconsolidated event embeddings and the entity's saved centroid exceeds
+     `drift_threshold` (default 0.35).
+  2. Volume threshold: at least `volume_threshold` events (default 8) have
+     accumulated for the entity since the last consolidation.
+  3. Explicit trigger: `force=True`.
+
+This decouples write-cost from read-quality, exactly as GAM intends:
+ongoing dialogue / signals stream into events/, consolidation is deferred.
+"""
+from __future__ import annotations
+import math
+from dataclasses import dataclass
+
+
+@dataclass
+class ShiftReport:
+    consolidate: bool
+    reason: str
+    drift: float
+    n_events: int
+    centroid_changed: bool
+
+
+def cosine_distance(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 1.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 1.0
+    sim = dot / (na * nb)
+    sim = max(-1.0, min(1.0, sim))
+    return 1.0 - sim
+
+
+def _centroid(vectors: list[list[float]]) -> list[float]:
+    if not vectors:
+        return []
+    dim = len(vectors[0])
+    out = [0.0] * dim
+    for v in vectors:
+        for i, x in enumerate(v):
+            out[i] += x
+    return [x / len(vectors) for x in out]
+
+
+def should_consolidate(*,
+                       entity_centroid: list[float] | None,
+                       new_event_embeddings: list[list[float]],
+                       drift_threshold: float = 0.35,
+                       volume_threshold: int = 8,
+                       force: bool = False) -> ShiftReport:
+    """Apply the three-part rule and return a structured report."""
+    n = len(new_event_embeddings)
+
+    if force:
+        return ShiftReport(True, 'forced', 1.0, n, True)
+    if n == 0:
+        return ShiftReport(False, 'no new events', 0.0, 0, False)
+    if n >= volume_threshold:
+        return ShiftReport(True, f'volume ≥ {volume_threshold}', 0.0, n, False)
+    if not entity_centroid:
+        # First-ever consolidation — always do it.
+        return ShiftReport(True, 'no prior centroid', 1.0, n, True)
+
+    new_centroid = _centroid(new_event_embeddings)
+    drift = cosine_distance(entity_centroid, new_centroid)
+    if drift >= drift_threshold:
+        return ShiftReport(True, f'drift {drift:.3f} ≥ {drift_threshold}', drift, n, True)
+    return ShiftReport(False, f'drift {drift:.3f} below {drift_threshold}', drift, n, False)

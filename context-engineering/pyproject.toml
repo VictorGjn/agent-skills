@@ -1,0 +1,39 @@
+[project]
+name = "context-engineering"
+version = "0.3.0"
+description = "Pack 40+ files at 5 depth levels into any LLM context window — keyword, semantic, and graph resolution with anti-hallucination filters."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Victor Grosjean" }]
+readme = "SKILL.md"
+
+dependencies = [
+  "requests>=2.31,<3",
+]
+
+[project.optional-dependencies]
+ast = [
+  "tree-sitter==0.21.3",
+  "tree-sitter-languages==1.10.2",
+]
+mcp = [
+  "mcp[cli]>=1.0,<2",
+]
+all = [
+  "tree-sitter==0.21.3",
+  "tree-sitter-languages==1.10.2",
+  "mcp[cli]>=1.0,<2",
+]
+
+[project.scripts]
+ce-pack = "scripts.pack_context:main"
+ce-index = "scripts.index_workspace:main"
+ce-embed = "scripts.embed_resolve:main"
+ce-mcp = "scripts.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["scripts", "scripts.wiki"]
