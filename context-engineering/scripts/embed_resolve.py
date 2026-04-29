@@ -293,7 +293,7 @@ def _rrf_score(rank: int, k: int = RRF_K) -> float:
 
 
 def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
-                   top_k: int = 15, semantic_weight: float = None,
+                   top_k: int = 15, semantic_weight: 'float | None' = None,
                    api_key: str = None) -> list:
     """
     Hybrid resolution via Reciprocal Rank Fusion (RRF).
