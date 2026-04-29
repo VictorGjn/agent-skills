@@ -8,6 +8,21 @@ requiredApps: []
 
 Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 fully.
 
+## Quick start (one verb)
+
+```bash
+pack_context.py "users getting 401 on refresh tokens"
+```
+
+That's it. The skill auto-decides:
+- **Mode** — proper-noun / `CamelCase` / `snake_case` query → `graph`; `how/why/what` → `semantic` (if `OPENAI_API_KEY` set, else `keyword`); else `keyword`.
+- **Task preset** — matches `fix / bug / 401 / traceback` → `--task fix`; `review / pr` → `review`; `explain / how does` → `explain`; etc.
+- **Index** — auto-builds one for `cwd` if no index exists at the configured cache path.
+
+Every call is logged to `cache/usage.jsonl` (metadata only — query length, mode, task, files packed, budget %, time_ms — no query content). Pass `--why` to see the trace inline.
+
+Override anything with explicit flags (`--mode`, `--task`, `--graph`, `--semantic`, etc. — all still work).
+
 ## How it works
 
 ```
