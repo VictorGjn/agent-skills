@@ -345,32 +345,43 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
         kw_raw = keyword_raw.get(path, 0.0)
         sem_raw = semantic_raw.get(path, 0.0)
 
-        # confidence = match strength, NOT rank position. Rank-only RRF would
-        # inflate every keyword-only result (rank #1 → 0.5, rank #2 → 0.49…)
-        # regardless of how weak the underlying keyword score was, then
-        # downstream `relevance_to_depth` would pack it at Detail when the raw
-        # score deserves Mention. Only use the rank-fusion math when BOTH
-        # signals contribute — otherwise carry the raw score forward.
+        # `confidence` MUST reflect actual match strength, because
+        # downstream `pack_context_lib.relevance_to_depth` uses fixed
+        # thresholds (0.15/0.25/0.40/0.65) to pick a depth band. Rank-fusion
+        # values would inflate weak matches (rank 15 in both lists → ~0.81
+        # via normalised RRF) and pack noise at Detail/Full.
+        #
+        # Use the raw scores. RRF (computed below) is kept as a tie-break
+        # bonus so files confirmed in BOTH rankings sort above same-strength
+        # files seen in only one — without inflating the absolute score.
         if path in keyword_rank and path in semantic_rank:
-            rrf = _rrf_score(keyword_rank[path]) + _rrf_score(semantic_rank[path])
-            confidence = round(min(1.0, rrf / _RRF_MAX), 4)
-            reason = f'rrf hybrid (kw#{keyword_rank[path]}, sem#{semantic_rank[path]})'
+            confidence = max(kw_raw, sem_raw)
+            rrf_bonus = _rrf_score(keyword_rank[path]) + _rrf_score(semantic_rank[path])
+            reason = (f'hybrid (kw={kw_raw:.3f}#{keyword_rank[path]}, '
+                      f'sem={sem_raw:.3f}#{semantic_rank[path]})')
         elif path in semantic_rank:
-            confidence = round(sem_raw, 4)  # raw cosine
+            confidence = sem_raw
+            rrf_bonus = _rrf_score(semantic_rank[path])
             reason = f'semantic only (cos={sem_raw:.3f})'
         else:
-            confidence = round(kw_raw, 4)   # raw keyword relevance
+            confidence = kw_raw
+            rrf_bonus = _rrf_score(keyword_rank[path])
             reason = f'keyword only (rel={kw_raw:.3f})'
 
         results.append({
             'path': path,
-            'confidence': confidence,
+            'confidence': round(confidence, 4),
             'keyword_score': round(kw_raw, 4),
             'semantic_score': round(sem_raw, 4),
+            '_rrf_bonus': rrf_bonus,
             'reason': reason,
         })
 
-    results.sort(key=lambda x: -x['confidence'])
+    # Sort primarily by raw match strength, RRF as tie-break. Drop the
+    # internal _rrf_bonus before returning so callers see a clean shape.
+    results.sort(key=lambda x: (-x['confidence'], -x['_rrf_bonus']))
+    for r in results:
+        del r['_rrf_bonus']
     return results[:top_k]
 
 

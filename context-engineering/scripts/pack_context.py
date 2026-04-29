@@ -426,7 +426,12 @@ def main():
         args.semantic = True
     # 'keyword' → leave both False
 
-    if args.quality and args.top is None:
+    # `--quality` always wins on top size — it forces a smaller candidate
+    # set regardless of mode. Was previously gated on `args.top is None`,
+    # which made it silently ineffective in deep/wide modes (which prefill
+    # top to 30/50 above) and in any case where a back-compat caller had
+    # already set top.
+    if args.quality:
         args.top = 15
     if args.top is None:
         args.top = 30
