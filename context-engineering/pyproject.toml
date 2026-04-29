@@ -1,0 +1,49 @@
+[project]
+name = "context-engineering"
+version = "0.3.0"
+description = "Pack 40+ files at 5 depth levels into any LLM context window — keyword, semantic, and graph resolution with anti-hallucination filters."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Victor Grosjean" }]
+readme = "SKILL.md"
+
+dependencies = [
+  "requests>=2.31,<3",
+]
+
+[project.optional-dependencies]
+ast = [
+  "tree-sitter==0.21.3",
+  "tree-sitter-languages==1.10.2",
+]
+mcp = [
+  "mcp[cli]>=1.0,<2",
+]
+all = [
+  "tree-sitter==0.21.3",
+  "tree-sitter-languages==1.10.2",
+  "mcp[cli]>=1.0,<2",
+]
+
+# Console scripts intentionally NOT exposed yet:
+#
+# pack_context.py / embed_resolve.py / index_workspace.py / mcp_server.py
+# all derive their default cache + index paths from `Path(__file__).parent`,
+# which under a non-editable `pip install` resolves to the site-packages
+# location instead of the user's workspace. That breaks the advertised
+# out-of-box CLI flow (the cache lives where users can't find it).
+#
+# Use one of:
+#   pip install -e .            # editable install — __file__ stays in source
+#   python -m scripts.pack_context "query"
+#   python scripts/pack_context.py "query" --index <path>
+#
+# Re-introduce `[project.scripts]` once cache/index paths are workspace-
+# relative or honour XDG_CACHE_HOME (planned in ROADMAP §0).
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["scripts", "scripts.wiki"]

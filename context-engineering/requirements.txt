@@ -1,0 +1,13 @@
+# context-engineering — runtime dependencies
+# Install:  python -m pip install -r requirements.txt
+
+# Semantic mode (embedding API client)
+requests>=2.31,<3
+
+# AST mode — richer code symbol extraction across 14 languages.
+# Pinned: tree-sitter ABI must match the language pack version.
+tree-sitter==0.21.3
+tree-sitter-languages==1.10.2
+
+# MCP server (stdio + HTTP)
+mcp[cli]>=1.0,<2
