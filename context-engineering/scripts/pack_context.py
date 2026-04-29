@@ -82,12 +82,19 @@ def detect_mode(query: str, semantic_available: bool) -> tuple:
             return 'semantic', 'question form → semantic'
         return 'keyword', 'question form, no OPENAI_API_KEY → keyword'
 
+    # Identifier-shaped first token routes to graph mode. The previous "any
+    # capital first letter" heuristic mis-classified normal sentence-cased
+    # queries ("Users getting 401...", "When did we ship X?") as identifiers
+    # and forced them into graph mode. Require an unambiguous code-shape
+    # signal — internal capitalisation (CamelCase), underscore (snake_case),
+    # or all-caps (CONSTANT) — before treating the first word as an identifier.
     has_camel = (any(c.isupper() for c in first[1:])
                  and any(c.islower() for c in first))
-    has_snake = '_' in first and first.upper() != first
-    has_proper = (first and first[:1].isupper() and len(first) > 2
-                  and not first.endswith('?'))
-    if has_camel or has_snake or has_proper:
+    has_snake = '_' in first and len(first) > 1
+    has_all_caps = (len(first) > 1
+                    and first.isupper()
+                    and any(c.isalpha() for c in first))
+    if has_camel or has_snake or has_all_caps:
         return 'graph', f'identifier "{first}" → graph'
 
     return 'keyword', 'default keyword scan'
