@@ -86,11 +86,14 @@ def should_consolidate(*,
         return ShiftReport(True, 'forced', 1.0, n, True)
     if n == 0:
         return ShiftReport(False, 'no new events', 0.0, 0, False)
+    # Check missing centroid BEFORE the volume trigger. A first-time entity
+    # with 8+ events would otherwise hit the volume branch with
+    # centroid_changed=False, leaving callers to skip writing the initial
+    # centroid and anchoring all future drift checks on missing state.
+    if not entity_centroid:
+        return ShiftReport(True, 'no prior centroid', 1.0, n, True)
     if n >= volume_threshold:
         return ShiftReport(True, f'volume ≥ {volume_threshold}', 0.0, n, False)
-    if not entity_centroid:
-        # First-ever consolidation — always do it.
-        return ShiftReport(True, 'no prior centroid', 1.0, n, True)
 
     new_centroid = _centroid(new_event_embeddings)
     # If every new embedding was dim-incompatible with the others, _centroid

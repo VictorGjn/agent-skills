@@ -25,14 +25,21 @@ all = [
   "mcp[cli]>=1.0,<2",
 ]
 
-[project.scripts]
-# Only scripts that already define a `def main()` get a console-script entry.
-# `index_workspace` and `mcp_server` use only `if __name__ == '__main__'` blocks
-# today, so invoke them via `python -m scripts.<module>` until they grow
-# callable mains. Otherwise `pip install` would expose entry points that
-# ImportError on first run.
-ce-pack = "scripts.pack_context:main"
-ce-embed = "scripts.embed_resolve:main"
+# Console scripts intentionally NOT exposed yet:
+#
+# pack_context.py / embed_resolve.py / index_workspace.py / mcp_server.py
+# all derive their default cache + index paths from `Path(__file__).parent`,
+# which under a non-editable `pip install` resolves to the site-packages
+# location instead of the user's workspace. That breaks the advertised
+# out-of-box CLI flow (the cache lives where users can't find it).
+#
+# Use one of:
+#   pip install -e .            # editable install — __file__ stays in source
+#   python -m scripts.pack_context "query"
+#   python scripts/pack_context.py "query" --index <path>
+#
+# Re-introduce `[project.scripts]` once cache/index paths are workspace-
+# relative or honour XDG_CACHE_HOME (planned in ROADMAP §0).
 
 [build-system]
 requires = ["setuptools>=68"]
