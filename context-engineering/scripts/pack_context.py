@@ -1,32 +1,40 @@
 """
 Context Packer — Query-driven depth-packed context from any indexed file collection.
 
-Modes:
-  keyword (default): Score files by keyword/stem matching, pack by budget
-  graph:             Find entry points by keyword, then traverse import graph, pack by budget
-  semantic:          Hybrid keyword + embedding similarity, then pack by budget
-  semantic+graph:    Semantic entry points → graph traversal → pack by budget
+The agent (or you) types ONE thing:
 
-Options:
-  --task TYPE:       Auto-configure graph traversal for fix/review/explain/build/document/research
-  --topic-filter:    Remove off-topic results before packing (anti-hallucination)
-  --confidence:      Print confidence signal when results are weak
+    pack "users getting 401 on refresh tokens"
 
-Usage:
-  python3 pack_context.py "query" --budget 8000
-  python3 pack_context.py "query" --budget 8000 --graph        # graph-enhanced
-  python3 pack_context.py "query" --budget 8000 --semantic     # hybrid keyword+embedding
-  python3 pack_context.py "query" --semantic --graph           # semantic + graph traversal
-  python3 pack_context.py "query" --graph --task fix           # task-aware graph traversal
-  python3 pack_context.py "query" --topic-filter               # anti-hallucination
-  python3 pack_context.py "query" --quality                    # fewer files, better depth
-  python3 pack_context.py "query" --json                       # structured output
+and gets back ~12 files at mixed depth, ~95% of an 8K budget. The skill auto-
+decides mode (keyword/semantic/graph) and task preset (fix/review/explain/...)
+from the query shape — no flags needed unless you want to override.
+
+User-facing flags (3):
+  --budget N        token budget (default 8000)
+  --mode M          auto | deep | wide | keyword | semantic | graph
+  --task T          fix | review | explain | build | document | research
+
+Useful extras:
+  --why             Print the trace: mode reason, entries, budget
+  --json            Structured output instead of markdown
+  --no-auto-index   Refuse to index automatically (require an existing index)
+
+Back-compat flags (kept working): --graph --semantic --topic-filter --confidence
+                                  --quality --top --index --graphify-path
 """
 
+import os
+import re
 import sys
 import json
+import time
+import hashlib
 import argparse
 from pathlib import Path
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pack_context_lib import (
@@ -37,6 +45,98 @@ from pack_context_lib import (
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 INDEX_PATH = _SCRIPT_DIR / 'cache' / 'workspace-index.json'
 EMBED_CACHE_PATH = _SCRIPT_DIR / 'cache' / 'embeddings.json'
+
+
+# ── Auto-mode + auto-task detection ────────────────────────────────────────
+
+_QUESTION_LEADS = ('how ', 'why ', 'what ', 'when ', 'where ', 'explain ',
+                   'describe ', 'tell me ')
+
+_TASK_HINTS = {
+    'fix': ('fix', 'bug', 'broken', 'error', 'crash', 'fails?', 'failing',
+            'regression', '401', '403', '404', '500', 'traceback'),
+    'review': ('review', 'pr', 'pull request', 'changes', 'diff', 'merge'),
+    'explain': ('explain', 'how does', 'what is', 'walk me through', 'understand'),
+    'build': ('build', 'implement', 'add', 'create', 'wire up', 'introduce'),
+    'document': ('document', 'docs', 'readme', 'write up'),
+    'research': ('research', 'investigate', 'explore', 'compare', 'evaluate',
+                 'options for'),
+}
+_TASK_PATTERNS = {
+    task: re.compile(r'\b(' + '|'.join(hints) + r')\b', re.IGNORECASE)
+    for task, hints in _TASK_HINTS.items()
+}
+
+
+def detect_mode(query: str, semantic_available: bool) -> tuple:
+    """Return (effective_mode, reason). modes: keyword | semantic | graph."""
+    q = query.strip()
+    ql = q.lower()
+    first = q.split(' ')[0] if q else ''
+
+    # Question form first — sentence-cased questions ("How does auth work?")
+    # would otherwise match the proper-noun heuristic on "How" and route to
+    # graph mode. Question routing takes priority.
+    if any(ql.startswith(lead) for lead in _QUESTION_LEADS):
+        if semantic_available:
+            return 'semantic', 'question form → semantic'
+        return 'keyword', 'question form, no OPENAI_API_KEY → keyword'
+
+    # Identifier-shaped first token routes to graph mode. The previous "any
+    # capital first letter" heuristic mis-classified normal sentence-cased
+    # queries ("Users getting 401...", "When did we ship X?") as identifiers
+    # and forced them into graph mode. Require an unambiguous code-shape
+    # signal — internal capitalisation (CamelCase), underscore (snake_case),
+    # or all-caps (CONSTANT) — before treating the first word as an identifier.
+    has_camel = (any(c.isupper() for c in first[1:])
+                 and any(c.islower() for c in first))
+    has_snake = '_' in first and len(first) > 1
+    has_all_caps = (len(first) > 1
+                    and first.isupper()
+                    and any(c.isalpha() for c in first))
+    if has_camel or has_snake or has_all_caps:
+        return 'graph', f'identifier "{first}" → graph'
+
+    return 'keyword', 'default keyword scan'
+
+
+def detect_task(query: str) -> tuple:
+    """Word-boundary regex match. Returns (task or None, reason)."""
+    for task, pat in _TASK_PATTERNS.items():
+        m = pat.search(query)
+        if m:
+            return task, f'matched "{m.group(1)}" → task:{task}'
+    return None, 'no task hint detected'
+
+
+# ── Telemetry ──────────────────────────────────────────────────────────────
+
+def log_usage(*, query: str, mode: str, task, files_packed: int, tokens_used: int,
+              budget: int, time_ms: int, ok: bool, error: str = '') -> None:
+    """Append one JSON line per pack call to <cache>/usage.jsonl. Logs metadata
+    only — no query content, no file contents. Never breaks the pack call."""
+    try:
+        cache_dir = _SCRIPT_DIR / 'cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        line = {
+            'ts': int(time.time()),
+            'cwd_hash': hashlib.md5(str(Path.cwd().resolve()).encode()).hexdigest()[:10],
+            'query_len': len(query),
+            'mode': mode,
+            'task': task,
+            'files_packed': files_packed,
+            'tokens_used': tokens_used,
+            'budget': budget,
+            'budget_used_pct': round(tokens_used / max(1, budget), 3),
+            'time_ms': time_ms,
+            'ok': ok,
+        }
+        if error:
+            line['error'] = error[:200]
+        with open(cache_dir / 'usage.jsonl', 'a', encoding='utf-8') as f:
+            f.write(json.dumps(line) + '\n')
+    except Exception:
+        pass
 
 # ── Content rendering at depth levels ──
 
@@ -255,13 +355,6 @@ def main():
                         help='Graph-enhanced: follow imports/deps from entry points')
     parser.add_argument('--semantic', action='store_true',
                         help='Semantic-enhanced: hybrid keyword + embedding similarity')
-    parser.add_argument('--mode', type=str, default=None,
-                        choices=['auto', 'keyword', 'semantic', 'graph', 'deep', 'wide'],
-                        help='Backwards-compat alias: maps to --semantic/--graph. auto=keyword.')
-    parser.add_argument('--why', action='store_true',
-                        help='Backwards-compat alias for --confidence (prints trace)')
-    parser.add_argument('--no-auto-index', action='store_true',
-                        help='No-op (kept for backwards compat)')
     parser.add_argument('--task', type=str, default=None,
                         choices=['fix', 'review', 'explain', 'build', 'document', 'research'],
                         help='Task-type preset for graph traversal (auto-detects if not set with --graph)')
@@ -269,38 +362,136 @@ def main():
                         help='Remove off-topic results before packing (anti-hallucination)')
     parser.add_argument('--confidence', action='store_true',
                         help='Print confidence signal when results are weak')
+    parser.add_argument('--mode', choices=['auto', 'deep', 'wide',
+                                           'keyword', 'semantic', 'graph'],
+                        default='auto',
+                        help='auto (default — picks by query shape), deep (semantic+graph), '
+                             'wide (keyword broad-scan), or explicit mode')
+    parser.add_argument('--why', action='store_true',
+                        help='Print the trace: how mode/task/files were chosen')
+    parser.add_argument('--no-auto-index', action='store_true',
+                        help='Refuse to index automatically (error if no index found)')
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--index', type=str, default=str(INDEX_PATH), help='Path to index')
     parser.add_argument('--graphify-path', type=str, default=None,
                         help='Path to graphify graph.json (auto-discovers at {workspace}/graphify-out/graph.json)')
     args = parser.parse_args()
 
-    if args.mode == 'graph':
-        args.graph = True
-    elif args.mode == 'semantic':
-        args.semantic = True
-    elif args.mode == 'deep':
-        args.semantic = True; args.graph = True
-    if args.why:
-        args.confidence = True
+    t_start = time.time()
+    why_trace = {}
+    semantic_available = bool(os.environ.get('OPENAI_API_KEY'))
 
-    if args.quality and args.top is None:
+    # ── Resolve mode ───────────────────────────────────────────────────────
+    # Precedence: `--mode` is the first-class flag and wins over the legacy
+    # `--graph` / `--semantic` shortcuts when both are passed. Wrappers that
+    # always append legacy flags can still be overridden with `--mode`.
+    # IMPORTANT: when --mode is explicit, RESET the legacy booleans so they
+    # don't leak into the downstream dispatch (which still inspects them).
+    explicit_mode = None
+    mode_source = ''
+    if args.mode != 'auto':
+        explicit_mode = args.mode
+        mode_source = f'explicit --mode {args.mode}'
+        args.graph = False
+        args.semantic = False
+    elif args.graph and args.semantic:
+        explicit_mode = 'deep'
+        mode_source = 'legacy --graph --semantic → deep'
+    elif args.graph:
+        explicit_mode = 'graph'
+        mode_source = 'legacy --graph'
+    elif args.semantic:
+        explicit_mode = 'semantic'
+        mode_source = 'legacy --semantic'
+
+    if explicit_mode:
+        effective_mode = explicit_mode
+        why_trace['mode_reason'] = mode_source
+    else:
+        effective_mode, why_trace['mode_reason'] = detect_mode(args.query, semantic_available)
+    why_trace['mode'] = effective_mode
+
+    # `deep` and `wide` are macros over the existing dispatch flags
+    if effective_mode == 'deep':
+        args.semantic = True
+        args.graph = True
+        if args.top is None: args.top = 30
+    elif effective_mode == 'wide':
+        args.semantic = False
+        args.graph = False
+        if args.top is None: args.top = 50
+    elif effective_mode == 'graph':
+        args.graph = True
+    elif effective_mode == 'semantic':
+        args.semantic = True
+    # 'keyword' → leave both False
+
+    # `--quality` always wins on top size — it forces a smaller candidate
+    # set regardless of mode. Was previously gated on `args.top is None`,
+    # which made it silently ineffective in deep/wide modes (which prefill
+    # top to 30/50 above) and in any case where a back-compat caller had
+    # already set top.
+    if args.quality:
         args.top = 15
     if args.top is None:
         args.top = 30
 
+    # ── Resolve task (auto-detect if not given) ───────────────────────────
+    if not args.task:
+        detected_task, task_reason = detect_task(args.query)
+        if detected_task:
+            args.task = detected_task
+        why_trace['task_reason'] = task_reason
+    else:
+        why_trace['task_reason'] = f'explicit --task {args.task}'
+    why_trace['task'] = args.task
+
+    # ── Resolve / auto-build index ────────────────────────────────────────
     index_path = Path(args.index)
     if not index_path.exists():
-        print(f'Index not found at {index_path}. Run index_workspace.py first.', file=sys.stderr)
-        sys.exit(1)
+        if args.no_auto_index:
+            print(f'No index at {index_path}. Run `index_workspace.py {Path.cwd()}` first, '
+                  f'or omit --no-auto-index to build one now.', file=sys.stderr)
+            log_usage(query=args.query, mode=effective_mode, task=args.task,
+                      files_packed=0, tokens_used=0, budget=args.budget,
+                      time_ms=int((time.time() - t_start) * 1000),
+                      ok=False, error='no_index')
+            sys.exit(1)
+        # Auto-index the current working directory using source's scan_directory
+        try:
+            from index_workspace import scan_directory as _scan_workspace
+            print(f'No index at {index_path}. Auto-indexing {Path.cwd()}...', file=sys.stderr)
+            built = _scan_workspace(str(Path.cwd()))
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(index_path, 'w', encoding='utf-8') as f:
+                json.dump(built, f, ensure_ascii=False)
+            why_trace['index_source'] = 'auto_indexed'
+            print(f'Indexed {built.get("totalFiles", "?")} files', file=sys.stderr)
+        except Exception as e:
+            print(f'Auto-index failed: {e}. Run `index_workspace.py {Path.cwd()}` manually.',
+                  file=sys.stderr)
+            log_usage(query=args.query, mode=effective_mode, task=args.task,
+                      files_packed=0, tokens_used=0, budget=args.budget,
+                      time_ms=int((time.time() - t_start) * 1000),
+                      ok=False, error=f'auto_index_failed: {e}'[:200])
+            sys.exit(1)
+    else:
+        why_trace['index_source'] = 'cached'
+    why_trace['index_path'] = str(index_path)
 
     with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
+    why_trace['index_files'] = index.get('totalFiles', len(index.get('files', [])))
 
     query_tokens = tokenize_query(args.query)
     query_lower = args.query.lower()
     if not query_tokens:
-        print('Empty query', file=sys.stderr); sys.exit(1)
+        print('Empty query', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000),
+                  ok=False, error='empty_query')
+        sys.exit(1)
 
     # Auto-discover graphify graph.json when --graph is used
     graphify_path = args.graphify_path
@@ -333,7 +524,11 @@ def main():
         scored = scored[:args.top]
 
     if not scored:
-        print(f'No files matched: "{args.query}"', file=sys.stderr); sys.exit(0)
+        print(f'No files matched: "{args.query}"', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000), ok=True)
+        sys.exit(0)
 
     # Anti-hallucination: topic filter
     if args.topic_filter:
@@ -350,7 +545,12 @@ def main():
             print(f"<!-- CONFIDENCE WARNING: {conf['signal']} -->", file=sys.stderr)
 
     if not scored:
-        print(f'No files matched after filtering: "{args.query}"', file=sys.stderr); sys.exit(0)
+        print(f'No files matched after filtering: "{args.query}"', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000),
+                  ok=True, error='filtered_empty')
+        sys.exit(0)
 
     packed = pack_context(scored, args.budget)
 
@@ -365,12 +565,27 @@ def main():
     mode = '+'.join(modes)
 
     if args.json:
-        output = [{
+        files_out = [{
             'path': it['path'], 'relevance': round(it['relevance'], 3),
             'depth': it['depth'], 'depthName': DEPTH_NAMES[it['depth']],
             'tokens': it['tokens'], 'knowledge_type': it.get('knowledge_type', 'evidence'),
         } for it in packed]
+        if args.why:
+            why_trace['files_packed'] = len(packed)
+            why_trace['tokens_used'] = sum(p['tokens'] for p in packed)
+            why_trace['budget_used_pct'] = round(
+                why_trace['tokens_used'] / max(1, args.budget), 3)
+            output = {'query': args.query, 'mode': mode, 'files': files_out, 'why': why_trace}
+        else:
+            output = files_out
         print(json.dumps(output, indent=2, ensure_ascii=False))
+        # Telemetry on the JSON path too — JSON callers (programmatic agents)
+        # are exactly the consumers we most want activation/retention data on.
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=len(packed),
+                  tokens_used=sum(p['tokens'] for p in packed),
+                  budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000), ok=True)
         return
 
     sections = {'Full': [], 'Detail': [], 'Summary': [], 'Headlines': [], 'Mention': []}
@@ -382,12 +597,39 @@ def main():
         sections[depth_name].append(rendered)
         total_tokens += item['tokens']
 
+    why_trace['files_packed'] = len(packed)
+    why_trace['tokens_used'] = total_tokens
+    why_trace['budget_used_pct'] = round(total_tokens / max(1, args.budget), 3)
+
+    if args.why:
+        _print_why_trace(args.query, why_trace, args.budget)
+
     print(f'<!-- depth-packed [{mode}] query="{args.query}" budget={args.budget} used=~{total_tokens} files={len(packed)} -->')
     print()
     for dn in ['Full', 'Detail', 'Summary', 'Headlines', 'Mention']:
         if sections[dn]:
             print(f'## {dn} ({len(sections[dn])} files)\n')
             print('\n\n'.join(sections[dn])); print()
+
+    log_usage(query=args.query, mode=effective_mode, task=args.task,
+              files_packed=len(packed), tokens_used=total_tokens,
+              budget=args.budget,
+              time_ms=int((time.time() - t_start) * 1000), ok=True)
+
+
+def _print_why_trace(query: str, why: dict, budget: int) -> None:
+    print('## Why this context\n')
+    print(f'- **Query**: `{query}`')
+    print(f'- **Mode**: `{why.get("mode")}` — {why.get("mode_reason", "")}')
+    if why.get('task'):
+        print(f'- **Task**: `{why["task"]}` — {why.get("task_reason", "")}')
+    else:
+        print(f'- **Task**: none — {why.get("task_reason", "")}')
+    print(f'- **Index**: {why.get("index_source")} ({why.get("index_files", "?")} files) — `{why.get("index_path", "")}`')
+    print(f'- **Budget**: {why.get("tokens_used", 0):,} / {budget:,} tokens '
+          f'({why.get("budget_used_pct", 0)*100:.1f}%) on {why.get("files_packed", 0)} files')
+    print()
+
 
 if __name__ == '__main__':
     main()
