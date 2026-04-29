@@ -342,27 +342,25 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
     all_paths = set(keyword_rank) | set(semantic_rank)
     results = []
     for path in all_paths:
-        rrf = 0.0
-        if path in keyword_rank:
-            rrf += _rrf_score(keyword_rank[path])
-        if path in semantic_rank:
-            rrf += _rrf_score(semantic_rank[path])
-
         kw_raw = keyword_raw.get(path, 0.0)
         sem_raw = semantic_raw.get(path, 0.0)
 
+        # confidence = match strength, NOT rank position. Rank-only RRF would
+        # inflate every keyword-only result (rank #1 → 0.5, rank #2 → 0.49…)
+        # regardless of how weak the underlying keyword score was, then
+        # downstream `relevance_to_depth` would pack it at Detail when the raw
+        # score deserves Mention. Only use the rank-fusion math when BOTH
+        # signals contribute — otherwise carry the raw score forward.
         if path in keyword_rank and path in semantic_rank:
+            rrf = _rrf_score(keyword_rank[path]) + _rrf_score(semantic_rank[path])
+            confidence = round(min(1.0, rrf / _RRF_MAX), 4)
             reason = f'rrf hybrid (kw#{keyword_rank[path]}, sem#{semantic_rank[path]})'
         elif path in semantic_rank:
-            reason = f'semantic only (rank #{semantic_rank[path]})'
+            confidence = round(sem_raw, 4)  # raw cosine
+            reason = f'semantic only (cos={sem_raw:.3f})'
         else:
-            reason = f'keyword only (rank #{keyword_rank[path]})'
-
-        # Normalise raw RRF (~0.016 max) to 0..1 so downstream
-        # `relevance_to_depth` cutoffs keep firing across Full/Detail/Summary
-        # depth bands. 1.0 = rank 1 in both rankings; ~0.5 = rank 1 in one only.
-        # Ordering is preserved exactly.
-        confidence = round(min(1.0, rrf / _RRF_MAX), 4)
+            confidence = round(kw_raw, 4)   # raw keyword relevance
+            reason = f'keyword only (rel={kw_raw:.3f})'
 
         results.append({
             'path': path,
