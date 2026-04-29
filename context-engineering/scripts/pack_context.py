@@ -565,11 +565,19 @@ def main():
     mode = '+'.join(modes)
 
     if args.json:
-        output = [{
+        files_out = [{
             'path': it['path'], 'relevance': round(it['relevance'], 3),
             'depth': it['depth'], 'depthName': DEPTH_NAMES[it['depth']],
             'tokens': it['tokens'], 'knowledge_type': it.get('knowledge_type', 'evidence'),
         } for it in packed]
+        if args.why:
+            why_trace['files_packed'] = len(packed)
+            why_trace['tokens_used'] = sum(p['tokens'] for p in packed)
+            why_trace['budget_used_pct'] = round(
+                why_trace['tokens_used'] / max(1, args.budget), 3)
+            output = {'query': args.query, 'mode': mode, 'files': files_out, 'why': why_trace}
+        else:
+            output = files_out
         print(json.dumps(output, indent=2, ensure_ascii=False))
         # Telemetry on the JSON path too — JSON callers (programmatic agents)
         # are exactly the consumers we most want activation/retention data on.
