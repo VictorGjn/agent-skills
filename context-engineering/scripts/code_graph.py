@@ -8,10 +8,27 @@ Sources: agent-skills (core), modular-patchbay (relation kinds, task presets, bi
 Used by pack_context.py --graph mode.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
 from collections import defaultdict
+
+# Hard cap on edges built during graph construction. Prevents the silent
+# truncation pattern that produced `total_relations=12175` metadata while only
+# 5000 edges were actually stored. Configurable via env for large monorepos.
+# Bare int() at import time would crash the whole graph path on a typo
+# (e.g. `CONTEXT_ENG_MAX_RELATIONS=50k`) — fall back to the default with a
+# stderr warning instead.
+_DEFAULT_MAX_RELATIONS = 50_000
+try:
+    MAX_RELATIONS = int(os.environ.get('CONTEXT_ENG_MAX_RELATIONS', _DEFAULT_MAX_RELATIONS))
+    if MAX_RELATIONS <= 0:
+        raise ValueError('must be positive')
+except (TypeError, ValueError) as _e:
+    print(f"<!-- code_graph: invalid CONTEXT_ENG_MAX_RELATIONS={os.environ.get('CONTEXT_ENG_MAX_RELATIONS')!r} "
+          f"({_e}); falling back to {_DEFAULT_MAX_RELATIONS}. -->", file=sys.stderr)
+    MAX_RELATIONS = _DEFAULT_MAX_RELATIONS
 
 # ── Relation types (expanded from modular-patchbay's 17 kinds) ──
 
@@ -241,7 +258,19 @@ def build_graph(files: list) -> dict:
             'dir': str(Path(path).parent),
         }
 
+    _truncated = [False]
+
     def _add_edge(source, target, kind):
+        # Hard cap to prevent the silent truncation pattern that left
+        # `metadata.total_relations: 12175` mismatched with `relations[]` of
+        # 5000. Past the cap we stop appending and warn once on stderr.
+        if len(edges) >= MAX_RELATIONS:
+            if not _truncated[0]:
+                _truncated[0] = True
+                print(f"<!-- code_graph: hit MAX_RELATIONS={MAX_RELATIONS}, "
+                      f"edges truncated. Set CONTEXT_ENG_MAX_RELATIONS to raise. -->",
+                      file=sys.stderr)
+            return
         edge = {'source': source, 'target': target, 'kind': kind,
                 'weight': RELATION_KINDS.get(kind, 0.3)}
         edges.append(edge)
