@@ -313,13 +313,20 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
     cache = load_cache(cache_path)
     query_embedding = embed_single(query, api_key) if cache else None
 
-    # Semantic ranking
+    # Semantic ranking — gate on a minimum cosine so unrelated queries don't
+    # produce phantom "top" results just by virtue of every cached file
+    # ranking SOMEWHERE. The previous linear-blend path had the equivalent
+    # `combined < 0.1` cutoff; RRF needs its own pre-rank filter to keep
+    # the same anti-noise contract.
+    SEM_MIN_COSINE = 0.15
     semantic_pairs = []
     if query_embedding:
         for path, entry in cache.items():
             emb = entry.get('embedding')
             if emb:
-                semantic_pairs.append((path, cosine_similarity(query_embedding, emb)))
+                sim = cosine_similarity(query_embedding, emb)
+                if sim >= SEM_MIN_COSINE:
+                    semantic_pairs.append((path, sim))
     semantic_pairs.sort(key=lambda x: -x[1])
     semantic_rank = {p: i + 1 for i, (p, _) in enumerate(semantic_pairs)}
     semantic_raw = dict(semantic_pairs)

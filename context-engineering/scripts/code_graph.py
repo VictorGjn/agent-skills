@@ -17,7 +17,18 @@ from collections import defaultdict
 # Hard cap on edges built during graph construction. Prevents the silent
 # truncation pattern that produced `total_relations=12175` metadata while only
 # 5000 edges were actually stored. Configurable via env for large monorepos.
-MAX_RELATIONS = int(os.environ.get('CONTEXT_ENG_MAX_RELATIONS', 50_000))
+# Bare int() at import time would crash the whole graph path on a typo
+# (e.g. `CONTEXT_ENG_MAX_RELATIONS=50k`) — fall back to the default with a
+# stderr warning instead.
+_DEFAULT_MAX_RELATIONS = 50_000
+try:
+    MAX_RELATIONS = int(os.environ.get('CONTEXT_ENG_MAX_RELATIONS', _DEFAULT_MAX_RELATIONS))
+    if MAX_RELATIONS <= 0:
+        raise ValueError('must be positive')
+except (TypeError, ValueError) as _e:
+    print(f"<!-- code_graph: invalid CONTEXT_ENG_MAX_RELATIONS={os.environ.get('CONTEXT_ENG_MAX_RELATIONS')!r} "
+          f"({_e}); falling back to {_DEFAULT_MAX_RELATIONS}. -->", file=sys.stderr)
+    MAX_RELATIONS = _DEFAULT_MAX_RELATIONS
 
 # ── Relation types (expanded from modular-patchbay's 17 kinds) ──
 
