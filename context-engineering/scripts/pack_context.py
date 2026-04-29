@@ -470,6 +470,10 @@ def main():
         except Exception as e:
             print(f'Auto-index failed: {e}. Run `index_workspace.py {Path.cwd()}` manually.',
                   file=sys.stderr)
+            log_usage(query=args.query, mode=effective_mode, task=args.task,
+                      files_packed=0, tokens_used=0, budget=args.budget,
+                      time_ms=int((time.time() - t_start) * 1000),
+                      ok=False, error=f'auto_index_failed: {e}'[:200])
             sys.exit(1)
     else:
         why_trace['index_source'] = 'cached'
@@ -482,7 +486,12 @@ def main():
     query_tokens = tokenize_query(args.query)
     query_lower = args.query.lower()
     if not query_tokens:
-        print('Empty query', file=sys.stderr); sys.exit(1)
+        print('Empty query', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000),
+                  ok=False, error='empty_query')
+        sys.exit(1)
 
     # Auto-discover graphify graph.json when --graph is used
     graphify_path = args.graphify_path
@@ -515,7 +524,11 @@ def main():
         scored = scored[:args.top]
 
     if not scored:
-        print(f'No files matched: "{args.query}"', file=sys.stderr); sys.exit(0)
+        print(f'No files matched: "{args.query}"', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000), ok=True)
+        sys.exit(0)
 
     # Anti-hallucination: topic filter
     if args.topic_filter:
@@ -532,7 +545,12 @@ def main():
             print(f"<!-- CONFIDENCE WARNING: {conf['signal']} -->", file=sys.stderr)
 
     if not scored:
-        print(f'No files matched after filtering: "{args.query}"', file=sys.stderr); sys.exit(0)
+        print(f'No files matched after filtering: "{args.query}"', file=sys.stderr)
+        log_usage(query=args.query, mode=effective_mode, task=args.task,
+                  files_packed=0, tokens_used=0, budget=args.budget,
+                  time_ms=int((time.time() - t_start) * 1000),
+                  ok=True, error='filtered_empty')
+        sys.exit(0)
 
     packed = pack_context(scored, args.budget)
 
