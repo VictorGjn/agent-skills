@@ -313,12 +313,13 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
     cache = load_cache(cache_path)
     query_embedding = embed_single(query, api_key) if cache else None
 
-    # Semantic ranking — gate on a minimum cosine so unrelated queries don't
-    # produce phantom "top" results just by virtue of every cached file
-    # ranking SOMEWHERE. The previous linear-blend path had the equivalent
-    # `combined < 0.1` cutoff; RRF needs its own pre-rank filter to keep
-    # the same anti-noise contract.
+    # Anti-noise gates — match the original linear-blend's `combined < 0.1`
+    # contract. Without these, weak hits fill `top_k` whenever the
+    # complementary signal is missing (empty cache → keyword-only path,
+    # or all-low-cosine → semantic-only path).
     SEM_MIN_COSINE = 0.15
+    KW_MIN_RELEVANCE = 0.10
+
     semantic_pairs = []
     if query_embedding:
         for path, entry in cache.items():
@@ -331,9 +332,11 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
     semantic_rank = {p: i + 1 for i, (p, _) in enumerate(semantic_pairs)}
     semantic_raw = dict(semantic_pairs)
 
-    # Keyword ranking
+    # Keyword ranking — apply the same noise floor so weak keyword matches
+    # don't pack at Detail/Summary depth when semantic is missing.
     keyword_pairs = sorted(
-        ((sf['path'], sf['relevance']) for sf in scored_files if sf.get('relevance', 0) > 0),
+        ((sf['path'], sf['relevance']) for sf in scored_files
+         if sf.get('relevance', 0) >= KW_MIN_RELEVANCE),
         key=lambda x: -x[1],
     )
     keyword_rank = {p: i + 1 for i, (p, _) in enumerate(keyword_pairs)}
