@@ -32,11 +32,82 @@ from pathlib import Path
 
 # ── Config ──
 
-EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIMS = 512  # request reduced dims (saves storage, good enough for file identity)
-EMBED_BATCH_SIZE = 100  # OpenAI allows up to 2048 inputs per batch
+EMBED_BATCH_SIZE = 100
 CACHE_FILE = "cache/embeddings.json"
 INDEX_FILE = "cache/workspace-index.json"
+PENDING_FILE = "cache/pending_embeddings.json"
+RESULTS_FILE = "cache/embedding_results.json"
+QUERY_EMBEDDING_FILE = "cache/query_embedding.json"
+
+
+def _resolve_provider() -> dict:
+    """
+    Resolve embedding provider from env. Auto-detects from API keys; override with EMBED_PROVIDER.
+    Returns: {name, base_url, key_env, model, dims, send_dims, dims_param}
+    """
+    provider = os.environ.get('EMBED_PROVIDER', '').lower()
+    if not provider:
+        if os.environ.get('MISTRAL_API_KEY'):
+            provider = 'mistral'
+        elif os.environ.get('VOYAGE_API_KEY'):
+            provider = 'voyage'
+        else:
+            provider = 'openai'
+
+    if provider == 'external':
+        # File-based handoff: vectors supplied by an orchestrator (e.g. agent calling MCP).
+        # `dump-pending` writes identities; `apply-results` reads vectors from RESULTS_FILE.
+        return {
+            'name': 'external',
+            'base_url': '',
+            'key_env': '',
+            'model': os.environ.get('EMBED_MODEL', 'mistral-embed'),
+            'dims': int(os.environ.get('EMBED_DIMS', '1024')),
+            'send_dims': False,
+            'dims_param': '',
+        }
+
+    if provider == 'mistral':
+        model = os.environ.get('EMBED_MODEL', 'codestral-embed')
+        # codestral-embed: variable dims via `output_dimension` param (256/512/1024/1536/3072).
+        # mistral-embed: fixed 1024, no dims param accepted.
+        is_codestral = 'codestral' in model
+        return {
+            'name': 'mistral',
+            'base_url': os.environ.get('EMBED_BASE_URL', 'https://api.mistral.ai/v1'),
+            'key_env': 'MISTRAL_API_KEY',
+            'model': model,
+            'dims': int(os.environ.get('EMBED_DIMS', '1536' if is_codestral else '1024')),
+            'send_dims': is_codestral,
+            'dims_param': 'output_dimension',
+        }
+
+    if provider == 'voyage':
+        return {
+            'name': 'voyage',
+            'base_url': os.environ.get('EMBED_BASE_URL', 'https://api.voyageai.com/v1'),
+            'key_env': 'VOYAGE_API_KEY',
+            'model': os.environ.get('EMBED_MODEL', 'voyage-code-3'),
+            'dims': int(os.environ.get('EMBED_DIMS', '1024')),
+            'send_dims': False,
+            'dims_param': 'output_dimension',
+        }
+
+    # openai (and any OpenAI-compatible local server like Ollama via OPENAI_BASE_URL)
+    return {
+        'name': 'openai',
+        'base_url': os.environ.get('EMBED_BASE_URL', os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')),
+        'key_env': os.environ.get('EMBED_API_KEY_ENV', 'OPENAI_API_KEY'),
+        'model': os.environ.get('EMBED_MODEL', 'text-embedding-3-small'),
+        'dims': int(os.environ.get('EMBED_DIMS', '512')),
+        'send_dims': os.environ.get('EMBED_SEND_DIMS', '1') == '1',
+        'dims_param': 'dimensions',
+    }
+
+
+PROVIDER = _resolve_provider()
+EMBED_MODEL = PROVIDER['model']
+EMBED_DIMS = PROVIDER['dims']
 
 # Hybrid weights: how much to trust semantic vs keyword
 SEMANTIC_WEIGHT = 0.6
@@ -103,32 +174,37 @@ def _collect_headings(tree: dict, max_depth: int = 3, current_depth: int = 0) ->
 
 def embed_texts(texts: list, api_key: str = None) -> list:
     """
-    Embed a list of texts using OpenAI API.
+    Embed a list of texts via the configured provider (OpenAI / Mistral / Voyage / OpenAI-compatible).
     Returns list of embedding vectors.
     """
     import requests
 
-    key = api_key or os.environ.get('OPENAI_API_KEY', '')
+    if PROVIDER['name'] == 'external':
+        print("Error: provider=external — use 'dump-pending' + agent-driven MCP embedding + 'apply-results' instead of direct embed.", file=sys.stderr)
+        sys.exit(2)
+
+    key = api_key or os.environ.get(PROVIDER['key_env'], '')
     if not key:
-        print("Error: OPENAI_API_KEY not set", file=sys.stderr)
+        print(f"Error: {PROVIDER['key_env']} not set (provider={PROVIDER['name']})", file=sys.stderr)
         sys.exit(1)
 
+    url = PROVIDER['base_url'].rstrip('/') + '/embeddings'
     all_embeddings = []
 
     for i in range(0, len(texts), EMBED_BATCH_SIZE):
         batch = texts[i:i + EMBED_BATCH_SIZE]
 
+        payload = {"model": EMBED_MODEL, "input": batch}
+        if PROVIDER['send_dims']:
+            payload[PROVIDER.get('dims_param', 'dimensions')] = EMBED_DIMS
+
         resp = requests.post(
-            "https://api.openai.com/v1/embeddings",
+            url,
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": EMBED_MODEL,
-                "input": batch,
-                "dimensions": EMBED_DIMS,
-            },
+            json=payload,
             timeout=60,
         )
 
@@ -148,6 +224,17 @@ def embed_texts(texts: list, api_key: str = None) -> list:
 
 def embed_single(text: str, api_key: str = None) -> list:
     """Embed a single text. Returns one vector."""
+    if PROVIDER['name'] == 'external':
+        # Query-time handoff: read precomputed query vector written by the agent.
+        # Override path with EMBED_QUERY_FILE. Returns None if absent (callers fall back).
+        qpath = os.environ.get('EMBED_QUERY_FILE', QUERY_EMBEDDING_FILE)
+        p = Path(qpath)
+        if not p.exists():
+            print(f"Warning: provider=external but no query embedding at {qpath}. Skipping semantic.", file=sys.stderr)
+            return None
+        with open(p, encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('embedding', data) if isinstance(data, dict) else data
     return embed_texts([text], api_key)[0]
 
 
@@ -181,6 +268,84 @@ def save_cache(cache: dict, cache_path: str):
     with open(p, 'w') as f:
         json.dump(cache, f)
     print(f"Cache saved: {len(cache)} entries → {cache_path}", file=sys.stderr)
+
+
+# ── External-provider handoff (agent drives MCP calls via files) ──
+
+def dump_pending(index_path: str, cache_path: str = CACHE_FILE, pending_path: str = PENDING_FILE) -> int:
+    """
+    Compute which files need embedding (same logic as build_embeddings) and write them
+    to pending_path. Returns count of pending entries.
+    Format: {"model": str, "dims": int, "items": [{"path": str, "hash": str, "identity": str}, ...]}
+    """
+    with open(index_path) as f:
+        index = json.load(f)
+    files = index.get('files', index) if isinstance(index, dict) else index
+    if isinstance(files, dict):
+        files = list(files.values())
+
+    cache = load_cache(cache_path)
+    items = []
+    for entry in files:
+        path = entry['path']
+        content_hash = entry.get('contentHash', entry.get('hash', ''))
+        cached = cache.get(path)
+        if cached and cached.get('hash') == content_hash and cached.get('embedding'):
+            continue
+        identity = build_identity(entry)
+        items.append({'path': path, 'hash': content_hash, 'identity': identity})
+
+    p = Path(pending_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {'model': PROVIDER['model'], 'dims': PROVIDER['dims'], 'items': items}
+    with open(p, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False)
+    print(f"Wrote {len(items)} pending -> {pending_path}", file=sys.stderr)
+    return len(items)
+
+
+def apply_results(index_path: str, cache_path: str = CACHE_FILE, results_path: str = RESULTS_FILE):
+    """
+    Read embedding vectors from results_path and merge into cache.
+    Format: {"items": [{"path": str, "hash": str, "embedding": [float, ...]}, ...]}
+    """
+    with open(results_path, encoding='utf-8') as f:
+        results = json.load(f)
+    items = results.get('items', results) if isinstance(results, dict) else results
+
+    with open(index_path) as f:
+        index = json.load(f)
+    files = index.get('files', index) if isinstance(index, dict) else index
+    if isinstance(files, dict):
+        files = list(files.values())
+    by_path = {e['path']: e for e in files}
+
+    cache = load_cache(cache_path)
+    applied = 0
+    for item in items:
+        path = item['path']
+        emb = item.get('embedding')
+        if not emb:
+            continue
+        entry = by_path.get(path)
+        if not entry:
+            continue
+        identity = cache.get(path, {}).get('identity') or build_identity(entry)
+        cache[path] = {
+            'hash': item.get('hash', entry.get('contentHash', entry.get('hash', ''))),
+            'identity': identity,
+            'embedding': emb,
+        }
+        applied += 1
+
+    # Remove stale entries (files no longer in index)
+    index_paths = set(by_path.keys())
+    stale = [p for p in cache if p not in index_paths]
+    for p in stale:
+        del cache[p]
+
+    save_cache(cache, cache_path)
+    print(f"Applied {applied} embeddings; cache now has {len(cache)} entries.", file=sys.stderr)
 
 
 # ── Build embeddings ──
@@ -260,6 +425,8 @@ def resolve_semantic(query: str, cache_path: str = CACHE_FILE,
         return []
 
     query_embedding = embed_single(query, api_key)
+    if not query_embedding:
+        return []
 
     results = []
     for path, entry in cache.items():
@@ -393,10 +560,12 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
 def main():
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  embed_resolve.py build [index_path]          # Build/update embeddings")
-        print("  embed_resolve.py resolve 'query' [--top N]   # Semantic resolve")
-        print("  embed_resolve.py resolve 'query' --hybrid    # Hybrid resolve")
-        print("  embed_resolve.py stats                       # Show cache stats")
+        print("  embed_resolve.py build [index_path]                         # Build/update via configured provider")
+        print("  embed_resolve.py dump-pending [index_path] [pending_path]   # Write identities for external embedding")
+        print("  embed_resolve.py apply-results [index_path] [results_path]  # Merge externally-supplied vectors")
+        print("  embed_resolve.py resolve 'query' [--top N]                  # Semantic resolve")
+        print("  embed_resolve.py resolve 'query' --hybrid                   # Hybrid resolve")
+        print("  embed_resolve.py stats                                      # Show cache stats")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -404,7 +573,18 @@ def main():
     if cmd == 'build':
         index_path = sys.argv[2] if len(sys.argv) > 2 else INDEX_FILE
         cache = build_embeddings(index_path)
-        print(f"\n✓ {len(cache)} files embedded")
+        print(f"\n[ok] {len(cache)} files embedded")
+
+    elif cmd == 'dump-pending':
+        index_path = sys.argv[2] if len(sys.argv) > 2 else INDEX_FILE
+        pending_path = sys.argv[3] if len(sys.argv) > 3 else PENDING_FILE
+        n = dump_pending(index_path, pending_path=pending_path)
+        print(f"\n[ok] {n} pending identities -> {pending_path}")
+
+    elif cmd == 'apply-results':
+        index_path = sys.argv[2] if len(sys.argv) > 2 else INDEX_FILE
+        results_path = sys.argv[3] if len(sys.argv) > 3 else RESULTS_FILE
+        apply_results(index_path, results_path=results_path)
 
     elif cmd == 'resolve':
         if len(sys.argv) < 3:
@@ -472,6 +652,7 @@ def main():
         print(f"  Avg identity length: {avg_identity_len:.0f} chars")
         print(f"  Embedding dims: {EMBED_DIMS}")
         print(f"  Model: {EMBED_MODEL}")
+        print(f"  Provider: {PROVIDER['name']}")
 
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
