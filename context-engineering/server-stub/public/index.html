@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CE MCP — stub</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; color: #222; }
+    code { background: #f4f4f4; padding: 0.1em 0.4em; border-radius: 3px; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    a { color: #2563eb; }
+    h1 { font-weight: 600; }
+    .muted { color: #666; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Context Engineering MCP — stub</h1>
+  <p class="muted">YC-demo deployment of <code>victorgjn/agent-skills/context-engineering</code>. Production v1 spec at <a href="https://github.com/victorgjn/agent-skills/blob/main/context-engineering/SPEC-mcp.md"><code>SPEC-mcp.md</code></a>. Brain at <a href="https://github.com/syrocolab/company-brain"><code>syrocolab/company-brain</code></a>.</p>
+
+  <h2>Endpoints (CE-1.0-stub)</h2>
+
+  <h3>GET <code>/api/health</code></h3>
+  <pre>curl https://&lt;deploy&gt;/api/health</pre>
+
+  <h3>GET <code>/api/list_corpora</code></h3>
+  <pre>curl -H "Authorization: Bearer $CE_MCP_TOKEN" \
+  https://&lt;deploy&gt;/api/list_corpora</pre>
+
+  <h3>POST <code>/api/pack_context</code></h3>
+  <pre>curl -X POST \
+  -H "Authorization: Bearer $CE_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "how does pack_context handle token budget",
+       "corpus_id": "gh-victorgjn-agent-skills-context-engineering",
+       "budget": 8000,
+       "why": true}' \
+  https://&lt;deploy&gt;/api/pack_context</pre>
+
+  <p class="muted">Stub limits: keyword scoring only (no semantic/graph), 3 depth bands (vs 5 in v1), single hard-coded corpus. Production v1 reads from the brain repo at request time.</p>
+</body>
+</html>
