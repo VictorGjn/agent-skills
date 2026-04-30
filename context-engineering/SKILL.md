@@ -1,7 +1,20 @@
 ---
 name: context-engineering
 description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Indexes markdown + code files (14 languages via tree-sitter AST symbol extraction). Keyword, semantic, and graph resolution (with optional graphify integration). Anti-hallucination filters (topic, section, confidence). Task-type presets. Do NOT use for single-file reads or when every file needs full content."
+version: 0.3.0
+spec_version: 0.1.0
+mcp_tools:
+  - pack
+  - index_workspace
+  - index_github_repo
+  - build_embeddings
+  - resolve
+  - stats
+entity_kinds: []
 requiredApps: []
+repository: https://github.com/victorgjn/agent-skills
+license: MIT
+transports: [stdio, http]
 ---
 
 # Context Engineering
@@ -335,3 +348,36 @@ Exposes tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings
 | `embed_resolve.py` | Embedding resolver: build, resolve, hybrid |
 | `embeddingResolver.ts` | TypeScript port for Node.js agents |
 | `mcp_server.py` | MCP server (stdio + HTTP + optional auth) |
+
+## Anabasis conformance
+
+This skill is the canonical reference implementation of the **`find`** skill
+in the [Anabasis spec](https://github.com/VictorGjn/anabasis/blob/main/spec/reference-skills/find.md)
+at `spec_version: 0.1.0`.
+
+The MCP surface — `pack`, `index_workspace`, `index_github_repo`,
+`build_embeddings`, `resolve`, `stats` — is the **frozen `v0.1` contract**
+any Anabasis-conformant runtime can call. Argument shapes and return
+shapes are pinned in [`reference-skills/find.md §3`](https://github.com/VictorGjn/anabasis/blob/main/spec/reference-skills/find.md#3-frozen-mcp-surface-v01).
+
+context-engineering is **independently useful** — `pip install -e .` and
+run `python3 scripts/pack_context.py "your query"` against any indexed
+repo without ever installing Anabasis. The conformance is *upward*:
+Anabasis runtimes invoke this skill; this skill has no runtime dependency
+on Anabasis.
+
+### Conformance status
+
+- [x] Frontmatter has `name`, `description`, `version`, `spec_version`,
+      `mcp_tools` (Skill ABC §1).
+- [x] Every name in `mcp_tools[]` corresponds to a `@mcp.tool()` in
+      `scripts/mcp_server.py`.
+- [x] No MCP tool exists in the server that isn't listed in `mcp_tools[]`.
+- [x] Tool name stability across minor versions (Skill ABC §B-1).
+- [x] Idempotent invocations for non-mutating tools (§B-2).
+- [x] MCP-native errors via FastMCP (§B-3).
+- [x] stdout reserved for MCP wire protocol; logs go to stderr (§B-4).
+- [x] Direct invocation entry point: `__main__` block in `mcp_server.py`
+      and CLI scripts under `scripts/` (§B-5).
+- [x] `stats` tool exposed (§B-6).
+- [x] No required Anabasis runtime dependency (§B-7).
