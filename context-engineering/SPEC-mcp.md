@@ -1,7 +1,7 @@
 # Context Engineering MCP — Specification
 
-**Version**: 1.0.0-rc1 (post-audit)
-**Status**: Release candidate. Audit-applied fixes: Cache-Control security bug (§3.1), ETag canonicalization (§3.1). Pending v1.1: lock-TTL heartbeat, `get_job_status`, MCP-spec conformance (resources/initialize, JSON-RPC error codes), telemetry expansion, hashed bearer tokens, `register_corpus` multi-part for >8 MB payloads, base64-float32 → `number[][]`, build-vs-buy §1.5, Anabasis Skill ABC framing in §1.
+**Version**: 1.0.0-rc2 (post-audit, 13 themes applied)
+**Status**: Release candidate. All 13 audit themes addressed. Final v1.0 freeze on YC outcome.
 **Editor**: Victor Grosjean
 **Last updated**: 2026-05-01
 
@@ -21,22 +21,29 @@ the brain repo `syrocolab/company-brain` MUST conform.
 
 ### Goal
 
-Provide a stable, language-agnostic interface for indexing source corpora and
-packing relevant files into LLM context windows. One server, many clients,
-shared state in a versioned GitHub repository.
+Provide the canonical [Anabasis Skill ABC](https://github.com/VictorGjn/anabasis/blob/main/spec/skill.md) reference implementation for retrieval, exposed via MCP as agent-callable depth-packing primitives. CE is the **last-mile assembler** — it turns upstream specialists' output (PDF parsers, web scrapers, transcript tools, code indexers) into LLM-ready depth-packed context, addressable by `corpus_id`, sized to the model's appetite. Specialists do source extraction; CE assembles; Anabasis orchestrates the stack.
+
+Standalone usefulness is the secondary value prop — a Claude Code or n8n caller can use CE directly without Anabasis. But the design north star is Anabasis-Skill-shaped: typed I/O, idempotent, emits events to a temporal log.
 
 ### Non-goals
 
-- **Become the company-wide knowledge graph.** Out of scope; that's
-  `syroco-product-ops`. CE indexes corpora and serves them; it does not
-  reason across them.
-- **Replace the skill mechanism.** The existing `context-engineering` skill
-  becomes a thin client that proxies to this MCP when configured.
-- **Provide chat or generation.** No LLM completions are exposed by this
-  server. Consumers compose CE tools with their own LLM clients (Claude,
-  GPT, etc.).
-- **Multi-tenant SaaS.** v1 is single-tenant Syroco-internal with one
-  shared bearer token. Per-tenant isolation is a v2 concern.
+- **Become the company-wide knowledge graph.** Out of scope; that's `syroco-product-ops` / Glean. CE indexes corpora and serves them; it does not reason across them.
+- **Replace per-source specialists.** CE does not parse PDFs (PageIndex / LlamaParse do that), scrape web (Firecrawl), transcribe audio (Whisper), or rank code into IDE results (Sourcegraph Cody). It composes their output into a unified retrieval layer. Adapters per source type produce CE's universal index format.
+- **Replace the skill mechanism.** The existing `context-engineering` skill becomes a thin client that proxies to this MCP when configured. See §11 migration path.
+- **Provide chat or generation.** No LLM completions are exposed by this server. Consumers compose CE tools with their own LLM clients (Claude, GPT, etc.).
+- **Multi-tenant SaaS.** v1 is single-tenant Syroco-internal with one shared bearer token. Per-tenant isolation is a v2 concern.
+
+## 1.5 Build vs buy
+
+A YC reviewer (or anyone reading) will ask: why not Sourcegraph Cody Context API, Cursor `@codebase`, Glean, or LlamaIndex? Answer:
+
+**Cody / Cursor / Augment** — code-retrieval specialists. CE composes them when they expose appropriate APIs; CE is *upstream* of the model's context window where Cody is *upstream* of the IDE's keyword search. Different shape: Cody returns ranked snippets to a human, CE returns a depth-packed bundle to an LLM. Anabasis Skill workflows can wrap Cody as a Skill alongside CE.
+
+**Glean** — cross-source enterprise search ($1B+, 100+ connectors). Different shape: human typing queries vs. agent runtime composing skills. Glean's moat (connectors + enterprise sales motion) is at the source-extraction layer; CE's moat is at the agent-orchestration layer above. Customers will run both.
+
+**LlamaIndex** — Python framework for building RAG apps. CE is a *deployed service* with a stable wire contract; LlamaIndex is a library you embed. CE could be implemented atop LlamaIndex internally; the spec is provider-agnostic.
+
+**The honest answer to "why build?"**: the depth-aware token-budget-fused packing primitive (Full / Detail / Summary / Structure / Mention bands within a budget) is novel and not exposed cleanly by any of the above. Combined with git-as-storage versioning (every refresh is a commit, `git log -p` is the temporal log) and the Anabasis Skill ABC contract, CE is the *agent-native, version-controlled, source-agnostic retrieval primitive* nothing else fills. If that thesis breaks, the fallback is wrapping Cody behind the same wire contract — the spec is shaped to allow that swap without client rewrites.
 
 ---
 
@@ -62,9 +69,23 @@ A server implementation is **CE-1.0-compliant** if it:
 
 ## 3. Tool catalog (v1)
 
-Six tools. All accept a JSON object request body, return a JSON object
-response. Errors follow §7. Tool names are lowercase verb_object; no
-aliases.
+**Seven tools** + standard MCP `initialize` handshake. All tools accept a JSON object request body, return a JSON object response. Errors follow §7 (mapped to JSON-RPC numeric codes per MCP spec). Tool names are lowercase verb_object; no aliases.
+
+### 3.0 MCP basics
+
+This server is a Model Context Protocol server per [modelcontextprotocol.io/specification](https://modelcontextprotocol.io/specification). Conformance:
+
+- **Transports**: `stdio` (Claude Code local) and `streamable-HTTP+SSE` (Anabasis remote, cloud routines, n8n). At least one MUST be supported; v1 reference implementation supports both.
+- **Capabilities**: server returns the following capability descriptor in its `initialize` response:
+  ```json
+  { "tools": { "listChanged": false },
+    "resources": { "listChanged": true, "subscribe": false },
+    "prompts": { "listChanged": false },
+    "logging": {} }
+  ```
+  `tools.listChanged: false` because the v1 catalog is fixed. `resources.listChanged: true` because corpora are added/removed via `register_corpus` / `delete_corpus`.
+- **Resources**: in addition to the tools below, the server exposes corpora as MCP resources under the URI scheme `corpora://`. `corpora://` lists all visible corpora; `corpora://<id>/manifest` reads a single corpus manifest. Resource access is gated by the same `data_classification` rules as tool calls (§6.3). This is the canonical way for clients to enumerate corpora — `list_corpora` is preserved as a tool for clients without resource support.
+- **Discovery**: clients use `tools/list`, `resources/list`, `resources/templates/list` to enumerate. Tool descriptions include the "use when / don't use when" framing required for high-quality LLM tool-selection.
 
 ### 3.1 `pack_context`
 
@@ -152,26 +173,38 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 
 **Idempotency**: same as `pack_context`.
 
-### 3.3 `register_corpus`
+### 3.3 `upload_indexed_corpus` (a.k.a. `register_corpus`)
 
-**Purpose**: Client uploads a pre-built index + embeddings for a corpus the server can't reach (local paths, private repos the server's GitHub App lacks access to, or specialized corpora processed by a custom adapter). Returns the `corpus_id` and the commit sha that landed.
+> **Naming note**: tool name is `upload_indexed_corpus` for explicitness — sibling write tool `index_github_repo` makes the contrast obvious to an LLM scanning the catalog ("server fetches & indexes" vs "client supplies the index"). Legacy alias `register_corpus` remains for v1.0 → v1.1 migration only and is removed in v2.
+
+**Use when**: you've already indexed a corpus locally (or via a custom adapter the server can't reach) and want to make it queryable through the MCP. Typical: local repos, private repos the server's GitHub App can't read, Granola transcripts processed by an adapter, etc.
+
+**Don't use when**: the server has read access to the source repo. Use `index_github_repo` instead — it's faster (no upload bandwidth) and the server validates against source.
 
 **Input**:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `source` | object | yes | Manifest `source` field — see `manifest.schema.json` |
-| `corpus_id` | string | no | If omitted, server derives from `source` (e.g. `gh-syrocolab-foo-main` for github_repo). |
+| `corpus_id` | string | no | If omitted, server derives from `source` (e.g. `gh-syrocolab-foo-main`). |
 | `data_classification` | enum | yes | `public` / `internal` / `confidential` / `restricted` |
 | `embedding` | object | yes | `{provider, model, dims}` |
 | `files` | array | yes | Array of file-entry objects (see `file-entry.schema.json`). |
-| `embeddings` | object | yes | `{vectors: base64-encoded float32 (N×dims), paths: [string], hashes: [string]}` |
+| `embeddings` | object | yes | See "Embeddings encoding" below. |
 | `graph_edges` | array | no | Optional; reserved for v2. |
 | `concept_clusters` | object | no | Optional; reserved for v2. |
 
+**Embeddings encoding** (audit fix — JSON-mode-safe):
+
+The `embeddings` object is one of:
+- `{ "format": "json", "vectors": [[float, ...], ...], "paths": [string], "hashes": [string] }` — N×dims `number[][]`. Tool-using LLMs can emit this reliably. **Default.**
+- `{ "format": "presigned", "vectors_url": "https://...", "paths_url": "...", "hashes_url": "...", "byte_format": "float32-le-row-major" }` — for payloads >8 MB. Client first calls `upload_indexed_corpus_init` (returns presigned URLs), uploads each blob, then calls `upload_indexed_corpus` with the URLs. Server validates byte length matches `N × dims × 4`.
+
+`paths.length === hashes.length === N` regardless of format. Server validates.
+
 **Constraints**:
-- Total request body ≤ **8 MB compressed**. Larger uploads use multi-part: client calls `register_corpus_init` → gets a presigned URL → uploads chunked → calls `register_corpus_finalize`. (Multi-part is v1.1; for v1 the 8 MB cap is hard.)
-- `embeddings.paths.length === embeddings.hashes.length === N`. Server validates.
+- Total inline (`format: "json"`) request body ≤ **32 MB**. Above 32 MB, MUST use `format: "presigned"`.
+- Per-corpus size cap: 1 GB committed (covers virtually all code repos; large doc corpora may need split-by-section).
 
 **Output**:
 
@@ -229,9 +262,12 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 {
   "corpus_id": "string",
   "job_id": "string",
-  "status": "queued"
+  "status": "queued",
+  "poll_with": "get_job_status"
 }
 ```
+
+Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_corpora` — async failure modes (Cron worker crash, OOM) may not surface in `last_refresh_error`.
 
 **Errors**:
 
@@ -283,7 +319,13 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 
 **Idempotency**: trivially idempotent (read-only).
 
-### 3.6 `health`
+### 3.6 `get_health`
+
+> **Naming note**: was `health` in v1.0-rc1. Renamed to `get_health` for verb_object consistency. Legacy `health` accepted as alias in v1.0 only.
+
+**Use when**: ops monitoring, smoke tests, version-pinning checks.
+
+**Don't use when**: you want to know if a *specific corpus* is reachable — call `list_corpora` and check `lifecycle_state`.
 
 **Purpose**: Liveness + version + commit sha for ops/monitoring.
 
@@ -303,6 +345,39 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 ```
 
 **Errors**: never errors when reachable. If unreachable, no response.
+
+### 3.7 `get_job_status`
+
+**Use when**: checking on an async refresh started via `index_github_repo(async=true)`.
+
+**Don't use when**: you have a sync result; just inspect the response.
+
+**Purpose**: Surface async job progress + terminal state. Without this tool, async semantics are observation-blind — a Cron worker that OOMs leaves the client polling forever.
+
+**Input**:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `job_id` | string | yes | Returned by an async tool call. |
+
+**Output**:
+
+```json
+{
+  "job_id": "string",
+  "corpus_id": "string",
+  "status": "queued | running | complete | failed | timeout",
+  "started_at": "string | null",
+  "completed_at": "string | null",
+  "progress": { "files_indexed": 0, "files_total": 0, "phase": "string" } | null,
+  "error": { "code": "string", "message": "string" } | null,
+  "result_commit_sha": "string | null"
+}
+```
+
+**Errors**: `JOB_NOT_FOUND` (404, not retryable — job IDs expire after 7 days), `INVALID_ARGUMENT`.
+
+**Idempotency**: trivially idempotent (read-only). Cacheable for 5 seconds.
 
 ---
 
@@ -358,16 +433,15 @@ A successful refresh resets `lifecycle_state` to `active`.
 
 A refresh is one of:
 - `index_github_repo` (server-side full re-index)
-- `register_corpus` (client-supplied re-upload)
+- `upload_indexed_corpus` (client-supplied re-upload)
 
-Refresh writes acquire a corpus-scoped lock by writing
-`manifest.lock = {holder, acquired_at, expires_at, intent}` *first*, then
-performing data writes, then releasing the lock by writing
-`manifest.lock = null` and bumping `version` + `last_refresh_completed_at`
-+ `last_refresh_commit_sha`.
+Refresh writes acquire a corpus-scoped lock by writing `manifest.lock = {holder, acquired_at, expires_at, intent}` *first*, then performing data writes, **then committing the data + lock-clear in a SINGLE tree-then-commit API call** (no separate "release commit" — that race window leaks locks). The single commit bumps `version` + `last_refresh_completed_at` + `last_refresh_commit_sha` AND sets `lock: null` atomically.
 
-Lock TTL is **120 seconds**. Stale locks (where `expires_at < now`) MAY be
-taken over by another writer.
+Lock TTL is **300 seconds** for sync refreshes (Vercel Pro 60s + buffer); **20 minutes** for async refreshes via Vercel Cron. Long-running refreshes MUST emit a heartbeat every 60 seconds that updates `lock.expires_at = now + TTL`. Without heartbeats, a 15-minute Cron job's lock would expire mid-work and another writer would race-take it over, producing torn writes.
+
+Lock acquire is idempotent on `holder`: re-PUT-ing with the same `holder` and current `lock.expires_at` is a no-op success — covers retry-after-network-hiccup cases.
+
+Stale locks (`expires_at < now`) MAY be taken over by another writer. Takeover emits a `lock.taken_over` telemetry event with `prior_holder` and `age_seconds` for SRE diagnosis.
 
 ### 5.2 Async operations
 
@@ -404,9 +478,9 @@ All tool calls require:
 Authorization: Bearer <token>
 ```
 
-Tokens are issued out-of-band (manual provisioning for v1). The server
-maintains an in-memory token → role mapping seeded from a Vercel env var
-(`CONTEXT_ENG_TOKENS_JSON`).
+Tokens are issued out-of-band. The server reads a hashed token map from Vercel KV (`tokens:` namespace), NOT a raw JSON env var. Each entry: `{token_id: string, sha256(token): string, role: enum, created_at: timestamp, last_used_at: timestamp | null}`. Token revocation = delete KV row; takes effect on next request (no redeploy). Telemetry logs `token_id` (not the token) on every `tool.call` event for auditability.
+
+A bootstrap token for the first deploy can come from `CE_MCP_BOOTSTRAP_TOKEN` env (writes one row to KV at startup if KV is empty). v2 spec moves to OAuth 2.1 per Anthropic's MCP guidance.
 
 Roles in v1:
 - `reader` — may call all read tools. Implicit `data_classification_max: internal`.
@@ -454,7 +528,28 @@ if exceeded.
 
 ## 7. Error model
 
-All errors return HTTP 4xx or 5xx with a JSON body:
+CE servers expose errors via two channels — **MCP JSON-RPC** for `stdio` and `streamable-HTTP+SSE` transports (the canonical channel), and **HTTP-level errors** for non-MCP HTTP clients calling the same Vercel functions directly.
+
+**MCP / JSON-RPC** (numeric codes per JSON-RPC 2.0 + MCP):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "<request id>",
+  "error": {
+    "code": -32602,
+    "message": "human-readable",
+    "data": {
+      "code_name": "INVALID_ARGUMENT",
+      "details": { "...": "..." },
+      "retryable": false,
+      "retry_after_seconds": null
+    }
+  }
+}
+```
+
+**HTTP-direct** (legacy / non-MCP callers):
 
 ```json
 {
@@ -467,6 +562,33 @@ All errors return HTTP 4xx or 5xx with a JSON body:
   }
 }
 ```
+
+Both convey identical information in different shapes. HTTP responses MUST also emit the `Retry-After` header (in seconds) when `retryable: true` and `retry_after_seconds` is known. This duplication is intentional — both header and body fields agree, so clients can use either.
+
+**JSON-RPC ↔ string code map**:
+
+| String code | JSON-RPC code | HTTP | Retryable |
+|---|--:|---|---|
+| `INVALID_ARGUMENT` | -32602 | 400 | no |
+| `UNAUTHENTICATED` | -32001 | 401 | no |
+| `PERMISSION_DENIED` | -32002 | 403 | no |
+| `CORPUS_NOT_FOUND` | -32004 | 404 | no |
+| `JOB_NOT_FOUND` | -32004 | 404 | no |
+| `CORPUS_LOCKED` | -32005 | 409 | yes |
+| `WRITE_CONFLICT` | -32005 | 409 | yes |
+| `EMBEDDING_MISMATCH` | -32602 | 400 | no |
+| `PAYLOAD_TOO_LARGE` | -32602 | 413 | no |
+| `RATE_LIMITED` | -32006 | 429 | yes |
+| `BUDGET_EXCEEDED` | -32007 | 408 | no — use async |
+| `EMBEDDING_PROVIDER_ERROR` | -32008 | 502 | yes |
+| `EMBEDDING_PROVIDER_PARTIAL` | -32008 | 502 | yes (with details.success_count) |
+| `BRAIN_UNAVAILABLE` | -32009 | 503 | yes |
+| `BRAIN_RATE_LIMITED` | -32010 | 503 | yes (different from BRAIN_UNAVAILABLE: GitHub secondary rate limit; back off, don't page) |
+| `WEBHOOK_SECRET_MISMATCH` | -32011 | 500 | no — operator action: reconfigure webhook |
+| `SOURCE_FORBIDDEN` | -32012 | 403 | no |
+| `SOURCE_NOT_FOUND` | -32013 | 404 | no |
+| `SOURCE_MISMATCH` | -32014 | 409 | no — corpus_id collides with different source.branch; specify `corpus_id` explicitly |
+| `INTERNAL` | -32603 | 500 | yes |
 
 Standard codes (in addition to per-tool codes above):
 
@@ -516,12 +638,19 @@ Required events:
 
 | Event | When | Fields |
 |---|---|---|
-| `tool.call` | every tool invocation, after auth | `tool, role, corpus_id?, took_ms, status_code, error_code?` |
+| `tool.call` | every tool invocation, after auth | `tool, token_id, role, corpus_id?, took_ms, status_code, error_code?, corpus_commit_sha?` |
 | `corpus.refreshed` | successful refresh commit | `corpus_id, source.commit_sha, file_count, embedded_count, took_ms` |
 | `corpus.refresh_failed` | refresh terminal failure | `corpus_id, error_code, attempts, last_error_message` |
 | `corpus.archived` | lifecycle transition to archived | `corpus_id, last_active_commit_sha, age_days` |
 | `lock.taken_over` | stale lock takeover | `corpus_id, prior_holder, age_seconds` |
-| `cache.miss` | KV/in-memory cache miss requiring tarball fetch | `corpus_id, layer, took_ms` |
+| `lock.held_duration` | every lock release (success path) | `corpus_id, holder, duration_seconds` — needed to detect leaks before takeover |
+| `cache.hit` / `cache.miss` | per-request, sampled 1:N | `layer (memory \| kv \| tarball), corpus_id, took_ms` — needed to compute hit ratio per layer for cold-storm diagnosis |
+| `brain.size` | weekly sweep | `total_bytes, per_corpus_bytes` (for monitoring 5 GB pain threshold) |
+| `embed_provider.call` | every upstream embedding API call | `provider, model, batch_size, took_ms, success, error_code?` — distinguishes provider-side outage from server-side bug |
+| `github_app.token_age` | every Octokit auth refresh | `installation_id, token_age_seconds` — App tokens expire in 1h; without this, rotation breakage falls off a cliff silently |
+| `auth.token_used` | derived from `tool.call` (sampled 1:1) | `token_id, role, ip_prefix, ua_hash` — leaked-token detection |
+
+Event schemas freeze at the same MAJOR version as the tool API. Event sink is JSON-line stdout in v1 (caller pipes to OTel collector / Vercel Logs / wherever). v1.1 will commit to OpenTelemetry semantic conventions.
 
 No event includes the `query` string or any indexed file content. Event
 schemas freeze at the same MAJOR version as the tool API.
@@ -544,7 +673,19 @@ Reserved names — implementations MUST NOT use these for unrelated tools:
 
 ---
 
-## 11. Implementation notes (informative)
+## 11. Skill-author migration path (informative)
+
+The existing `context-engineering` skill at `agent-skills/context-engineering/` is CLI-first. After v1 deploy, it becomes a thin MCP client. Migration semantics:
+
+- **Trigger**: skill checks `CONTEXT_ENG_MCP_URL` env at startup. If set, it proxies tool calls to the MCP. If unset, it falls back to local CLI execution. **Local-only mode is preserved as a first-class path** — tests, dev loops, and air-gapped use rely on it.
+- **Tool name aliasing during transition**: the skill's `mcp_tools` frontmatter pins the v1 names (`pack_context`, `find_relevant_files`, `upload_indexed_corpus`, `index_github_repo`, `list_corpora`, `get_health`, `get_job_status`). v1.0 server SHOULD accept legacy aliases (`pack`, `index_workspace`, `build_embeddings`, `resolve`, `stats`, `register_corpus`, `health`) and emit `X-CE-Deprecated` warnings. Aliases are removed in v2.
+- **Failure UX**: when `CONTEXT_ENG_MCP_URL` is set but the MCP is unreachable, the skill MUST surface a `BRAIN_UNAVAILABLE`-shaped error to its caller. Skills MAY implement automatic local fallback; default behavior is to fail-closed so callers know they're getting stale data.
+- **Test fixtures**: the reference implementation at `agent-skills/context-engineering/tests/fixtures/mock_mcp_server.py` provides deterministic responses for each tool. Skill authors building wrapper skills test against the mock first, then against staging deploy.
+- **`upload_indexed_corpus` UX in the skill**: when the skill's CLI produces a fresh local index, it MAY auto-upload to the configured MCP via `upload_indexed_corpus`. This is opt-in via `--mcp-publish` flag; default is local-only.
+
+A wrapper skill (e.g. "weekly architectural brief") can be built atop these tools without touching the MCP server — the catalog is stable across minor versions per §8.
+
+## 12. Implementation notes (informative)
 
 These are not part of the contract; they describe the v1 implementation.
 
@@ -562,7 +703,7 @@ Full rationale + alternatives considered in
 
 ---
 
-## 12. References
+## 13. References
 
 - **Brain repo**: https://github.com/syrocolab/company-brain — schemas, layout, lifecycle policy
 - **Skill**: https://github.com/victorgjn/agent-skills/tree/main/context-engineering — thin client + indexer + embedder
