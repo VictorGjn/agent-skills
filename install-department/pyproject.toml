@@ -1,0 +1,25 @@
+[project]
+name = "install-department"
+version = "0.1.0"
+description = "Install a department's slice of the company brain via multi-agent tool probes + structured methodology interview."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Victor Grosjean" }]
+readme = "SKILL.md"
+
+dependencies = [
+  "requests>=2.31,<3",
+  "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+mcp = [
+  "mcp[cli]>=1.0,<2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["scripts"]
