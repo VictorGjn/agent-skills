@@ -199,6 +199,14 @@ def write_wiki(
     actions: dict[str, str] = {}
     collision_log: list[tuple[str, str]] = []  # (final_slug, original_slug)
 
+    # Codex P1 fix: scope preservation must key on stable entity `id`,
+    # not slug filename. Slug assignment is collision-order dependent —
+    # adding a new hint that sorts earlier can shift an existing entity
+    # from foo.md to foo-2.md, and a slug-keyed lookup would copy scope
+    # from the new occupant of foo.md (a different entity). Pre-load
+    # existing-scope-by-id once before the main loop.
+    existing_scope_by_id = _load_existing_scope_by_id(wiki_dir)
+
     for hint in sorted(grouped):
         title = hint.replace("-", " ").replace("_", " ").title()
         base_slug = slugify(title)
@@ -220,12 +228,17 @@ def write_wiki(
         # superseded_by chains that key off id.
         entity_id = make_id(hint, sources_sig)
 
+        # Scope preservation by stable entity_id (Codex P1 fix on PR #25):
+        # slug can shift on collision-order changes, so use entity_id as
+        # the join key. Falls back to caller's `scope` arg for new entities.
+        target = wiki_dir / f"{slug}.md"
+        page_scope = existing_scope_by_id.get(entity_id, scope)
+
         page_text = render_page(
-            slug=slug, entity_id=entity_id, scope=scope, title=title,
+            slug=slug, entity_id=entity_id, scope=page_scope, title=title,
             events=events_for_entity, updated_iso=now_iso,
         )
 
-        target = wiki_dir / f"{slug}.md"
         if target.exists():
             # Codex P1 fix: refusal-and-rebuild model (§1.2.1) requires
             # stale-schema pages to error out, not get silently overwritten.
@@ -255,6 +268,48 @@ def write_wiki(
         _write_index_collisions(wiki_dir, collision_log)
 
     return actions
+
+
+def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
+    """Build {entity_id: scope} from all existing wiki/<slug>.md frontmatters.
+
+    Keying on stable `id` (rather than slug filename) means scope
+    survives across runs even when a new hint causes slug-collision
+    renumbering — which is exactly the bug Codex caught on PR #25.
+    Pages with malformed/missing frontmatter or scope are skipped.
+    """
+    out: dict[str, str] = {}
+    if not wiki_dir.exists():
+        return out
+    for path in wiki_dir.glob("*.md"):
+        if path.name.startswith("_"):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        in_fm = False
+        closed = False
+        page_id: str | None = None
+        scope: str | None = None
+        for line in content.splitlines():
+            if line.startswith("---"):
+                if in_fm:
+                    closed = True
+                    break
+                in_fm = True
+                continue
+            if not in_fm:
+                continue
+            if line.startswith("id:"):
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                page_id = raw if raw else None
+            elif line.startswith("scope:"):
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                scope = raw if raw else None
+        if closed and page_id and scope is not None:
+            out[page_id] = scope
+    return out
 
 
 def _strip_updated_line(text: str) -> str:
