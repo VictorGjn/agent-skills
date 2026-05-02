@@ -101,20 +101,20 @@ Events are primary truth (append-only, never mutated, source-cited per claim). W
 #### Must have — blocks "closed-loop demo" milestone
 
 - **M1.** `EventStreamSource` (P0.1) — 3rd `Source` subclass; agents emit `EventStreamSource.emit_events([{ts, source_type, source_ref, claim, embedding?, entity_hint?}])` from a cron-driven context; events land in `events/<today>.jsonl` (append-only); `semantic_shift.py` picks them up on next consolidation tick.
-- **M2.** `GraphifyWikiSource` (P0.2) — 4th `Source` subclass; consumes `graphify-out/wiki/` if present and re-emits in CE schema; preserves user choice to run graphify upstream without competing.
-- **M3.** `wiki_init.py` seeder (Phase 1.5) — reads events log + existing wiki; writes/updates `wiki/<slug>.md` per consolidated entity; idempotent (re-running with same input produces same output).
-- **M4.** `validate_page.py` (Phase 0.3 / scaffold from Tier B) — schema-version refusal: errors out with remediation message on mismatch ("Run `wiki_init.py --rebuild`").
-- **M5.** `audit.py` (Phase 1.6) — Auditor routine that emits `audit/proposals.md`. v1 rules: stale `kind: decision` flagged when `superseded_by:` chain exists and current entities still link to the superseded predecessor; pages with `freshness_score < 0.3` AND `last_verified_at` past N days; entities sharing a slug-collision footnote.
-- **M6.** Decision continuity schema fields (P2.1) — `supersedes:` (id), `superseded_by:` (id), `valid_until:` (date) added to `wiki/<slug>.md` frontmatter spec for `kind: decision`. Auditor rule per M5.
-- **M7.** Freshness markers schema fields (P2.2) — `freshness_score: 0.0–1.0` (auto-decayed) + `last_verified_at: <iso8601>` (skill-emitted) added to entity frontmatter. Auditor rule per M5.
-- **M8.** `wiki.ask --scope=<corpus_id>` MCP filter (P0.5 impl) — implements the namespace primitive landed in PR #16 schema. Default scope = `default`; multi-source loops MUST set scope on writes.
+- **M2.** `wiki_init.py` seeder (Phase 1.5) — reads events log + existing wiki; writes/updates `wiki/<slug>.md` per consolidated entity; idempotent (re-running with same input produces same output).
+- **M3.** `validate_page.py` (Phase 0.3 / scaffold from Tier B) — schema-version refusal: errors out with remediation message on mismatch ("Run `wiki_init.py --rebuild`").
+- **M4.** `audit.py` (Phase 1.6) — Auditor routine that emits `audit/proposals.md`. v1 rules: stale `kind: decision` flagged when `superseded_by:` chain exists and current entities still link to the superseded predecessor; entities whose computed freshness (see M6) sits below 0.3 AND whose `last_verified_at` is older than N days; entities sharing a slug-collision footnote.
+- **M5.** Decision continuity schema fields (P2.1) — `supersedes:` (id), `superseded_by:` (id), `valid_until:` (date) added to `wiki/<slug>.md` frontmatter spec for `kind: decision`. Auditor rule per M4.
+- **M6.** Freshness markers (P2.2) — **stored field**: `last_verified_at: <iso8601>` (skill-emitted on every event/refresh that touches the entity). **Computed-on-read field**: `freshness_score: 0.0–1.0` (derived at query time from `last_verified_at` + a per-source-type half-life policy declared in `scripts/wiki/freshness_policy.py`). Stored vs computed split is deliberate: avoids write-back to entity files just to age them, keeps `events/<date>.jsonl` immutability, makes the policy tuneable without rewriting historical pages. Auditor and `wiki.ask` callers receive the computed score; the entity file stores `last_verified_at` only.
+- **M7.** `wiki.ask --scope=<corpus_id>` MCP filter (P0.5 impl) — implements the namespace primitive landed in PR #16 schema. Default scope = `default`; multi-source loops MUST set scope on writes.
 
 #### Should have — fast follow
 
-- **S1.** `wiki.add(source_ref, claims[])` MCP verb implementation — the runtime-facing alias to `EventStreamSource.emit_events`. M1 ships the underlying capability; this exposes it via MCP for non-Python consumers.
-- **S2.** `wiki.audit` MCP verb implementation — surfaces `audit/proposals.md` content to runtime callers. Same delta as S1 for the Auditor.
-- **S3.** Telemetry events: `entity.consolidated`, `entity.superseded`, `audit.flagged`, `freshness.expired`. Stdout JSONL per `SPEC-mcp.md` §9 telemetry pattern.
-- **S4.** `wiki.export obsidian` impl — the "your data is yours" promise. Generates an Obsidian-readable vault from the brain.
+- **S1.** `GraphifyWikiSource` (P0.2) — 4th `Source` subclass; consumes `graphify-out/wiki/` if present and re-emits in CE schema; preserves user choice to run graphify upstream without competing. **Demoted from Must after Wave-0 gating analysis**: the closed-loop demo only needs M1 + M2-M7 to close (skill emits → wiki refresh → Auditor flags); graphify-as-input is real-world ergonomics for users who already run graphify, not a gate on the demo. Slips to Wave 1 (real-routine integration).
+- **S2.** `wiki.add(source_ref, claims[])` MCP verb implementation — the runtime-facing alias to `EventStreamSource.emit_events`. M1 ships the underlying capability; this exposes it via MCP for non-Python consumers.
+- **S3.** `wiki.audit` MCP verb implementation — surfaces `audit/proposals.md` content to runtime callers. Same delta as S2 for the Auditor.
+- **S4.** Telemetry events: `entity.consolidated`, `entity.superseded`, `audit.flagged`, `freshness.expired`. Stdout JSONL per `SPEC-mcp.md` §9 telemetry pattern.
+- **S5.** `wiki.export obsidian` impl — the "your data is yours" promise. Generates an Obsidian-readable vault from the brain.
 
 #### Could have — backlog
 
@@ -178,15 +178,15 @@ References:
 - [ ] **AC1.** Given a brain with 5 existing entities, when a skill calls `EventStreamSource.emit_events([{ts, source_type='manual', source_ref='test', claim='X is Y', entity_hint='entity_a'}])`, then `events/<today>.jsonl` contains the new event line within 100ms.
 - [ ] **AC2.** Given accumulated events whose centroid drifts >0.4 from `entity_a.centroid_embedding`, when `semantic_shift.py` next runs, then `wiki_init.py` regenerates `wiki/entity_a.md` with the updated body and frontmatter.
 - [ ] **AC3.** Given a `wiki/decision-acme-pricing-v1.md` with `superseded_by: dec_v2_id`, and a current `wiki/lead-acme.md` linking to `[[decision-acme-pricing-v1]]`, when `audit.py` runs, then `audit/proposals.md` lists "lead-acme references superseded decision-acme-pricing-v1" under a "Stale references" heading.
-- [ ] **AC4.** Given an entity page with `freshness_score: 0.2, last_verified_at: 2026-04-01`, and current date 2026-05-15, when `audit.py` runs, then `audit/proposals.md` lists the page under "Freshness expired".
+- [ ] **AC4.** Given an entity page with `last_verified_at: 2026-04-01` and a `web` source-type half-life of 30 days declared in `freshness_policy.py`, and current date 2026-05-15 (44 days later), when `audit.py` runs, then `audit/proposals.md` lists the page under "Freshness expired" (computed `freshness_score` < 0.3 — never read from the page; always derived).
 - [ ] **AC5.** Given a brain with entities scoped `default`, `competitive-intel`, and `lead-qual`, when an Anabasis routine calls `wiki.ask --scope=competitive-intel "Acme pricing"`, then only competitive-intel-scoped entities appear in the response. No `lead-qual` or `default` entities leak in.
 - [ ] **AC6.** Given a `wiki/<slug>.md` with `schema_version: "0.9"` and current CE expecting `1.0`, when `validate_page.py` is invoked, then the script exits non-zero with stderr text "Run `python3 scripts/wiki/wiki_init.py --rebuild` to regenerate from events log."
 - [ ] **AC7.** Given two entities with titles `"Data Processing"` and `"data processing"`, when `wiki_init.py` writes both, then files are `data-processing.md` and `data-processing-2.md` with distinct `id`s, and `_index.md` footnote records the collision.
-- [ ] **AC8.** Given `graphify-out/wiki/` exists with 3 entity pages, when `GraphifyWikiSource.list_artifacts()` is called, then it returns those 3 paths and `emit_events()` produces CE-schema-compliant events.
-- [ ] **AC9.** Given a routine emits 10 events via `EventStreamSource` then immediately calls `wiki.ask`, the response **may** not yet reflect the events (consolidation is async). Documented in `next_tool_suggestions` hint: "events emitted; wiki refresh on next semantic-shift trigger (~5 min)."
+- [ ] **AC8.** Given a routine emits 10 events via `EventStreamSource` then immediately calls `wiki.ask`, the response **may** not yet reflect the events (consolidation is async). Documented in `next_tool_suggestions` hint: "events emitted; wiki refresh on next semantic-shift trigger (~5 min)."
 
-### Should pass — V1.1 (post-demo polish)
+### Should pass — V1.1 (post-demo polish, includes Wave 1 items)
 
+- [ ] **AC9.** Given `graphify-out/wiki/` exists with 3 entity pages, when `GraphifyWikiSource.list_artifacts()` is called, then it returns those 3 paths and `emit_events()` produces CE-schema-compliant events. *(S1 — Wave 1)*
 - [ ] **AC10.** Given an Anabasis routine calls `wiki.add(source_ref, claims)` via MCP, then events are appended identically to `EventStreamSource.emit_events` (parity).
 - [ ] **AC11.** Given an Anabasis routine calls `wiki.audit`, the response is the current `audit/proposals.md` content as markdown.
 - [ ] **AC12.** Given any of {`entity.consolidated`, `entity.superseded`, `audit.flagged`, `freshness.expired`} occurs, a JSONL telemetry event is emitted to stdout per `SPEC-mcp.md` §9.
@@ -217,9 +217,9 @@ References:
 
 | Wave | Date | Users | Scope |
 |---|---|---|---|
-| **Wave 0** (closed-loop demo) | ~Week 4 from start | Victor only, on a synthetic 50-entity brain | M1–M8 working end-to-end on a fixture corpus; AC1–AC9 pass |
-| **Wave 1** (real-routine integration) | ~Week 5 | Victor + 1 real routine (`product-signals-pipeline` per memory) | Real cron routine emits events; brain accumulates; Auditor surfaces real flags |
-| **Wave 2** (Anabasis MVP-eligible) | ~Week 6 | Anabasis runtime calls `wiki.ask` / `wiki.add` / `wiki.audit` via MCP | S1–S2 shipped; telemetry emitting; ready for YC demo |
+| **Wave 0** (closed-loop demo) | ~Week 4 from start | Victor only, on a synthetic 50-entity brain | M1–M7 working end-to-end on a fixture corpus; AC1–AC8 pass |
+| **Wave 1** (real-routine integration) | ~Week 5 | Victor + 1 real routine (`product-signals-pipeline` per memory) | S1 `GraphifyWikiSource` ships; real cron routine emits events; brain accumulates; Auditor surfaces real flags; AC9 passes |
+| **Wave 2** (Anabasis MVP-eligible) | ~Week 6 | Anabasis runtime calls `wiki.ask` / `wiki.add` / `wiki.audit` via MCP | S2–S5 shipped; telemetry emitting; AC10–AC13 pass; ready for YC demo |
 
 ### What a win looks like (one sentence)
 
@@ -261,7 +261,7 @@ A `competitive-intel` cron at 09:00 emits "Acme raised pricing to $7k from $5k" 
            ▼
 ┌──────────────────────┐         ┌──────────────────────┐
 │  NEW:                │         │  NEW:                │
-│  wiki_init.py runner │ ◄────── │  EventStreamSource   │  ◄── M1
+│  wiki_init.py (M2)   │ ◄────── │  EventStreamSource   │  ◄── M1
 │  (consolidate)       │         │  (skills emit here)  │
 └──────────┬───────────┘         └──────────────────────┘
            │
@@ -270,31 +270,32 @@ A `competitive-intel` cron at 09:00 emits "Acme raised pricing to $7k from $5k" 
 ┌──────────────────────┐
 │  EXISTING SCHEMA:    │
 │  wiki/<slug>.md      │  ◄── schema in PR #16
-│  + scope: <id>       │  ◄── M8 filter reads here
-│  + supersedes/       │  ◄── M6 fields
+│  + scope: <id>       │  ◄── M7 filter reads here
+│  + supersedes/       │  ◄── M5 fields
 │    superseded_by/    │
 │    valid_until       │
-│  + freshness_score/  │  ◄── M7 fields
-│    last_verified_at  │
+│  + last_verified_at  │  ◄── M6 stored; freshness_score
+│                      │       is COMPUTED on read from
+│                      │       freshness_policy.py
 └──────────┬───────────┘
            │
            │ Auditor walks
            ▼
 ┌──────────────────────┐
 │  NEW:                │
-│  audit/proposals.md  │  ◄── M5 audit.py emits here
-│  + telemetry stdout  │  ◄── S3
+│  audit/proposals.md  │  ◄── M4 audit.py emits here
+│  + telemetry stdout  │  ◄── S4
 └──────────────────────┘
 
-Plus:
+Plus (deferred to Wave 1 per S1 demotion):
 ┌──────────────────────┐
-│  NEW (M2):           │
+│  NEW (S1):           │
 │  GraphifyWikiSource  │  ◄── reads graphify-out/wiki/, re-emits in CE schema
 └──────────────────────┘  ◄── 4th Source subclass alongside Workspace/GitHub/Event
 
 Plus:
 ┌──────────────────────┐
-│  NEW (M4):           │
+│  NEW (M3):           │
 │  validate_page.py    │  ◄── refuses on schema_version mismatch
 └──────────────────────┘
 ```
@@ -305,34 +306,37 @@ Plus:
 
 | Phase | Window | Deliverable |
 |---|---|---|
-| **P1** Schema additions | Day 1 (~half day) | M6 + M7 schema fields land in `plan/phases/phase-1.md` §1.2 (doc-only PR). Slug-collision tested via existing fixture. |
-| **P2** Source ABC concretes | Days 2-3 | M1 (EventStreamSource) + M2 (GraphifyWikiSource) implementations. Emits events; round-trip test against fixture. |
-| **P3** Validate + seed | Days 4-5 | M3 (`wiki_init.py`) + M4 (`validate_page.py`). Idempotency test: re-run produces same output. Refusal test: bumped schema rejected. |
-| **P4** Auditor | Days 6-9 | M5 (`audit.py`) — three rules (stale-supersession, freshness-expired, collision-near-miss). Each rule has a unit test. |
-| **P5** MCP plumbing | Days 10-12 | M8 (`wiki.ask --scope`) + S1 (`wiki.add`) + S2 (`wiki.audit`) MCP tool implementations in `scripts/mcp_server.py`. Telemetry events S3 wired. |
+| **P1** Schema additions | Day 1 (~half day) | M5 + M6 schema fields land in `plan/phases/phase-1.md` §1.2 (doc-only PR). `freshness_policy.py` half-life table per source-type committed. Slug-collision tested via existing fixture. |
+| **P2** EventStreamSource | Days 2-3 | M1 (`EventStreamSource`) implementation. Round-trip test against fixture. (`GraphifyWikiSource` deferred to Wave 1 per S1 demotion.) |
+| **P3** Validate + seed | Days 4-5 | M2 (`wiki_init.py`) + M3 (`validate_page.py`). Idempotency test: re-run produces same output. Refusal test: bumped schema rejected. |
+| **P4** Auditor | Days 6-9 | M4 (`audit.py`) — three rules (stale-supersession, freshness-expired, collision-near-miss). Freshness rule reads `freshness_policy.py` half-life and computes score on the fly from `last_verified_at`. Each rule has a unit test. |
+| **P5** MCP plumbing | Days 10-12 | M7 (`wiki.ask --scope`) + S2 (`wiki.add`) + S3 (`wiki.audit`) MCP tool implementations in `scripts/mcp_server.py`. Telemetry events S4 wired. |
 | **P6** End-to-end demo | Days 13-14 | Real routine emits events → wiki refreshes → Auditor flags. Wave 0 sign-off. |
+| **P7** Wave 1 (post-demo) | Days 15-17 | S1 `GraphifyWikiSource` lands; first real cron routine on the brain; AC9 passes. |
 
-Total: ~14 working days = ~3 calendar weeks at full focus, more realistically 5–6 weeks given other priorities. Lines up with the rollout plan above.
+Total: ~17 working days = ~3.5 calendar weeks at full focus, more realistically 5–6 weeks given other priorities. Lines up with the rollout plan above.
 
 ### Technical risks
 
 | Risk | Mitigation |
 |---|---|
-| **Consolidation semantics drift between dev and prod** — `wiki_init.py` running on dev fixtures produces different output than production cron-driven runs | M3 idempotency requirement makes this testable: write a fixture, run twice, byte-compare. CI lint would catch divergence. |
+| **Consolidation semantics drift between dev and prod** — `wiki_init.py` running on dev fixtures produces different output than production cron-driven runs | M2 idempotency requirement makes this testable: write a fixture, run twice, byte-compare. CI lint would catch divergence. |
 | **Auditor rules too noisy → Victor ignores `audit/proposals.md`** | Wave 0 success metric explicitly requires "≥ 60% acceptance rate." If <40% on the demo week, tune thresholds before Wave 1. |
 | **EventStreamSource called from a long-running cron leaks file handles** | Pure append-write per call; no persistent state. Test by emitting 1000 events in a tight loop, watch handle count. |
 | **Schema migration mid-Phase-1** (someone adds a new field to entity frontmatter while implementation is in flight) | Lock the schema at the start of P1 (PR with §1.2 fields landed before any code). Any change during P2-P5 freezes implementation, requires re-coordination. |
 | **`semantic_shift.py` thresholds wrong for skill-emitted events** (events from `EventStreamSource` may be sparser/denser than from `WorkspaceSource`) | Wave 1 measures real-routine behavior. If consolidation triggers too rarely, lower threshold or add a wall-clock fallback (consolidate every N minutes regardless of drift). |
 | **GraphifyWikiSource format brittle to graphify version drift** | Pin graphify version in CE's `requirements.txt`/`pyproject.toml` for the Wave 0 corpus; document tested versions in `SKILL.md`. v0.4.x format only; v0.5+ revisit. |
-| **`scope` filter false-negatives on entities with `scope: default`** | M8 acceptance criterion explicitly tests `wiki.ask` with no `--scope` arg returns default-scoped entities only (not all entities). One unit test per scope behavior. |
+| **`scope` filter false-negatives on entities with `scope: default`** | M7 acceptance criterion explicitly tests `wiki.ask` with no `--scope` arg returns default-scoped entities only (not all entities). One unit test per scope behavior. |
 
 ### Open questions
 
 - [ ] **Q1.** Auditor rule list extension — do we ship "missing centroid_embedding" and "broken `[[wiki-link]]`" rules in v1 or defer? Owner: Victor — decide before P4 starts.
 - [ ] **Q2.** `EventStreamSource` is documented in `phase-1.md` §1.4 today as a 3rd subclass — but the Source ABC was conceived as pull-shaped (`list_artifacts → fetch → metadata → emit_events`). Push-shaped (skill calls `emit_events` directly) is technically a different control flow even if the output shape matches. Confirm the ABC accommodates both (likely: yes, since `emit_events` is the only method that matters for the events log).
 - [ ] **Q3.** Should the Auditor be a CLI script, an MCP tool, or both? `wiki.audit` MCP verb is in §2.4; `audit.py` CLI entry is implied. Lean: both, with CLI being the primary cron-driven runner and MCP being a thin reader of the latest `audit/proposals.md`.
-- [ ] **Q4.** When `freshness_score` decays — is it stored decayed, or computed-on-read from `last_verified_at`? Lean: **computed on read** so we don't have to write-back to entity files just to age them; stored field is `last_verified_at` only.
-- [ ] **Q5.** Is M2 (`GraphifyWikiSource`) blocking the closed-loop demo, or could it slip to Wave 1? Lean: **slip to Wave 1.** The demo loop only needs M1 + M3-M8 to close; graphify-as-input is a real-world ergonomics win, not a gate.
+
+**Resolved during PR #19 review (Codex bot):**
+- ~~Q4 freshness storage model~~ — **DECIDED** (M6): `last_verified_at` is the only stored field; `freshness_score` is computed on read from `last_verified_at` + per-source-type half-life policy in `scripts/wiki/freshness_policy.py`. Avoids write-back to entity files just to age them.
+- ~~Q5 GraphifyWikiSource gating~~ — **DECIDED**: demoted from Must to Should (S1), slips to Wave 1. Closed-loop demo only needs M1 + M2–M7.
 
 ---
 
