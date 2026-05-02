@@ -220,12 +220,23 @@ def write_wiki(
         # superseded_by chains that key off id.
         entity_id = make_id(hint, sources_sig)
 
+        # If the target page already exists and declares a non-default scope,
+        # preserve it. This makes manual scope edits durable across runs
+        # AND emulates the future Wave-1 "scope derived from event source"
+        # behaviour without changing event-log semantics in v0.1. Pages
+        # never authored before fall back to the caller's `scope` arg.
+        target = wiki_dir / f"{slug}.md"
+        page_scope = scope
+        if target.exists():
+            existing_scope = _read_existing_scope(target)
+            if existing_scope is not None:
+                page_scope = existing_scope
+
         page_text = render_page(
-            slug=slug, entity_id=entity_id, scope=scope, title=title,
+            slug=slug, entity_id=entity_id, scope=page_scope, title=title,
             events=events_for_entity, updated_iso=now_iso,
         )
 
-        target = wiki_dir / f"{slug}.md"
         if target.exists():
             # Codex P1 fix: refusal-and-rebuild model (§1.2.1) requires
             # stale-schema pages to error out, not get silently overwritten.
@@ -255,6 +266,35 @@ def write_wiki(
         _write_index_collisions(wiki_dir, collision_log)
 
     return actions
+
+
+def _read_existing_scope(path: Path) -> str | None:
+    """Extract `scope:` value from an existing page's frontmatter.
+
+    Returns None if no closed --- block or no scope: line is found, so the
+    caller can fall back to the run-level scope. Cheap line-by-line parse
+    matching mcp_server._read_page_with_scope's strictness.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    in_fm = False
+    closed = False
+    scope: str | None = None
+    for line in content.splitlines():
+        if line.startswith("---"):
+            if in_fm:
+                closed = True
+                break
+            in_fm = True
+            continue
+        if in_fm and line.startswith("scope:"):
+            raw = line.split(":", 1)[1].strip().strip('"\'')
+            scope = raw if raw else None
+    if not closed:
+        return None
+    return scope
 
 
 def _strip_updated_line(text: str) -> str:
