@@ -407,7 +407,7 @@ if __name__ == '__main__':
     output = args.output or str(default_cache / f'{repo}-index.json')
     Path(output).parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output, 'w') as f:
+    with open(output, 'w', encoding='utf-8') as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
 
     print(f'\nIndexed {index["totalFiles"]} files, {index["totalTokens"]:,} tokens', file=sys.stderr)
