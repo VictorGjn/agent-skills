@@ -541,6 +541,17 @@ class ConsolidateTests(unittest.TestCase):
         b = make_id("auth-middleware", "src/auth-v2.ts")
         self.assertNotEqual(a, b)
 
+    def test_make_id_12_char_prefix(self):
+        """Pre-ultrareview cleanup M1: bumped from sha256[:8] (32 bits, ~1%
+        birthday collision at 77k entities) to sha256[:12] (48 bits) so the
+        brain doesn't silently corrupt under any realistic Anabasis corpus."""
+        result = make_id("anything", "anywhere")
+        self.assertTrue(result.startswith("ent_"))
+        # ent_ + 12 hex chars = 16 chars total
+        self.assertEqual(len(result), len("ent_") + 12)
+        # All hex
+        self.assertTrue(all(c in "0123456789abcdef" for c in result[len("ent_"):]))
+
 
 if __name__ == "__main__":
     unittest.main()

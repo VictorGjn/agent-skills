@@ -68,6 +68,54 @@ class EventStreamSourceEmitTests(unittest.TestCase):
         base.update(overrides)
         return base
 
+    def test_appended_event_has_schema_version(self):
+        """Pre-ultrareview cleanup C2: per phase-1.md §1.2.1 every event
+        line MUST include schema_version (events forward-migrate from
+        day one; sources may not exist at migration time, so we can't
+        rebuild without a v-marker on the row itself)."""
+        with tempfile.TemporaryDirectory() as td:
+            events_dir = Path(td)
+            src = EventStreamSource(events_dir=events_dir)
+            src.emit_events([self._required_event()])
+
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            written = (events_dir / f"{today}.jsonl").read_text(encoding="utf-8")
+            rec = json.loads(written.strip().splitlines()[0])
+            self.assertEqual(rec.get("schema_version"), "1.0",
+                             "every event row must include schema_version")
+
+    def test_read_events_tolerates_legacy_rows_without_schema_version(self):
+        """C2 backwards-compat: legacy event-log lines (pre-cleanup) lack
+        schema_version. read_events MUST still load them — events are
+        append-only, so we can't rewrite history; treat absent
+        schema_version as the implicit pre-versioning baseline."""
+        with tempfile.TemporaryDirectory() as td:
+            events_dir = Path(td)
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            events_dir.mkdir(exist_ok=True)
+            with open(events_dir / f"{today}.jsonl", "w", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": 1700000000,
+                    "source_type": "manual",
+                    "source_ref": "legacy/x",
+                    "file_id": "legacy-x",
+                    "claim": "Legacy row, no schema_version",
+                    "entity_hint": "legacy",
+                }) + "\n")
+                f.write(json.dumps({
+                    "schema_version": "1.0",
+                    "ts": 1700001000,
+                    "source_type": "manual",
+                    "source_ref": "new/y",
+                    "file_id": "new-y",
+                    "claim": "New row, with schema_version",
+                    "entity_hint": "new",
+                }) + "\n")
+
+            events = read_events(events_dir)
+            self.assertEqual(len(events), 2,
+                             "read_events must accept legacy rows without schema_version")
+
     def test_emit_single_event_appends_to_today_log(self):
         """AC1: skill calls emit_events; today's events JSONL has the line."""
         with tempfile.TemporaryDirectory() as td:
