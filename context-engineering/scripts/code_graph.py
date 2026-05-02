@@ -8,6 +8,7 @@ Sources: agent-skills (core), modular-patchbay (relation kinds, task presets, bi
 Used by pack_context.py --graph mode.
 """
 
+import math
 import os
 import re
 import sys
@@ -75,6 +76,25 @@ RELATION_KINDS = {
 }
 
 DECAY = 0.65  # relevance decay per hop
+
+# P2.3 hub-damping config
+# Below this threshold, edge weights are unchanged. Above it, in-degree
+# damps the weight via 1/(1 + log2(in_degree/threshold)). 10 chosen from
+# real-corpus distribution analysis on efficientship-live: median in-degree
+# is 1, mean is ~5, the long-tail (~6% of files) sits at 10+. The threshold
+# splits "real shared utility" (a constants module imported by 8 files →
+# kept) from "global hub" (a Redux store imported by 199 files → damped).
+# Override via env CONTEXT_ENG_HUB_THRESHOLD for corpora with different
+# import densities.
+_DEFAULT_HUB_THRESHOLD = 10
+try:
+    HUB_THRESHOLD = int(os.environ.get('CONTEXT_ENG_HUB_THRESHOLD', _DEFAULT_HUB_THRESHOLD))
+    if HUB_THRESHOLD < 1:
+        raise ValueError('must be positive')
+except (TypeError, ValueError) as _e:
+    print(f"<!-- code_graph: invalid CONTEXT_ENG_HUB_THRESHOLD={os.environ.get('CONTEXT_ENG_HUB_THRESHOLD')!r} "
+          f"({_e}); falling back to {_DEFAULT_HUB_THRESHOLD}. -->", file=sys.stderr)
+    HUB_THRESHOLD = _DEFAULT_HUB_THRESHOLD
 
 # ── Task-type presets (from modular-patchbay traverser.ts) ──
 
@@ -412,6 +432,18 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
                 if doc_stem == code_stem or doc_stem in code_stem or code_stem in doc_stem:
                     _add_edge(path, other_path, 'documents')
 
+    # P2.3 — TF-IDF hub damping
+    # Files that are imported by many others (Redux store, generated types,
+    # logger services, util grab-bags) are legitimate code structure but bad
+    # BFS expansion targets: a query landing on auth-middleware that hops to
+    # store.ts then expands to its 199 dependents floods top-K with noise.
+    # Damp each edge's weight by an idf-style factor of its target's
+    # in-degree, so traversal naturally prefers narrower-cluster paths over
+    # hub-mediated ones. Threshold = HUB_THRESHOLD inbound edges; below it
+    # weight is unchanged. Curve: weight *= 1 / (1 + log2(in_deg / threshold))
+    # → in_deg=10 → 1.0×, in_deg=20 → 0.5×, in_deg=50 → ≈0.30×, in_deg=199 → ≈0.19×.
+    _apply_hub_damping(edges, outgoing, incoming)
+
     return {
         'nodes': nodes,
         'edges': edges,
@@ -545,6 +577,34 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
         follow_kinds=preset['follow_kinds'],
         min_weight=preset['min_weight'],
     )
+
+
+def _apply_hub_damping(edges: list, outgoing: dict, incoming: dict) -> None:
+    """Mutate edge weights in-place to penalize edges into high-in-degree hubs.
+
+    Effect on top-N pack outputs: traversal that would otherwise expand
+    through a hub (Redux store, generated types, logger service, util
+    grab-bag) gets redirected toward narrower-cluster paths. The hub
+    itself remains discoverable directly, but using it as a stepping stone
+    becomes proportionally more expensive in the BFS relevance-decay model.
+
+    Damping is computed once per build and applied uniformly to every
+    edge whose target is above HUB_THRESHOLD; both `edges[].weight` and the
+    matching entries in `outgoing` / `incoming` (which point at the same
+    edge dicts) reflect the new weight.
+    """
+    in_degree = {}
+    for e in edges:
+        in_degree[e['target']] = in_degree.get(e['target'], 0) + 1
+
+    for e in edges:
+        deg = in_degree[e['target']]
+        if deg <= HUB_THRESHOLD:
+            continue
+        # idf-style: 1 / (1 + log2(deg / threshold))
+        # deg=threshold→1.0×; deg=2*threshold→0.5×; deg=10*threshold→≈0.23×
+        damping = 1.0 / (1.0 + math.log2(deg / HUB_THRESHOLD))
+        e['weight'] = e['weight'] * damping
 
 
 def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, corpus_root: Optional[str] = None) -> dict:

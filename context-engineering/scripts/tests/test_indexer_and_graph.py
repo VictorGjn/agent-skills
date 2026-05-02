@@ -479,5 +479,85 @@ class TsconfigAliasResolutionTests(unittest.TestCase):
             self.assertEqual(graph['stats']['total_edges'], 0)
 
 
+class HubDampingTests(unittest.TestCase):
+    """P2.3 — TF-IDF hub damping. Files imported by many others (Redux store,
+    generated types, logger service, util grab-bags) get their incoming edge
+    weights reduced so BFS traversal naturally prefers narrower-cluster paths
+    over hub-mediated ones.
+    """
+
+    def _make_files_with_hub(self, hub_inbound: int):
+        """Build a file index with one hub at src/hub.ts and N files importing it."""
+        hub_path = 'src/hub.ts'
+        hub_content = "export const x = 1;\n"
+        files = [{
+            'path': hub_path, 'tokens': 5,
+            'tree': {'totalTokens': 5, 'text': hub_content}, 'content': hub_content,
+        }]
+        for i in range(hub_inbound):
+            importer_path = f'src/importer_{i:03d}.ts'
+            content = "import { x } from './hub';\n"
+            files.append({
+                'path': importer_path, 'tokens': 5,
+                'tree': {'totalTokens': 5, 'text': content}, 'content': content,
+            })
+        return hub_path, files
+
+    def test_below_threshold_no_damping(self):
+        """Hub with in-degree < HUB_THRESHOLD (10) keeps weight 1.0."""
+        import code_graph
+
+        hub, files = self._make_files_with_hub(hub_inbound=5)
+        graph = code_graph.build_graph(files, corpus_root=os.getcwd())
+        hub_edges = [e for e in graph['edges'] if e['target'] == hub]
+        self.assertEqual(len(hub_edges), 5)
+        for e in hub_edges:
+            self.assertEqual(e['weight'], 1.0,
+                             f"in_degree=5 should be unchanged, got {e['weight']}")
+
+    def test_above_threshold_damped(self):
+        """Hub with in-degree >= HUB_THRESHOLD gets weight reduced via the
+        idf curve `1 / (1 + log2(in_deg / threshold))`."""
+        import code_graph
+        import math
+
+        hub, files = self._make_files_with_hub(hub_inbound=50)
+        graph = code_graph.build_graph(files, corpus_root=os.getcwd())
+        hub_edges = [e for e in graph['edges'] if e['target'] == hub]
+        self.assertEqual(len(hub_edges), 50)
+        # Forecast: weight = 1 / (1 + log2(50/10)) ≈ 0.301
+        expected = 1.0 / (1.0 + math.log2(50 / code_graph.HUB_THRESHOLD))
+        for e in hub_edges:
+            self.assertAlmostEqual(e['weight'], expected, places=3)
+            self.assertLess(e['weight'], 0.5,
+                            f"in_degree=50 should be heavily damped, got {e['weight']}")
+
+    def test_narrow_targets_stay_unchanged(self):
+        """Per-edge: a target imported only once keeps weight 1.0 even when
+        a hub coexists in the same graph."""
+        import code_graph
+
+        hub, files = self._make_files_with_hub(hub_inbound=20)
+        # Add one extra file imported by exactly one importer (not the hub)
+        narrow_path = 'src/narrow.ts'
+        narrow_content = "export const y = 2;\n"
+        files.append({
+            'path': narrow_path, 'tokens': 5,
+            'tree': {'totalTokens': 5, 'text': narrow_content}, 'content': narrow_content,
+        })
+        # Make importer_000 also import narrow
+        files[1]['content'] = "import { x } from './hub';\nimport { y } from './narrow';\n"
+        files[1]['tree']['text'] = files[1]['content']
+
+        graph = code_graph.build_graph(files, corpus_root=os.getcwd())
+        narrow_edges = [e for e in graph['edges'] if e['target'] == narrow_path]
+        self.assertEqual(len(narrow_edges), 1)
+        self.assertEqual(narrow_edges[0]['weight'], 1.0,
+                         f"narrow target should keep weight 1.0, got {narrow_edges[0]['weight']}")
+        # And the hub edges are still damped
+        hub_edges = [e for e in graph['edges'] if e['target'] == hub]
+        self.assertLess(hub_edges[0]['weight'], 1.0)
+
+
 if __name__ == '__main__':
     unittest.main()
