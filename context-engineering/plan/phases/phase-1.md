@@ -78,6 +78,16 @@ updated: 2026-05-01T10:23:45Z
 links_in: [ent_b7c1, ent_d8e2]  # entities that link TO this one
 links_out: [ent_c5d6]           # entities this links to
 centroid_embedding: [...]       # mean of source-event embeddings, used for shift detection
+last_verified_at: 2026-05-01T10:23:45Z   # required; emitter sets on every event/refresh that touches this entity
+                                # NOTE: freshness_score is NOT stored here — it is computed on
+                                # read from last_verified_at + freshness_policy.py (§1.2.2 below)
+
+# Decision-continuity fields — required only when kind == "decision",
+# omitted otherwise. supersedes/superseded_by point at other entity ids;
+# valid_until is an ISO date after which the decision is presumed stale.
+supersedes: ent_99f2 | null     # this decision replaces a prior one
+superseded_by: ent_a5b7 | null  # this decision has been replaced by a successor
+valid_until: 2026-12-31 | null  # explicit decay date; null = open-ended
 ---
 
 # Authentication Middleware
@@ -109,6 +119,51 @@ centroid_embedding: [...]       # mean of source-event embeddings, used for shif
   5. Renaming an entity (changing `title`) MUST NOT change `slug` or `id`. Only fresh writes participate in collision detection.
   6. The `_index.md` table tracks collisions in a footnote so audits can surface near-misses ("`data-processing-2` collided with `data-processing` on 2026-05-15").
 - **Scope rule** (MUST): `scope` is required on multi-source writes; `wiki.ask --scope=<corpus_id>` filters by it; absent scope = `default` corpus only.
+- **Decision-continuity rule** (MUST when `kind: decision`): `supersedes`, `superseded_by`, `valid_until` are tri-state — present-with-value, present-as-null, or omitted. Concrete entity ids in `supersedes` / `superseded_by` MUST point at existing entity files; the Auditor (§1.7) flags broken references. Renaming a decision MUST NOT break the chain — `supersedes`/`superseded_by` reference `id`, not `slug`.
+- **`last_verified_at` rule** (MUST): every emitter (events extractor, EventStreamSource, GraphifyWikiSource, manual edits) sets this to the wall-clock time of the touch. The wiki page itself stores this only; `freshness_score` is never stored — it is computed on read per §1.2.2 below.
+
+### 1.2.2 — Freshness policy (computed-on-read freshness_score)
+
+CE deliberately stores no `freshness_score` field on entity pages. Instead, callers (the Auditor at §1.7, `wiki.ask` MCP at §2.4) compute it at query time from the entity's `last_verified_at` + a per-source-type half-life policy. This split matters:
+
+- **Avoids write-back to age pages.** If freshness were stored, every entity would need rewriting on a clock cadence — battling the immutability of `events/`-derived consolidation.
+- **Keeps the policy tuneable.** Adjusting half-life for a source type doesn't require touching historical wiki pages; the next read picks up the new policy.
+- **Survives schema migrations.** A v1.0 page with `last_verified_at` is consumable by a v1.1 reader using a different decay formula without rebuilding the wiki.
+
+**Half-life table** (defaults, tuneable per-corpus):
+
+| Source type | Half-life (days) | Rationale |
+|---|--:|---|
+| `code` | 90 | Refactor cycles are months; a function's role decays slowly. |
+| `web` | 30 | Competitor pages, marketing copy, blog posts; rapid drift. |
+| `transcript` | 60 | Meeting notes, decisions still load-bearing for ~2 months. |
+| `email` | 21 | Personal communication churns fast; old context goes stale. |
+| `notion` | 60 | Internal docs decay between two release cycles. |
+| `rfc` | 180 | Architectural decisions decay slowly. |
+| `department-spec` | 180 | Same rationale as `rfc` — long-half-life architectural artefacts. |
+| `default` | 60 | Catch-all for source types not in this table. |
+
+(Each table row corresponds 1:1 to a key in `HALF_LIVES: dict[str, int]`. Don't merge rows that share a half-life — the table is the spec for the dict, and a key like `"rfc / department-spec"` would silently miss `HALF_LIVES["rfc"]` lookups at runtime.)
+
+**Decay formula** — linear over 2× half-life, clamped to [0, 1]:
+
+```
+freshness_score = max(0.0, 1.0 - elapsed_days / (2 × half_life_days))
+```
+
+Properties:
+- At `t = 0` (just verified): score = 1.0
+- At `t = half_life`: score = 0.5
+- At `t = 2 × half_life`: score = 0.0
+- Beyond `2 × half_life`: clamped at 0.0
+
+The Auditor's "freshness expired" rule (§1.7) flags any entity where computed `freshness_score < 0.3` AND `last_verified_at` is older than the source-type's half-life. Both conditions required — prevents flagging a fresh-but-low-half-life source and prevents flagging a long-half-life source that's barely past its midpoint.
+
+**Implementation contract** (Phase P1 of `plan/prd-closed-loop.md`):
+- `scripts/wiki/freshness_policy.py` exports a `HALF_LIVES: dict[str, int]` with the table above and a `compute_freshness(last_verified_at, source_type, now=None) -> float` function applying the formula.
+- Callers import and apply at query time. Stored field is `last_verified_at` only.
+
+**Multi-source entities**: when an entity's `sources[]` contains heterogeneous source types, use the **shortest** half-life among them — the entity is only as fresh as its fastest-decaying source. Conservative; avoids the "1 ancient code reference + 5 fresh web sources = looks fresh" trap.
 
 ### 1.2.1 — Schema evolution policy
 
@@ -238,8 +293,10 @@ Checks:
 - **Duplicates**: two entities with cosine > 0.9 → propose merge
 - **Dead links**: `[[wiki-link]]` to non-existent entity → propose remove or create
 - **Contradictions**: two source events for the same entity with claims that NLI-classify as contradictory → flag in `_contradictions.md`
+- **Stale supersession** (M4 from `plan/prd-closed-loop.md`): a `kind: decision` entity has `superseded_by: <id>` set, AND another entity still has a `[[wiki-link]]` to the superseded decision rather than its successor. Surface under "Stale references" heading in `audit/proposals.md` with both decision ids + the referencing entity's path, so the operator can decide whether to update the link or revoke the supersession.
+- **Freshness expired** (M4): per the policy in §1.2.2, compute each entity's `freshness_score` from `last_verified_at` + source-type half-life. Flag if **both** computed score < 0.3 AND `last_verified_at` is older than the source-type's half-life. The double condition guards against flagging a fresh-but-fast-decaying source AND against flagging a long-decay source that's only just past its midpoint.
 
-NLI classification is **deferred** (Phase 4 / Proving Layer). For Phase 1, contradiction detection is keyword-based ("not", "no longer", "instead of").
+NLI classification (for the Contradictions check) is **deferred** (Phase 4 / Proving Layer). For Phase 1, contradiction detection is keyword-based ("not", "no longer", "instead of"). The new "Stale supersession" rule is a **structural** check (graph walk: does any entity link to a decision whose `superseded_by` chain has moved on?) — no NLI required, so it ships in v1.
 
 **Acceptance**: Auditor runs on seeded brain; produces `audit/proposals.md` with at least one of each proposal kind.
 
