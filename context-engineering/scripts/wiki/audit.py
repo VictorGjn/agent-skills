@@ -122,11 +122,11 @@ def find_stale_supersessions(pages: dict[str, dict]) -> list[dict]:
 
     For each `kind: decision` page D with `superseded_by` set non-null,
     find any page X (any kind) whose body contains `[[D.slug]]`. Each
-    such (X, D) pair is a stale-reference flag.
+    UNIQUE (X, D) pair is a stale-reference flag — repeated
+    `[[same-decision]]` links in the same page produce one flag, not N
+    (Codex P2 fix: dedupe per (source_slug, target_slug) pair).
     """
     flags: list[dict] = []
-    # Build a map slug -> page for fast wiki-link target lookup.
-    by_slug = {slug: p for slug, p in pages.items()}
     # Pre-extract decisions with non-null superseded_by.
     superseded_decisions: dict[str, dict] = {}
     for slug, page in pages.items():
@@ -141,18 +141,24 @@ def find_stale_supersessions(pages: dict[str, dict]) -> list[dict]:
     if not superseded_decisions:
         return flags
 
-    # For each page, scan body for wiki-links to a superseded decision.
+    # Track seen (source, target) pairs to dedupe within a page.
+    seen_pairs: set[tuple[str, str]] = set()
     for src_slug, src in pages.items():
         for m in _WIKILINK_RE.finditer(src["body"]):
             target_slug = m.group(1).strip()
-            if target_slug in superseded_decisions:
-                target = superseded_decisions[target_slug]
-                flags.append({
-                    "rule": "stale-supersession",
-                    "source_slug": src_slug,
-                    "target_slug": target_slug,
-                    "superseded_by": target["fm"].get("superseded_by"),
-                })
+            if target_slug not in superseded_decisions:
+                continue
+            pair = (src_slug, target_slug)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            target = superseded_decisions[target_slug]
+            flags.append({
+                "rule": "stale-supersession",
+                "source_slug": src_slug,
+                "target_slug": target_slug,
+                "superseded_by": target["fm"].get("superseded_by"),
+            })
     return flags
 
 
@@ -160,16 +166,23 @@ def find_freshness_expired(
     pages: dict[str, dict],
     *,
     now: datetime | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], list[str]]:
     """Rule 2: entities whose freshness is below threshold AND elapsed > half_life.
 
     Both conditions required. Prevents false positives from fresh-but-fast-decay
     sources (high half-life types just past midpoint) AND from low-half-life
     types still within half-life.
+
+    Returns (flags, warnings). Codex P1 fix: a single page with malformed
+    `last_verified_at` (or any other freshness-computation crash) MUST NOT
+    abort the audit run — the script's resilience goal is "skip bad pages
+    and keep generating audit/proposals.md." Bad pages surface as
+    warnings.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     flags: list[dict] = []
+    warnings: list[str] = []
     for slug, page in pages.items():
         last_verified = page["fm"].get("last_verified_at")
         if not last_verified or last_verified == "null":
@@ -179,7 +192,14 @@ def find_freshness_expired(
         if not source_types:
             source_types = ["default"]
 
-        score = compute_freshness_multi_source(last_verified, source_types, now=now)
+        try:
+            score = compute_freshness_multi_source(last_verified, source_types, now=now)
+        except (ValueError, TypeError) as e:
+            warnings.append(
+                f"freshness check skipped for {slug}: invalid "
+                f"last_verified_at={last_verified!r} ({e})"
+            )
+            continue
         if score >= _FRESHNESS_FLOOR:
             continue
 
@@ -188,7 +208,11 @@ def find_freshness_expired(
         # decayed below 0.3 due to its short curve.
         try:
             verified_dt = _parse_iso(last_verified)
-        except ValueError:
+        except ValueError as e:
+            warnings.append(
+                f"freshness check skipped for {slug}: cannot parse "
+                f"last_verified_at={last_verified!r} ({e})"
+            )
             continue
         if verified_dt.tzinfo is None:
             verified_dt = verified_dt.replace(tzinfo=timezone.utc)
@@ -206,7 +230,7 @@ def find_freshness_expired(
             "shortest_half_life_days": threshold_days,
             "source_types": source_types,
         })
-    return flags
+    return flags, warnings
 
 
 def find_slug_collision_near_misses(wiki_dir: Path) -> list[dict]:
@@ -321,7 +345,8 @@ def run_audit(brain_dir: Path, *, now: datetime | None = None,
 
     pages, warnings = _load_pages(wiki_dir)
     stale_supersessions = find_stale_supersessions(pages)
-    freshness_expired = find_freshness_expired(pages, now=now)
+    freshness_expired, freshness_warnings = find_freshness_expired(pages, now=now)
+    warnings = warnings + freshness_warnings
     slug_collisions = find_slug_collision_near_misses(wiki_dir)
 
     proposals = render_proposals(

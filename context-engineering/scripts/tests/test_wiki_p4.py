@@ -354,5 +354,73 @@ class RenderProposalsTests(unittest.TestCase):
         self.assertNotIn("Validation warnings", out_without)
 
 
+class CodexRegressionTests(unittest.TestCase):
+    """Regressions for Codex P1+P2 findings on PR #23."""
+
+    def test_malformed_last_verified_does_not_crash_audit(self):
+        """Codex P1: a single page with malformed last_verified_at must not
+        abort the entire run. Surface as a warning; continue auditing."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+
+            # Good page
+            _write_concept_page(wiki, "good", source_type="code")
+
+            # Bad page — invalid ISO timestamp
+            (wiki / "bad.md").write_text(
+                "---\n"
+                "id: ent_bad\n"
+                "kind: concept\n"
+                "title: Bad\n"
+                "slug: bad\n"
+                "scope: default\n"
+                "schema_version: \"1.0\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-05-01T00:00:00Z\n"
+                "last_verified_at: NOT-A-VALID-ISO-TIMESTAMP\n"
+                "sources:\n"
+                "  - { type: web, ref: bad.com, ts: nope }\n"
+                "---\n"
+                "# Bad\n",
+                encoding="utf-8",
+            )
+
+            # Audit must complete without raising
+            result = run_audit(brain)
+            # The bad page got skipped via warning, not crashed
+            self.assertTrue(any("bad" in w for w in result["warnings"]),
+                            f"expected a warning about bad.md, got: {result['warnings']}")
+            # The good page still got its freshness checked (no flag because fresh)
+            proposals = (brain / "audit" / "proposals.md").read_text(encoding="utf-8")
+            self.assertIn("Validation warnings", proposals)
+
+    def test_repeated_wikilink_in_one_page_dedupes(self):
+        """Codex P2: repeated `[[same-decision]]` links in one page must
+        produce ONE flag, not N."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+
+            _write_decision_page(wiki, "decision-x",
+                                 superseded_by="ent_x_v2")
+            _write_decision_page(wiki, "decision-x-v2")
+            # Body links to decision-x THREE times
+            _write_concept_page(
+                wiki, "consumer",
+                body=("Body says [[decision-x]] then says [[decision-x]] "
+                      "and again [[decision-x]] for emphasis."),
+            )
+
+            result = run_audit(brain)
+            stale = result["stale_supersessions"]
+            self.assertEqual(len(stale), 1,
+                             f"expected 1 stale flag (deduped), got {len(stale)}: {stale}")
+            self.assertEqual(stale[0]["source_slug"], "consumer")
+            self.assertEqual(stale[0]["target_slug"], "decision-x")
+
+
 if __name__ == "__main__":
     unittest.main()
