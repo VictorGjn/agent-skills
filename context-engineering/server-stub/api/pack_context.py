@@ -113,10 +113,19 @@ class handler(BaseHTTPRequestHandler):
         result["corpus_commit_sha"] = index.get("_meta", {}).get("commit_sha", "stub")
         result["took_ms"] = int((time.time() - start) * 1000)
 
-        # ── Send (private cache only — confidential corpora MUST NOT be
-        #    cached by shared/CDN intermediaries; per audit fix #1) ──
+        # ── Send ──
+        # Per SPEC-mcp.md §3.1: confidential/restricted corpora MUST NOT be
+        # cached at all (downstream user-agent or shared cache). Lower
+        # classifications can use private+max-age. Default to internal when
+        # the index doesn't declare classification.
+        classification = index.get("data_classification", "internal")
+        if classification in ("confidential", "restricted"):
+            cache_control = "no-store"
+        else:
+            cache_control = "private, max-age=60"
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "private, max-age=60")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(json.dumps(result).encode("utf-8"))

@@ -42,8 +42,11 @@ npm i -g vercel
 vercel dev
 ```
 
-`CE_MCP_TOKEN` env unset → open mode (no auth). Set it for parity with
-deployed behavior.
+`CE_MCP_TOKEN` env **must** be set for any deployed environment — the stub now
+fails closed with `401 authentication not configured` if the token is missing.
+For local-only dev where you explicitly want open mode, set
+`CE_MCP_ALLOW_NO_TOKEN=1` (e.g. in `.env.development`) — never set this in any
+preview/production environment.
 
 ## Deploy
 
