@@ -38,7 +38,7 @@ Karpathy's public commentary on agent-readable wikis as the right format for LLM
 
 - **Not a graph database.** Markdown + frontmatter + `[[wiki-links]]` is the graph store. We deliberately reject Neo4j / pgvector-as-graph stacks (see `ROADMAP-v4.md` §7 non-goals). The cost is no Cypher queries; the win is that any human or LLM can read the source-of-truth without a query language.
 - **Not a knowledge-graph reasoning system.** CE retrieves; it does not multi-hop reason or generate. Reasoning is the agent's job.
-- **Not an embedding research project.** Embedding provider is pluggable (see PR #12 — openai/mistral/voyage/external). CE is provider-agnostic; we don't claim novel embedding models.
+- **Not an embedding research project.** Embedding provider is pluggable (see `scripts/embed_resolve.py` — openai/mistral/voyage/external). CE is provider-agnostic; we don't claim novel embedding models.
 - **Not a benchmark-led project at this stage.** Eval suites exist for regression (`references/eval-results.md`); external benchmarks will surface when CE goes OSS-default. We deliberately avoid premature benchmarking against incomparable systems.
 
 ## Open problems CE punts on

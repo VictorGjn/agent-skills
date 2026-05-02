@@ -695,7 +695,7 @@ Reserved names — implementations MUST NOT use these for unrelated tools:
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
 - `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
-- `wiki_closure(entity_id, max_hops?, relation_kinds?, min_weight?, budget?)` — entity-rooted blast-radius closure with risk-score per affected entity. Currently only on the local stdio MCP (`scripts/mcp_server.py`) per Phase 2.4; reserved here for v2 promotion to the deployed MCP if customer demand surfaces.
+- `wiki.closure(entity_id, max_hops?, relation_kinds?, min_weight?, budget?)` — entity-rooted blast-radius closure with risk-score per affected entity. Currently only on the local stdio MCP (`scripts/mcp_server.py`) per Phase 2.4; reserved here for v2 promotion to the deployed MCP if customer demand surfaces. (Dot-notation matches the local-MCP wiki tool family; deployed-MCP non-wiki tools use snake_case — convention reconciliation deferred to v2.)
 
 ---
 
@@ -810,8 +810,8 @@ Full rationale + alternatives considered in
 For agents composing CE tools across a single user task (one Claude Code turn, one cron-routine iteration, one Anabasis Skill invocation):
 
 - **Tool calls per task**: aim for **≤5**. Most tasks resolve in 2–3 (`list_corpora` → `pack_context`, or `find_relevant_files` → `pack_context`).
-- **Total CE-served tokens per task**: aim for **≤30k for code corpora, ≤80k for doc corpora**. The `pack_context` budget envelope already enforces a per-call cap; this appendix is about *not making 4 redundant calls in a row*.
+- **Total CE-served tokens per task**: keep the cumulative cost in line with one `pack_context` call's `budget` (default 32k per §3.1) — avoid stacking multiple full-budget packs in a row. Code corpora typically settle below the default; doc corpora may legitimately need larger budgets for narrative continuity (raise `budget` rather than chain calls). Calibrate per corpus from telemetry once Appendix C cost-attribution lands.
 - **First-call discipline**: prefer `list_corpora` (small, cheap) over `pack_context` with a guessed `corpus_id`. A `CORPUS_NOT_FOUND` error wastes a full RTT.
 - **Suggestion-following**: when a response includes `next_tool_suggestions` (§3.0.1), the suggested tool is usually the right next call. Agents that follow suggestions should resolve common workflows in ≤2 calls.
 
-These are guidelines for agent and skill authors. The server does not enforce them; the goal is to make the cheap path obvious in tool catalogs and skill prompts.
+These are guidelines for agent and skill authors, not enforced limits. The numeric budgets land once telemetry surfaces real per-corpus distributions; until then, treat the per-call `budget` as the unit of accounting and don't stack.
