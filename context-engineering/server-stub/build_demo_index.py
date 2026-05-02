@@ -3,6 +3,7 @@
 Run once locally; commits a few-MB JSON the Vercel function reads at request time.
 Production v1 fetches per-corpus tarballs from syrocolab/company-brain instead.
 """
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -49,7 +50,10 @@ def main():
 
         files.append({
             "path": rel,
-            "contentHash": str(abs(hash(text)))[:16],
+            # sha256 keeps contentHash stable across runs (Python's built-in hash()
+            # is salted per-process via PYTHONHASHSEED, which would re-version the
+            # demo index on every script invocation and break ETag idempotency).
+            "contentHash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
             "tokens": max(1, len(text) // 4),
             "tree": {
                 "title": rel,
@@ -79,7 +83,11 @@ def main():
             "file_count": len(files),
             "version": 1,
             "last_refresh_completed_at": None,
-            "commit_sha": "stub-" + str(abs(hash(str(files))))[:8],
+            # Stable derived sha so a re-run with unchanged input produces the
+            # same commit_sha — SPEC §3.1 ETag derivation depends on this.
+            "commit_sha": "stub-" + hashlib.sha256(
+                json.dumps(files, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:8],
         },
         "files": files,
     }
