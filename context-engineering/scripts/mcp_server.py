@@ -481,8 +481,19 @@ def wiki_ask(
     for path in sorted(wiki_dir.glob("*.md")):
         if path.name.startswith("_"):
             continue
+        # Codex P2 (#28): read the page once; OSError must not escape the
+        # loop or one bad file takes down the whole wiki.ask request.
+        # Also avoids the double-read (validate_page would re-read for us).
         try:
-            fm = validate_page(path)
+            content = path.read_text(encoding="utf-8")
+        except OSError as e:
+            skipped += 1
+            _emit_telemetry("tool.skip", tool="wiki.ask",
+                            reason="io_error", page=path.name,
+                            error=str(e)[:200])
+            continue
+        try:
+            fm = validate_page(path, text=content)
         except ValidationError as e:
             skipped += 1
             _emit_telemetry("tool.skip", tool="wiki.ask",
@@ -491,11 +502,6 @@ def wiki_ask(
             continue
         page_scope = fm.get("scope")
         if page_scope != target_scope:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            skipped += 1
             continue
         # Lightweight query filter: case-insensitive substring on whole content.
         # Real semantic + multi-hop is Phase 2.

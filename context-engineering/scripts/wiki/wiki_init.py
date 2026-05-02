@@ -197,21 +197,23 @@ def write_wiki(
     wiki_dir = brain_dir / "wiki"
     wiki_dir.mkdir(parents=True, exist_ok=True)
 
-    # F2 fix: ALWAYS load scope maps BEFORE rebuild deletion. The previous
-    # order (delete → load) meant any operator running --rebuild on a multi-
-    # scope brain lost every non-default scope assignment because the loader
-    # ran against an empty wiki/. We carry both maps:
-    #   - scope-by-id: the canonical join key for run-time write_wiki calls
-    #     (slug shifts under collision-order changes; id is stable).
-    #   - scope-by-slug: the only join key that survives a schema bump that
-    #     also widens make_id (1.0 → 1.1 changed every id), so it's the
-    #     fallback used by --rebuild to carry scope across the migration.
-    # See F3 in the cross-PR review: scope-by-slug carries a small risk
-    # when a NEW hint sorts ahead of an old entity and pushes it from
-    # foo.md to foo-2.md, copying scope from the new occupant; that's
-    # documented in the rebuild error remediation message below.
+    # F2 fix: load scope-by-id BEFORE rebuild deletion (the prior delete →
+    # load order silently reset every non-default scope on multi-scope
+    # brains because the loader ran against an empty wiki/).
+    #
+    # Codex P2 fix: scope-by-slug fallback is RESTRICTED to rebuild mode.
+    # A schema bump that widens make_id changes every entity_id, so during
+    # rebuild the new id can't find the old scope and we must fall back to
+    # slug. But in non-rebuild mode, applying the same fallback is a
+    # correctness regression: when a NEW entity hint collides with an
+    # existing slug (taking foo.md, pushing the existing entity to
+    # foo-2.md), the NEW entity would inherit the old page's scope through
+    # the slug map. Restricting the fallback to rebuild=True keeps the
+    # migration path while preserving id-keyed scope discipline elsewhere.
     existing_scope_by_id = _load_existing_scope_by_id(wiki_dir)
-    existing_scope_by_slug = _load_existing_scope_by_slug(wiki_dir)
+    existing_scope_by_slug = (
+        _load_existing_scope_by_slug(wiki_dir) if rebuild else {}
+    )
 
     if rebuild:
         for old in wiki_dir.glob("*.md"):

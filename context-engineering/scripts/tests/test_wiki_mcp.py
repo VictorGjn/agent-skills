@@ -364,6 +364,50 @@ class WikiAddTelemetryTests(unittest.TestCase):
             self.assertEqual(r["appended"], 2)
 
 
+class WikiAskOSErrorTests(unittest.TestCase):
+    """Codex P2 (#28): OSError from a single unreadable wiki page must
+    not abort the whole wiki.ask request."""
+
+    def test_unreadable_page_skipped_not_fatal(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+            # Write one good page so we can verify it still comes through.
+            (wiki / "good.md").write_text(
+                "---\n"
+                "id: ent_good0001\n"
+                "kind: concept\n"
+                "title: Good\n"
+                "slug: good\n"
+                "scope: default\n"
+                "schema_version: \"1.1\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-05-01T00:00:00Z\n"
+                "last_verified_at: 2026-05-01T00:00:00Z\n"
+                "sources: []\n"
+                "---\n# Good\nQuery match.\n",
+                encoding="utf-8",
+            )
+            (wiki / "bad.md").write_text("placeholder", encoding="utf-8")
+
+            real_read = Path.read_text
+
+            def fake_read(self, *args, **kwargs):
+                if self.name == "bad.md":
+                    raise OSError("simulated permission denied")
+                return real_read(self, *args, **kwargs)
+
+            with patch.object(Path, "read_text", fake_read):
+                out = mcp_server.wiki_ask("Query", scope="default",
+                                          brain=str(brain))
+            # Good page came through despite bad.md raising OSError
+            self.assertIn("good", out,
+                          "wiki.ask must keep serving when ONE page errors")
+
+
 class RebuildScopePreservationTests(unittest.TestCase):
     """F2 fix: --rebuild reads scope-by-id and scope-by-slug BEFORE
     deleting pages, so multi-scope brains don't reset scope on schema
@@ -405,6 +449,54 @@ class RebuildScopePreservationTests(unittest.TestCase):
                 "scope: competitive-intel", page,
                 "F2: --rebuild MUST carry forward the original scope, "
                 "not reset to the caller's default arg",
+            )
+
+    def test_non_rebuild_does_not_apply_slug_fallback(self):
+        """Codex P2 (#28): unconditional slug fallback was a correctness
+        regression — a NEW colliding hint would inherit the OLD page's
+        scope through the slug map. Restrict to rebuild=True; in normal
+        runs, scope-by-id is canonical and new entities get the caller's
+        scope arg."""
+        from wiki.events import append_event
+
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            events = brain / "events"
+            events.mkdir()
+            # First write: entity A with hint 'shared-name'
+            append_event(events, source_type="web", source_ref="r1",
+                         file_id="a", claim="A claim",
+                         entity_hint="shared-name", ts=1700000000)
+            write_wiki(brain, scope="competitive-intel",
+                       now_iso="2026-05-01T00:00:00Z")
+            page_a_first = (brain / "wiki" / "shared-name.md").read_text(encoding="utf-8")
+            self.assertIn("scope: competitive-intel", page_a_first)
+
+            # Second write: ADD entity B with hint that ALSO slugifies to
+            # 'shared-name' (here, identical hint won't collide in
+            # consolidate; instead use a different hint that produces the
+            # same base slug). Use 'Shared Name' which slugifies to
+            # 'shared-name' — but consolidate keys on hint string. So we
+            # need two hints whose .title() match. Easiest: 'shared-name'
+            # vs 'shared_name' — both lowercase.title() = 'Shared Name'.
+            append_event(events, source_type="web", source_ref="r2",
+                         file_id="b", claim="B claim",
+                         entity_hint="shared_name", ts=1700001000)
+            write_wiki(brain, scope="default",
+                       now_iso="2026-05-02T00:00:00Z")
+            # The second hint sorted alphabetically AFTER the first
+            # ("shared-name" < "shared_name" by codepoint), so the new
+            # entity should land at shared-name-2.md with the caller's
+            # default scope, NOT inherit competitive-intel via slug
+            # fallback.
+            page_b = (brain / "wiki" / "shared-name-2.md")
+            self.assertTrue(page_b.exists(),
+                            "collision should produce shared-name-2.md")
+            page_b_text = page_b.read_text(encoding="utf-8")
+            self.assertIn(
+                "scope: default", page_b_text,
+                "new entity must NOT inherit old page's scope via slug "
+                "fallback in non-rebuild mode (Codex P2 regression)",
             )
 
     def test_rebuild_with_no_events_dir_raises_clearly(self):
