@@ -119,12 +119,12 @@ valid_until: 2026-12-31 | null  # explicit decay date; null = open-ended
   5. Renaming an entity (changing `title`) MUST NOT change `slug` or `id`. Only fresh writes participate in collision detection.
   6. The `_index.md` table tracks collisions in a footnote so audits can surface near-misses ("`data-processing-2` collided with `data-processing` on 2026-05-15").
 - **Scope rule** (MUST): `scope` is required on multi-source writes; `wiki.ask --scope=<corpus_id>` filters by it; absent scope = `default` corpus only.
-- **Decision-continuity rule** (MUST when `kind: decision`): `supersedes`, `superseded_by`, `valid_until` are tri-state — present-with-value, present-as-null, or omitted. Concrete entity ids in `supersedes` / `superseded_by` MUST point at existing entity files; the Auditor (§1.6) flags broken references. Renaming a decision MUST NOT break the chain — `supersedes`/`superseded_by` reference `id`, not `slug`.
+- **Decision-continuity rule** (MUST when `kind: decision`): `supersedes`, `superseded_by`, `valid_until` are tri-state — present-with-value, present-as-null, or omitted. Concrete entity ids in `supersedes` / `superseded_by` MUST point at existing entity files; the Auditor (§1.7) flags broken references. Renaming a decision MUST NOT break the chain — `supersedes`/`superseded_by` reference `id`, not `slug`.
 - **`last_verified_at` rule** (MUST): every emitter (events extractor, EventStreamSource, GraphifyWikiSource, manual edits) sets this to the wall-clock time of the touch. The wiki page itself stores this only; `freshness_score` is never stored — it is computed on read per §1.2.2 below.
 
 ### 1.2.2 — Freshness policy (computed-on-read freshness_score)
 
-CE deliberately stores no `freshness_score` field on entity pages. Instead, callers (the Auditor at §1.6, `wiki.ask` MCP at §2.4) compute it at query time from the entity's `last_verified_at` + a per-source-type half-life policy. This split matters:
+CE deliberately stores no `freshness_score` field on entity pages. Instead, callers (the Auditor at §1.7, `wiki.ask` MCP at §2.4) compute it at query time from the entity's `last_verified_at` + a per-source-type half-life policy. This split matters:
 
 - **Avoids write-back to age pages.** If freshness were stored, every entity would need rewriting on a clock cadence — battling the immutability of `events/`-derived consolidation.
 - **Keeps the policy tuneable.** Adjusting half-life for a source type doesn't require touching historical wiki pages; the next read picks up the new policy.
@@ -139,8 +139,11 @@ CE deliberately stores no `freshness_score` field on entity pages. Instead, call
 | `transcript` | 60 | Meeting notes, decisions still load-bearing for ~2 months. |
 | `email` | 21 | Personal communication churns fast; old context goes stale. |
 | `notion` | 60 | Internal docs decay between two release cycles. |
-| `rfc` / `department-spec` | 180 | Architectural decisions decay slowly. |
+| `rfc` | 180 | Architectural decisions decay slowly. |
+| `department-spec` | 180 | Same rationale as `rfc` — long-half-life architectural artefacts. |
 | `default` | 60 | Catch-all for source types not in this table. |
+
+(Each table row corresponds 1:1 to a key in `HALF_LIVES: dict[str, int]`. Don't merge rows that share a half-life — the table is the spec for the dict, and a key like `"rfc / department-spec"` would silently miss `HALF_LIVES["rfc"]` lookups at runtime.)
 
 **Decay formula** — linear over 2× half-life, clamped to [0, 1]:
 
