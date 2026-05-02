@@ -302,6 +302,56 @@ class TsconfigAliasResolutionTests(unittest.TestCase):
             # No edges expected — the only file imports something that doesn't exist
             self.assertEqual(graph['stats']['total_edges'], 0)
 
+    def test_inherited_baseurl_anchored_to_parent_config(self):
+        """Regression: when baseUrl/paths come from an `extends`-ed parent
+        tsconfig, they MUST resolve relative to the parent's directory, not
+        the child's. Common monorepo pattern (Nx, Turborepo): packages/<x>/
+        tsconfig.json extends ../../tsconfig.base.json which sets
+        `baseUrl: "."` — that "." is repo-root, not packages/<x>.
+        Surfaced by PR #15 review (chatgpt-codex-connector P1 comment).
+        """
+        import json as _json
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # Parent at repo-root: defines baseUrl + paths
+            (root / 'tsconfig.base.json').write_text(_json.dumps({
+                'compilerOptions': {
+                    'baseUrl': '.',
+                    'paths': {'@shared/*': ['shared/*']},
+                },
+            }))
+            # Child in a subpackage: inherits via extends, no own baseUrl
+            (root / 'packages').mkdir()
+            (root / 'packages' / 'app').mkdir()
+            (root / 'packages' / 'app' / 'tsconfig.json').write_text(_json.dumps({
+                'extends': '../../tsconfig.base.json',
+            }))
+            # Real file at the parent-anchored alias target
+            (root / 'shared').mkdir()
+            shared_lib = "export const helper = 1;\n"
+            (root / 'shared' / 'lib.ts').write_text(shared_lib)
+            # Child file imports via the parent-defined alias
+            importer = "import { helper } from '@shared/lib';\nexport const x = helper;\n"
+            (root / 'packages' / 'app' / 'src').mkdir()
+            (root / 'packages' / 'app' / 'src' / 'main.ts').write_text(importer)
+
+            files = [
+                {'path': 'packages/app/src/main.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': importer}, 'content': importer},
+                {'path': 'shared/lib.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': shared_lib}, 'content': shared_lib},
+            ]
+            graph = code_graph.build_graph(files, corpus_root=str(root))
+
+            edges = [(e['source'], e['target'], e['kind']) for e in graph['edges']]
+            self.assertIn(
+                ('packages/app/src/main.ts', 'shared/lib.ts', 'imports'),
+                edges,
+                f"alias inherited via extends did not resolve. Edges: {edges}",
+            )
+
     def test_no_tsconfig_no_op(self):
         """Corpora without tsconfig.json must be byte-identical to pre-fix behavior:
         non-relative TS imports are silently skipped (current behavior preserved)."""

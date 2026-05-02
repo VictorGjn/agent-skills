@@ -140,6 +140,18 @@ class TsconfigResolver:
                 result.setdefault("compilerOptions", {}).update(parent_opts)
 
         child_opts: dict = data.get("compilerOptions", {})
+        # CE-LOCAL (not in upstream v2.3.2): resolve relative baseUrl to absolute
+        # against THIS config's dir before merging. TypeScript anchors
+        # compilerOptions paths to the file declaring them, not the file
+        # inheriting via `extends`. Without this, `baseUrl: "."` in a shared
+        # tsconfig.base.json (Nx/Turborepo standard) silently misresolves when
+        # a child config in a sub-package extends it.
+        # PR #15 review surfaced this; worth upstreaming to code-review-graph.
+        if "baseUrl" in child_opts:
+            child_opts = dict(child_opts)
+            child_opts["baseUrl"] = str(
+                (tsconfig_path.parent / child_opts["baseUrl"]).resolve()
+            )
         result.setdefault("compilerOptions", {}).update(child_opts)
 
         compiler_options = result.get("compilerOptions", {})
