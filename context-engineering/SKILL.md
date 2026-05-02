@@ -1,6 +1,6 @@
 ---
 name: context-engineering
-description: "Pack 40+ files at 5 depth levels into any LLM context window. Use when an agent needs broad file awareness within a token budget, when extracting features from a repo (code-to-knowledge), or when building a codebase overview. Indexes markdown + code files (14 languages via tree-sitter AST symbol extraction). Keyword, semantic, and graph resolution (with optional graphify integration). Anti-hallucination filters (topic, section, confidence). Task-type presets. Do NOT use for single-file reads or when every file needs full content."
+description: "Build and query a token-efficient, provenance-tracked company brain across code, docs, and connector streams. Five capabilities ship as one skill: multi-source indexer (14 languages via tree-sitter AST + markdown heading trees, schema-versioned, incremental); Source ABC (connector contract — connectors live elsewhere, never in this skill); EntityStore (three-tier raw/events/wiki layer with full provenance, semantic-shift consolidation, drift/split/merge auditor); depth-aware packer (5 levels, 95% budget utilization, multi-hop reasoning, query-as-lens reranking, anti-hallucination filters); MCP server. Anabasis `find-links` reference implementation. Use when: an agent needs broad file awareness within a token budget, building or querying a wiki/EntityStore over code + human knowledge, extracting features from a repo (code-to-knowledge), packing entity pages with provenance, multi-hop reasoning across linked concepts, indexing a workspace or GitHub repo. Do NOT use for: single-file reads, when every file needs full content, scheduling or orchestration (that's the Anabasis runtime), connector implementations (those live in syroco-product-ops or similar adapter library)."
 version: 0.3.0
 mcp_tools:
   - context-engineering.pack
@@ -17,7 +17,26 @@ transports: [stdio, http]
 
 # Context Engineering
 
-Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 fully.
+**The engine for building and querying a queryable, compounding company brain — across code, human-curated knowledge, and connector streams.**
+
+Five tightly-coupled capabilities ship as one skill:
+
+1. **Multi-source indexer** — AST (14 languages via tree-sitter) + markdown heading trees, schema-versioned cache, incremental re-indexing.
+2. **Source ABC** — the contract connectors implement to feed events into the brain. This skill ships `WorkspaceSource` + `GithubRepoSource` only; Notion / HubSpot / Gmail / Granola adapters live elsewhere (Anabasis spec calls this `SignalSource`).
+3. **EntityStore** — three-tier brain layer: `raw/` (verbatim sources) + `events/` (append-only JSONL of extracted claims) + `wiki/<slug>.md` (consolidated entity pages with full provenance — every cited claim resolves to file:line + content_hash + ts). Reference impl of Anabasis spec `EntityStore` ABC.
+4. **Synthesizer + Auditor** — GAM-grade semantic-shift detector (consolidate only on cosine drift, never on every event); `wiki_init.py` one-shot seeder; Auditor proposes splits / merges / contradictions / dead links.
+5. **Retrieval surface** — depth-aware packer (5 levels, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion + authority signals + anti-hallucination filters + knowledge-type priority.
+
+Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, and Phase 2 `wiki.{ask,add,audit,export}`).
+
+The depth packer is one of these five capabilities, not the headline. The full brain — index + EntityStore + synthesis + retrieval — is what makes this skill the reference implementation of Anabasis's `find-links` (spec v0.2).
+
+## At-a-glance: what CE replaces
+
+- **Sourcegraph for an LLM consumer**: Sourcegraph excels at human-precise xref over millions of files; CE excels at *packing the right slice into the LLM's token budget*. Different jobs, complementary tools.
+- **A bare RAG over a repo**: CE adds AST-grade symbol extraction, depth-variable packing (instead of fixed-size chunks), provenance-tracked entity pages, and multi-hop reasoning. RAG is one resolution mode (`--semantic`); CE is four (keyword, semantic, graph, wiki).
+- **A static markdown wiki (Obsidian-style)**: CE *generates and maintains* the wiki from `events/` instead of requiring humans to author every entity page. Humans curate; the synthesizer compounds.
+- **A scheduled "scrape Notion → vector DB" pipeline**: CE provides the engine the pipeline plugs into via Source ABC. The schedule itself is the Anabasis runtime's job, not CE's.
 
 ## Quick start (one verb)
 
@@ -25,7 +44,7 @@ Pack 40+ files at 5 depth levels into a token budget, instead of loading 2-3 ful
 pack_context.py "users getting 401 on refresh tokens"
 ```
 
-That's it. The skill auto-decides:
+Pack 40+ files at 5 depth levels into a token budget instead of loading 2-3 fully. The skill auto-decides:
 - **Mode** — proper-noun / `CamelCase` / `snake_case` query → `graph`; `how/why/what` → `semantic` (if `OPENAI_API_KEY` set, else `keyword`); else `keyword`.
 - **Task preset** — matches `fix / bug / 401 / traceback` → `--task fix`; `review / pr` → `review`; `explain / how does` → `explain`; etc.
 - **Index** — auto-builds one for `cwd` if no index exists at the configured cache path.
@@ -363,3 +382,19 @@ repo without ever installing Anabasis. When Anabasis is present, the
 runtime can route code-context queries to this skill via its declared
 MCP surface (`mcp_tools` in the frontmatter above). There is no runtime
 dependency on Anabasis in either direction.
+
+**Trajectory**: when Anabasis spec `v0.2` freezes, this skill becomes
+the reference implementation of [`find-links`](https://github.com/VictorGjn/anabasis/blob/main/spec/reference-skills/find-links.md) —
+the canonical retrieval skill that operates over Department Specs (output
+of [`install-department`](https://github.com/victorgjn/agent-skills/tree/main/install-department)),
+repo content, and entity pages. install-department captures the brain;
+find-links queries it. Two halves of the same operating loop.
+
+**Licensing posture (option b, locked 2026-05-01)**: this engine is
+**MIT public** and stays that way — the moat is operational, not
+source-code-secret. The Anabasis runtime + hosted plane that schedule
+this skill, manage state, resolve conflicts, and fan out to MCP-
+authenticated connectors are commercial/closed. Cursor / Vercel /
+Snowflake model: closed orchestration on open primitives. You can run
+context-engineering today, and you can keep running it forever, with or
+without Anabasis.
