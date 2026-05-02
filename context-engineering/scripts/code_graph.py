@@ -8,6 +8,7 @@ Sources: agent-skills (core), modular-patchbay (relation kinds, task presets, bi
 Used by pack_context.py --graph mode.
 """
 
+import math
 import os
 import re
 import sys
@@ -75,6 +76,35 @@ RELATION_KINDS = {
 }
 
 DECAY = 0.65  # relevance decay per hop
+
+# P2.3 hub-damping config
+# Below this threshold, edge weights are unchanged. Above it, in-degree
+# damps the weight via 1/(1 + log2(in_degree/threshold)). 10 chosen from
+# real-corpus distribution analysis on efficientship-live: median in-degree
+# is 1, mean is ~5, the long-tail (~6% of files) sits at 10+. The threshold
+# splits "real shared utility" (a constants module imported by 8 files →
+# kept) from "global hub" (a Redux store imported by 199 files → damped).
+# Override via env CONTEXT_ENG_HUB_THRESHOLD for corpora with different
+# import densities.
+# Edge kinds that participate in hub damping. The "many things use X" hub
+# effect applies to structural-use relations only — a file imported, called,
+# extended, or implemented by 50+ peers is a real BFS-flooding hub. Docs,
+# tests, sibling/co-located, and semantic relations are NOT hubs in the
+# same sense (a file with 8 doc-inbound + 1 import-inbound is imported once,
+# not a hub). Counting cross-kind would damp unrelated structural edges.
+HUB_DAMPING_KINDS = frozenset({
+    'imports', 'calls', 'uses_type', 'extends', 'implements',
+})
+
+_DEFAULT_HUB_THRESHOLD = 10
+try:
+    HUB_THRESHOLD = int(os.environ.get('CONTEXT_ENG_HUB_THRESHOLD', _DEFAULT_HUB_THRESHOLD))
+    if HUB_THRESHOLD < 1:
+        raise ValueError('must be positive')
+except (TypeError, ValueError) as _e:
+    print(f"<!-- code_graph: invalid CONTEXT_ENG_HUB_THRESHOLD={os.environ.get('CONTEXT_ENG_HUB_THRESHOLD')!r} "
+          f"({_e}); falling back to {_DEFAULT_HUB_THRESHOLD}. -->", file=sys.stderr)
+    HUB_THRESHOLD = _DEFAULT_HUB_THRESHOLD
 
 # ── Task-type presets (from modular-patchbay traverser.ts) ──
 
@@ -412,6 +442,18 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
                 if doc_stem == code_stem or doc_stem in code_stem or code_stem in doc_stem:
                     _add_edge(path, other_path, 'documents')
 
+    # P2.3 — TF-IDF hub damping
+    # Files that are imported by many others (Redux store, generated types,
+    # logger services, util grab-bags) are legitimate code structure but bad
+    # BFS expansion targets: a query landing on auth-middleware that hops to
+    # store.ts then expands to its 199 dependents floods top-K with noise.
+    # Damp each edge's weight by an idf-style factor of its target's
+    # in-degree, so traversal naturally prefers narrower-cluster paths over
+    # hub-mediated ones. Threshold = HUB_THRESHOLD inbound edges; below it
+    # weight is unchanged. Curve: weight *= 1 / (1 + log2(in_deg / threshold))
+    # → in_deg=10 → 1.0×, in_deg=20 → 0.5×, in_deg=50 → ≈0.30×, in_deg=199 → ≈0.19×.
+    _apply_hub_damping(edges, outgoing, incoming)
+
     return {
         'nodes': nodes,
         'edges': edges,
@@ -547,12 +589,55 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
     )
 
 
+def _apply_hub_damping(edges: list, outgoing: dict, incoming: dict) -> None:
+    """Mutate edge weights in-place to penalize edges into high-in-degree hubs.
+
+    Effect on top-N pack outputs: traversal that would otherwise expand
+    through a hub (Redux store, generated types, logger service, util
+    grab-bag) gets redirected toward narrower-cluster paths. The hub
+    itself remains discoverable directly, but using it as a stepping stone
+    becomes proportionally more expensive in the BFS relevance-decay model.
+
+    Damping is computed per (target, kind) and applied only to edges whose
+    kind is in HUB_DAMPING_KINDS — the structural-use relations where a
+    "many things use X" hub effect actually applies. Doc/test/co_located/
+    related edges intentionally aren't counted toward hub-ness AND aren't
+    damped: a code file with one import-inbound + 8 doc-inbound shouldn't
+    be classified as an import hub. Both `edges[].weight` and the matching
+    entries in `outgoing` / `incoming` (which point at the same edge dicts)
+    reflect the new weight.
+    """
+    # Codex P2: in-degree counted per (target, kind), not globally — keeps
+    # cross-kind interference out (docs/tests don't damp imports).
+    in_degree = {}
+    for e in edges:
+        if e['kind'] not in HUB_DAMPING_KINDS:
+            continue
+        key = (e['target'], e['kind'])
+        in_degree[key] = in_degree.get(key, 0) + 1
+
+    for e in edges:
+        if e['kind'] not in HUB_DAMPING_KINDS:
+            continue
+        deg = in_degree.get((e['target'], e['kind']), 0)
+        if deg <= HUB_THRESHOLD:
+            continue
+        # idf-style: 1 / (1 + log2(deg / threshold))
+        # deg=threshold→1.0×; deg=2*threshold→0.5×; deg=10*threshold→≈0.23×
+        damping = 1.0 / (1.0 + math.log2(deg / HUB_THRESHOLD))
+        e['weight'] = e['weight'] * damping
+
+
 def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, corpus_root: Optional[str] = None) -> dict:
     """Build graph from Graphify graph.json if available, else import-only fallback.
 
     `corpus_root` is forwarded to build_graph for tsconfig path-alias resolution
     on the fallback path. Graphify-driven path runs upstream and produces its own
     edges; alias resolution there would have to happen at graphify-extraction time.
+
+    Hub damping (P2.3) is applied uniformly across both paths — graphify-derived
+    graphs typically have higher edge density and stronger hub effects, so they
+    benefit more from damping, not less.
     """
     if graphify_path:
         from graphify_adapter import load_graphify_graph, adapt_to_code_graph
@@ -562,6 +647,10 @@ def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, 
             indexed_paths = {f['path'] for f in files}
             graph = adapt_to_code_graph(graphify_data, indexed_paths)
             if graph['edges']:
+                # Codex P1 fix: damping was previously only inside build_graph,
+                # bypassed when graphify graph was available. Apply at the
+                # fallback boundary so both paths damp uniformly.
+                _apply_hub_damping(graph['edges'], graph['outgoing'], graph['incoming'])
                 print(f"<!-- Graph source: graphify ({graph['stats']['total_nodes']} nodes, "
                       f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
                 return graph
