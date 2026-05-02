@@ -30,13 +30,14 @@ _RELATION_MAP = {
 }
 _DEFAULT_RELATION = ('related', 0.3)
 
-# Graphify v2 (April 2026) introduced hyperedges in graph.json — links with
-# multiple `_src` and/or `_tgt` lists representing N-ary relationships
-# (e.g. a community of related nodes). They don't fit the binary edge model
-# above; the link-parsing loop below skips them by virtue of expecting
-# scalar `_src`/`_tgt`. To consume them, decompose pairwise (cross-product
-# of sources × targets) at parse time, tagged with kind='hyperedge_member'.
-# Deferred until we see them in real corpora.
+# TODO(p3.2-followup): hyperedge support deferred. Graphify v2 (April 2026)
+# emits hyperedges in graph.json — links with multiple `_src` and/or `_tgt`
+# lists representing N-ary relationships (community membership, etc.). The
+# binary _src/_tgt parser below skips them silently. Forcing function for
+# de-deferral: a real corpus surfaces with hyperedges
+# (`any(isinstance(link.get('_src'), list) for link in graph.json['links'])`).
+# Implementation sketch + deferral conditions in
+# ~/.claude/handoffs/ce_must_should_prep.md "Follow-ups carried over" §B7.
 
 # Confidence string → weight multiplier. Graphify's real output uses these
 # string tags (confidence_score is documented but not emitted in practice).

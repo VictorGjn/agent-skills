@@ -18,6 +18,7 @@ import sys
 import json
 import re
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 
@@ -292,6 +293,9 @@ def scan_directory(root_dir: str) -> dict:
     
     return {
         'root': str(root),
+        'indexer_version': '1.0',
+        'indexer': 'index_workspace',
+        'indexed_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'totalFiles': len(files),
         'totalTokens': total_tokens,
         'skipped': skipped,

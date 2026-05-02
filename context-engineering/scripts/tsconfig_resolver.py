@@ -4,9 +4,13 @@ Resolves TypeScript path aliases (e.g., ``@/ -> src/``) declared in
 ``compilerOptions.paths`` so that import edges can point to real file paths
 instead of being silently dropped.
 
-Lifted verbatim from code-review-graph (MIT-licensed):
-    https://github.com/tirth8205/code-review-graph
-    code_review_graph/tsconfig_resolver.py at v2.3.2
+Lifted from code-review-graph (MIT-licensed). See ``_VENDORED_FROM`` below
+for the exact upstream version + commit SHA pinned at lift time.
+
+CE-LOCAL patches not in upstream are tagged with ``CE-LOCAL`` comments
+inline; consider upstreaming when CRG is responsive. Re-syncing from a
+newer upstream version: diff against the commit pinned in
+``_VENDORED_FROM`` to find local patches before applying.
 
 License: MIT (see upstream LICENSE). Attribution required by upstream;
 preserved here.
@@ -20,13 +24,30 @@ import re
 from pathlib import Path
 from typing import Optional
 
+# Provenance of this vendored module. Update when re-syncing from upstream.
+_VENDORED_FROM = {
+    "upstream": "https://github.com/tirth8205/code-review-graph",
+    "version": "v2.3.2",
+    "commit_sha": "db2d2df789c2",  # tag v2.3.2 on 2026-05-02
+    "lifted_at": "2026-05-02",
+    "lifted_in": "PR #15",
+}
+
 logger = logging.getLogger(__name__)
 
 # Extensions probed when resolving an alias target
 _PROBE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".vue"]
 
-# Tsconfig filenames to look for when walking up the directory tree
-_TSCONFIG_NAMES = ["tsconfig.json", "tsconfig.app.json"]
+# Tsconfig filenames to look for when walking up the directory tree.
+# CE-LOCAL: extended beyond upstream's ``["tsconfig.json", "tsconfig.app.json"]``
+# to include ``tsconfig.base.json`` (Nx/Turborepo standard) and ``jsconfig.json``
+# (Next.js JS-only projects). Probed in order; first match wins.
+_TSCONFIG_NAMES = [
+    "tsconfig.json",
+    "tsconfig.app.json",
+    "tsconfig.base.json",
+    "jsconfig.json",
+]
 
 
 class TsconfigResolver:
@@ -64,6 +85,26 @@ class TsconfigResolver:
                 "TsconfigResolver: unexpected error for %s", file_path, exc_info=True,
             )
             return None
+
+    def is_alias_pattern(self, import_str: str, file_path: str) -> bool:
+        """True if import_str matches any tsconfig ``paths`` key pattern.
+
+        Used to distinguish "alias the resolver couldn't find" (broken alias —
+        worth surfacing) from "genuine npm package import" (silent skip).
+        Both look identical at the import-string level (`@scope/foo` could be
+        either); the tsconfig is the disambiguator.
+        """
+        try:
+            config = self._load_tsconfig_for_file(file_path)
+            if config is None:
+                return False
+            paths: dict[str, list[str]] = config.get("paths", {})
+            for pattern in paths:
+                if _match_pattern(pattern, import_str) is not None:
+                    return True
+            return False
+        except (OSError, ValueError, TypeError):
+            return False
 
     # ------------------------------------------------------------------
     # Internal helpers

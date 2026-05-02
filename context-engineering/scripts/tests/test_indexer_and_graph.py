@@ -276,9 +276,13 @@ class TsconfigAliasResolutionTests(unittest.TestCase):
             edges = [(e['source'], e['target'], e['kind']) for e in graph['edges']]
             self.assertIn(('src/foo.ts', 'src/bar.ts', 'imports'), edges)
 
-    def test_unresolved_alias_does_not_add_edge(self):
-        """Sanity: an alias that doesn't map to an indexed file is silently dropped
-        (existing behavior; will become structured signal in a follow-up PR)."""
+    def test_unresolved_alias_emits_diagnostic_edge(self):
+        """B2: an import that matches a tsconfig paths pattern but doesn't
+        resolve to a real file emits an `unresolved_alias` diagnostic edge,
+        rather than being silently dropped. Distinguishes broken aliases
+        (worth surfacing) from genuine npm package imports (still silent).
+        Engineer-flagged on PR #15 review.
+        """
         import json as _json
         import code_graph
 
@@ -299,8 +303,61 @@ class TsconfigAliasResolutionTests(unittest.TestCase):
                  'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
             ]
             graph = code_graph.build_graph(files, corpus_root=str(root))
-            # No edges expected — the only file imports something that doesn't exist
-            self.assertEqual(graph['stats']['total_edges'], 0)
+            unresolved = [e for e in graph['edges'] if e['kind'] == 'unresolved_alias']
+            self.assertEqual(len(unresolved), 1, f"expected 1 unresolved_alias edge, got: {graph['edges']}")
+            self.assertEqual(unresolved[0]['source'], 'src/foo.ts')
+            self.assertEqual(unresolved[0]['target'], '@/does-not-exist')
+            # Genuine npm package imports must STILL be silent
+            self.assertFalse(any(
+                e['target'] == 'react' or e['target'] == 'lodash'
+                for e in graph['edges']
+            ))
+
+    def test_genuine_package_import_stays_silent(self):
+        """B2 corollary: an import that does NOT match any tsconfig paths
+        pattern (a real npm package) MUST NOT produce an unresolved_alias
+        edge — those would pollute the graph with every `react`/`lodash` etc.
+        """
+        import json as _json
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'tsconfig.json').write_text(_json.dumps({
+                'compilerOptions': {
+                    'baseUrl': './src',
+                    'paths': {'@/*': ['*']},  # only @/* is an alias
+                },
+            }))
+            (root / 'src').mkdir()
+            foo = "import React from 'react';\nimport _ from 'lodash';\n"
+            (root / 'src' / 'foo.ts').write_text(foo)
+
+            files = [
+                {'path': 'src/foo.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+            ]
+            graph = code_graph.build_graph(files, corpus_root=str(root))
+            self.assertEqual(graph['stats']['total_edges'], 0,
+                             f"genuine package imports should be silent: {graph['edges']}")
+
+    def test_logical_corpus_root_skips_resolution(self):
+        """B1 corpus_root validity guard: github-indexed corpora write a
+        logical 'root' like 'owner/repo@branch'. The resolver MUST NOT walk
+        up from cwd looking for a tsconfig — that would pick up unrelated
+        tsconfigs and produce false-positive edges.
+        """
+        import code_graph
+
+        foo = "import { x } from '@/anything';\n"
+        files = [
+            {'path': 'src/foo.ts', 'tokens': 5,
+             'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+        ]
+        # Pass a logical (non-filesystem) root — like index_github_repo writes
+        graph = code_graph.build_graph(files, corpus_root='owner/repo@main')
+        # No edges from this file — resolver must have no-op'd
+        self.assertEqual(graph['stats']['total_edges'], 0)
 
     def test_inherited_baseurl_anchored_to_parent_config(self):
         """Regression: when baseUrl/paths come from an `extends`-ed parent
