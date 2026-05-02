@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
+from tsconfig_resolver import TsconfigResolver
+
 # Hard cap on edges built during graph construction. Prevents the silent
 # truncation pattern that produced `total_relations=12175` metadata while only
 # 5000 edges were actually stored. Configurable via env for large monorepos.
@@ -220,12 +222,22 @@ def _resolve_md_link(link_target: str, source_dir: str, file_index: dict) -> str
 
 # ── Build graph ──
 
-def build_graph(files: list) -> dict:
+def build_graph(files: list, corpus_root: str = None) -> dict:
     """Build a relation graph from indexed files.
+
+    Args:
+        files: indexed file entries
+        corpus_root: absolute path the indexed paths are relative to. Defaults to
+            os.getcwd(). Required for TS tsconfig.json path-alias resolution —
+            indexed paths are relative, but tsconfig walks need absolute paths.
 
     Returns:
         {nodes, edges, outgoing, incoming, stats}
     """
+    if corpus_root is None:
+        corpus_root = os.getcwd()
+    _ts_resolver = TsconfigResolver()
+
     # Normalize paths to forward slashes (Windows indexes store backslashes)
     file_index = {}
     for f in files:
@@ -300,6 +312,18 @@ def build_graph(files: list) -> dict:
                     continue
                 if ext in ('.ts', '.tsx', '.js', '.jsx', '.mjs'):
                     if not import_path.startswith('.') and not import_path.startswith('/'):
+                        # Try tsconfig.json path-alias resolution before skipping.
+                        # Aliases like `@/auth/middleware` (defined in compilerOptions.paths)
+                        # are silently dropped today; resolver maps them to real files.
+                        abs_source = os.path.join(corpus_root, path)
+                        resolved_abs = _ts_resolver.resolve_alias(import_path, abs_source)
+                        if resolved_abs:
+                            try:
+                                rel = os.path.relpath(resolved_abs, corpus_root).replace('\\', '/')
+                            except ValueError:
+                                rel = None  # different drives on Windows
+                            if rel and rel in file_index and rel != path:
+                                _add_edge(path, rel, 'imports')
                         continue
 
                 target = _resolve_import(import_path, source_dir, file_index)
@@ -474,8 +498,13 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
     )
 
 
-def build_graph_with_fallback(files: list, graphify_path: str = None) -> dict:
-    """Build graph from Graphify graph.json if available, else import-only fallback."""
+def build_graph_with_fallback(files: list, graphify_path: str = None, corpus_root: str = None) -> dict:
+    """Build graph from Graphify graph.json if available, else import-only fallback.
+
+    `corpus_root` is forwarded to build_graph for tsconfig path-alias resolution
+    on the fallback path. Graphify-driven path runs upstream and produces its own
+    edges; alias resolution there would have to happen at graphify-extraction time.
+    """
     if graphify_path:
         from graphify_adapter import load_graphify_graph, adapt_to_code_graph
 
@@ -488,7 +517,7 @@ def build_graph_with_fallback(files: list, graphify_path: str = None) -> dict:
                       f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
                 return graph
 
-    graph = build_graph(files)
+    graph = build_graph(files, corpus_root=corpus_root)
     print(f"<!-- Graph source: import-only ({graph['stats']['total_nodes']} nodes, "
           f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
     return graph
