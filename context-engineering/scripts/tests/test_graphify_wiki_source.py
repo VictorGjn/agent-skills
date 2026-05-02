@@ -171,6 +171,24 @@ class GraphifyWikiSourceEmitTests(unittest.TestCase):
             events = read_events(events_dir)
             self.assertEqual(events[0]["source_type"], "manual")
 
+    def test_empty_events_list_is_noop_not_walk(self):
+        """Codex P2 regression: emit_events(events=[]) MUST be a no-op,
+        not a fall-through to walking artifacts. Otherwise a caller who
+        intends `[]` as 'nothing to write' accidentally ingests every
+        graphify page in the directory."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "graphify-out"
+            events_dir = Path(td) / "events"
+            _seed_graphify_out(root, [
+                ("a.md", "# A\n\nshould NOT be ingested\n"),
+                ("b.md", "# B\n\nshould NOT be ingested\n"),
+            ])
+            src = GraphifyWikiSource(graphify_out_dir=root, events_dir=events_dir)
+            n = src.emit_events(events=[])
+            self.assertEqual(n, 0)
+            # No events file should exist
+            self.assertFalse(list(events_dir.glob("*.jsonl")))
+
     def test_metadata_returns_size_mtime(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "graphify-out"

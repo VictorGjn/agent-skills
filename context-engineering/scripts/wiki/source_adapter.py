@@ -224,7 +224,11 @@ class GraphifyWikiSource(Source):
             emit_events(ref="wiki/foo.md") → self-fetch via self.fetch(ref)
             emit_events() → walk every artifact in list_artifacts()
         """
-        if events:
+        # Codex P2 fix: distinguish "explicit events list (possibly empty)"
+        # from "no events arg, walk artifacts." `if events:` treats `[]` as
+        # falsy and falls through to walk mode — that's semantically wrong
+        # and risks appending duplicate events when the caller meant a no-op.
+        if events is not None:
             return EventStreamSource(self.events_dir).emit_events(events)
 
         appended = 0
