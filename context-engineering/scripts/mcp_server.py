@@ -402,23 +402,36 @@ def _resolve_brain_path(brain: str | None) -> Path:
 
 
 def _read_page_with_scope(path: Path) -> tuple[str | None, str]:
-    """Read a wiki page; return (scope, content). scope=None means malformed."""
+    """Read a wiki page; return (scope, content).
+
+    scope=None means the file isn't a valid entity page (no frontmatter,
+    no `scope:` line, or unreadable). Codex P2 fix: malformed pages must
+    NOT silently default to scope="default" — that leaks arbitrary
+    markdown into default-scope queries.
+
+    A page qualifies if AND only if it has a closed `---` frontmatter
+    block AND that block contains a `scope:` line. Pages missing either
+    return (None, "") so callers skip them.
+    """
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
         return None, ""
-    # Cheap scope extraction without YAML dep — same parser style as
-    # validate_page. Scan frontmatter for `scope:` line.
     in_frontmatter = False
-    scope = "default"
+    frontmatter_closed = False
+    scope: str | None = None
     for line in content.splitlines():
         if line.startswith("---"):
             if in_frontmatter:
+                frontmatter_closed = True
                 break
             in_frontmatter = True
             continue
         if in_frontmatter and line.startswith("scope:"):
-            scope = line.split(":", 1)[1].strip().strip('"\'') or "default"
+            raw = line.split(":", 1)[1].strip().strip('"\'')
+            scope = raw if raw else None
+    if not frontmatter_closed or scope is None:
+        return None, ""
     return scope, content
 
 

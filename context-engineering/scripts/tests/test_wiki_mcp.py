@@ -105,6 +105,32 @@ class WikiAskTests(unittest.TestCase):
             out = mcp_server.wiki_ask("anything", brain=str(brain))
             self.assertIn("no wiki/ directory", out)
 
+    def test_malformed_page_not_treated_as_default_scope(self):
+        """Codex P2: a wiki/*.md without proper frontmatter / scope: line
+        MUST NOT silently default to scope="default". Otherwise random
+        markdown in brain/wiki/ leaks into default-scope queries."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+            # File 1: no frontmatter at all — pure markdown
+            (wiki / "scratch.md").write_text(
+                "# Scratchpad\n\nNotes about acme.\n", encoding="utf-8",
+            )
+            # File 2: opens frontmatter but never closes it
+            (wiki / "broken.md").write_text(
+                "---\nkind: concept\n# Body without --- close\n",
+                encoding="utf-8",
+            )
+            # File 3: frontmatter closed but no `scope:` line
+            (wiki / "no-scope.md").write_text(
+                "---\nkind: concept\nid: ent_x\n---\n# Body\nacme content\n",
+                encoding="utf-8",
+            )
+            out = mcp_server.wiki_ask("acme", scope="default", brain=str(brain))
+            self.assertIn("no entities", out,
+                          "malformed pages must not surface as default-scope")
+
     def test_skips_underscore_index_files(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td)
