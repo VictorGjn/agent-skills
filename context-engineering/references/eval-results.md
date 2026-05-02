@@ -177,3 +177,30 @@ python3 scripts/eval/eval_graph_vs_keyword.py
 # Test cases are TESTCASES arrays inside each eval script.
 # Ground truth was verified against actual repo file trees.
 ```
+
+---
+
+## TS path-alias resolver — bundle effect (PR #15 follow-up, 2026-05-02)
+
+After PR #15 added `tsconfig.json` `compilerOptions.paths` resolution to `code_graph.build_graph`, graph edge density on TS monorepos jumps significantly. This measurement validates that the gain doesn't bloat `pack_context` bundles in the keyword-first hybrid path.
+
+**Setup**: efficientship-live (730 TS files, `tsconfig.json` declares `paths: { '@/*': ['*'] }` with `baseUrl: ./src`). Compared resolver-disabled vs resolver-enabled by patching `TsconfigResolver` to a no-op stub for one pass, restoring it for the other. Same `cache/live-index.json`; same query; `pack_context.score_with_graph` with `top=15`.
+
+| Query | Top-15 paths overlap | Bundle tokens delta |
+|---|---|---|
+| `voyage start route waypoint` (keyword-led) | 15/15 (jaccard 1.00) | 0 |
+| `authentication middleware token refresh` (keyword-led) | 15/15 | 0 |
+| `VesselSelector` (CamelCase → graph mode) | 15/15 | 0 |
+| `reduxStore` (CamelCase → graph mode) | 15/15 | 0 |
+
+Edge counts behind those pack outputs:
+
+| | Edges total |
+|---|--:|
+| Resolver disabled (pre-fix behaviour) | 444 |
+| Resolver enabled (PR #15) | 2,372 |
+| Delta | +1,928 (5.3×) |
+
+**Why the bundles don't grow despite 5.3× more edges**: keyword scoring runs first and selects entry points; BFS expands from those entry points with `max_depth ≤ 4` per task preset. Top-K (`top=15`) caps the final selection. Once those filters saturate (≥15 high-confidence files in scope), additional alias-resolved edges don't displace anything. The fix is **strictly recall-positive in the structural graph but output-neutral in keyword-led packs** — value lands in scenarios where keyword scoring fails entirely (true alias-only queries) or in `--graph`-rooted modes that bypass keyword scoring.
+
+**Engineer's over-recall worry didn't materialise.** No edge weighting tweaks needed (alias-resolved imports keep weight 1.0 alongside relative imports). Re-evaluate if telemetry surfaces large bundle inflation on a real Anabasis runtime call pattern.
