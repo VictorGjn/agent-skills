@@ -326,8 +326,40 @@ Exposes tools: `pack`, `index_workspace`, `index_github_repo`, `build_embeddings
 
 - Python 3.10+
 - `pip install tree-sitter-language-pack` (Python 3.12+) or `tree-sitter-languages` (Python 3.10-3.11) for AST symbol extraction. Falls back to regex if neither is installed.
-- OpenAI API key (semantic mode only, via `OPENAI_API_KEY` env var)
+- Embedding provider for `--semantic` mode (any one; auto-detected from key presence, or set `EMBED_PROVIDER=openai|mistral|voyage|external`):
+  - `OPENAI_API_KEY` — `text-embedding-3-small` @ 512 dims
+  - `MISTRAL_API_KEY` — `codestral-embed` @ 1536 dims (code-tuned; falls back to `mistral-embed` @ 1024 if `EMBED_MODEL=mistral-embed`)
+  - `VOYAGE_API_KEY` — `voyage-code-3` @ 1024 dims (code-tuned)
+  - `EMBED_PROVIDER=external` — agent-orchestrated mode (no API key; agent supplies vectors via files; see "External (MCP) workflow" below)
+  - Override defaults with `EMBED_MODEL`, `EMBED_DIMS`, `EMBED_BASE_URL` (e.g. point at local Ollama: `EMBED_BASE_URL=http://localhost:11434/v1`)
 - `pip install "mcp[cli]" requests` (MCP server only)
+
+### External (MCP) workflow
+
+When `EMBED_PROVIDER=external`, embeddings are supplied via files instead of HTTP. The agent (e.g. Claude Code) reads pending identities, calls an MCP-exposed embedding tool such as `mcp__syroco__mistral_ai__mistral_ai-create-embeddings` for each batch, and writes the vectors back. Useful when no embedding API key is available locally but an MCP-mediated provider is.
+
+Build:
+```bash
+# 1. Agent runs:
+EMBED_PROVIDER=external embed_resolve.py dump-pending cache/workspace-index.json
+# -> cache/pending_embeddings.json: {model, dims, items: [{path, hash, identity}]}
+
+# 2. Agent calls MCP for each identity, writes:
+# cache/embedding_results.json: {items: [{path, hash, embedding: [...]}]}
+
+# 3. Agent runs:
+EMBED_PROVIDER=external embed_resolve.py apply-results cache/workspace-index.json
+# -> merges into cache/embeddings.json
+```
+
+Query (per `pack --semantic` call):
+```bash
+# Agent writes the query vector to cache/query_embedding.json (override path with EMBED_QUERY_FILE).
+# Then runs pack/resolve as usual — embed_single reads the sidecar.
+EMBED_PROVIDER=external pack_context.py "..." --semantic
+```
+
+Caveat: the Syroco MCP component currently exposes only `input` (no `model` param), so it's locked to `mistral-embed` (1024 dims). For `codestral-embed`, set `MISTRAL_API_KEY` and use the direct provider.
 
 ## Scripts
 
