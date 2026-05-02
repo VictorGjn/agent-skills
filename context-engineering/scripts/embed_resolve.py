@@ -256,7 +256,7 @@ def load_cache(cache_path: str) -> dict:
     """Load embedding cache. Returns {path: {hash, embedding, identity}}."""
     p = Path(cache_path)
     if p.exists():
-        with open(p) as f:
+        with open(p, encoding='utf-8') as f:
             return json.load(f)
     return {}
 
@@ -265,7 +265,7 @@ def save_cache(cache: dict, cache_path: str):
     """Save embedding cache."""
     p = Path(cache_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, 'w') as f:
+    with open(p, 'w', encoding='utf-8') as f:
         json.dump(cache, f)
     print(f"Cache saved: {len(cache)} entries → {cache_path}", file=sys.stderr)
 
@@ -278,7 +278,7 @@ def dump_pending(index_path: str, cache_path: str = CACHE_FILE, pending_path: st
     to pending_path. Returns count of pending entries.
     Format: {"model": str, "dims": int, "items": [{"path": str, "hash": str, "identity": str}, ...]}
     """
-    with open(index_path) as f:
+    with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
     files = index.get('files', index) if isinstance(index, dict) else index
     if isinstance(files, dict):
@@ -313,7 +313,7 @@ def apply_results(index_path: str, cache_path: str = CACHE_FILE, results_path: s
         results = json.load(f)
     items = results.get('items', results) if isinstance(results, dict) else results
 
-    with open(index_path) as f:
+    with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
     files = index.get('files', index) if isinstance(index, dict) else index
     if isinstance(files, dict):
@@ -355,7 +355,7 @@ def build_embeddings(index_path: str, cache_path: str = CACHE_FILE, api_key: str
     Build or update embeddings for all files in the index.
     Only recomputes when file hash changes.
     """
-    with open(index_path) as f:
+    with open(index_path, encoding='utf-8') as f:
         index = json.load(f)
 
     files = index.get('files', index) if isinstance(index, dict) else index
@@ -609,7 +609,7 @@ def main():
         if hybrid:
             # Load index and do keyword scoring first
             from pack_context_lib import score_file, tokenize_query
-            with open(INDEX_FILE) as f:
+            with open(INDEX_FILE, encoding='utf-8') as f:
                 index = json.load(f)
             files = index.get('files', index) if isinstance(index, dict) else index
             if isinstance(files, dict):
