@@ -27,8 +27,7 @@ from pack_context_lib import (
 
 mcp = FastMCP(
     "context-engineering",
-    version="1.0.0",
-    description="Depth-packed context loading for codebases. Pack 40+ files at 5 depth levels into any token budget.",
+    instructions="Depth-packed context loading for codebases. Pack 40+ files at 5 depth levels into any token budget. Wiki/EntityStore tools (wiki.ask / wiki.add / wiki.audit) close the Anabasis loop.",
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -364,6 +363,226 @@ def stats() -> str:
         lines.append("No embedding cache. Run build_embeddings for semantic mode.")
 
     return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────
+# P5 — Wiki / EntityStore MCP tools (PRD M7 + S2 + S3 + S4)
+# ──────────────────────────────────────────────────────────────────
+
+import time
+from datetime import datetime, timezone
+
+
+def _emit_telemetry(event: str, **fields) -> None:
+    """Emit one JSONL telemetry record to stderr per SPEC-mcp.md §9.
+
+    Events: entity.consolidated, entity.superseded, audit.flagged,
+    freshness.expired, tool.call. Stderr keeps stdout clean for tool
+    response payloads.
+    """
+    rec = {
+        "ts": int(time.time()),
+        "event": event,
+        **fields,
+    }
+    try:
+        sys.stderr.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # never break a tool call on telemetry
+        pass
+
+
+def _resolve_brain_path(brain: str | None) -> Path:
+    """Resolve the brain directory: explicit arg > env > cwd default."""
+    if brain:
+        return Path(brain).resolve()
+    env_brain = os.environ.get("CE_BRAIN_DIR")
+    if env_brain:
+        return Path(env_brain).resolve()
+    return Path.cwd() / "brain"
+
+
+def _read_page_with_scope(path: Path) -> tuple[str | None, str]:
+    """Read a wiki page; return (scope, content).
+
+    scope=None means the file isn't a valid entity page (no frontmatter,
+    no `scope:` line, or unreadable). Codex P2 fix: malformed pages must
+    NOT silently default to scope="default" — that leaks arbitrary
+    markdown into default-scope queries.
+
+    A page qualifies if AND only if it has a closed `---` frontmatter
+    block AND that block contains a `scope:` line. Pages missing either
+    return (None, "") so callers skip them.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None, ""
+    in_frontmatter = False
+    frontmatter_closed = False
+    scope: str | None = None
+    for line in content.splitlines():
+        if line.startswith("---"):
+            if in_frontmatter:
+                frontmatter_closed = True
+                break
+            in_frontmatter = True
+            continue
+        if in_frontmatter and line.startswith("scope:"):
+            raw = line.split(":", 1)[1].strip().strip('"\'')
+            scope = raw if raw else None
+    if not frontmatter_closed or scope is None:
+        return None, ""
+    return scope, content
+
+
+@mcp.tool(name="wiki.ask")
+def wiki_ask(
+    query: str,
+    scope: str | None = None,
+    brain: str | None = None,
+    budget: int = 8000,
+) -> str:
+    """Read entity pages from brain/wiki/, filter by scope, return as markdown.
+
+    M7 from plan/prd-closed-loop.md — implements the namespace primitive
+    landed in PR #16 schema. Absent ``scope`` defaults to ``default`` corpus
+    only; explicit ``scope`` filters to matching entity pages.
+
+    V0.1 surface: simple read + filter. Full pack-style depth-band selection
+    over wiki pages lands in Phase 2 (`pack --wiki`).
+
+    Args:
+        query: free-text query (currently used for substring filter only;
+               full semantic resolution is Phase 2).
+        scope: corpus scope; defaults to "default".
+        brain: brain root directory; falls back to CE_BRAIN_DIR env or ./brain.
+        budget: soft token budget for the returned markdown.
+    """
+    target_scope = scope or "default"
+    brain_dir = _resolve_brain_path(brain)
+    wiki_dir = brain_dir / "wiki"
+
+    _emit_telemetry("tool.call", tool="wiki.ask", scope=target_scope,
+                    brain=str(brain_dir))
+
+    if not wiki_dir.exists():
+        return f"<!-- wiki.ask: no wiki/ directory at {brain_dir} -->"
+
+    matched: list[tuple[str, str]] = []
+    for path in sorted(wiki_dir.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        page_scope, content = _read_page_with_scope(path)
+        if page_scope is None:
+            continue
+        if page_scope != target_scope:
+            continue
+        # Lightweight query filter: case-insensitive substring on whole content.
+        # Real semantic + multi-hop is Phase 2.
+        if query and query.strip() and query.lower() not in content.lower():
+            continue
+        matched.append((path.name, content))
+
+    if not matched:
+        return (f"<!-- wiki.ask: no entities in scope={target_scope!r} "
+                f"matched query={query!r} -->")
+
+    # Pack within budget — naive: concatenate until ~budget chars (≈ tokens × 4).
+    char_cap = budget * 4
+    out: list[str] = [
+        f"<!-- wiki.ask scope={target_scope} matched {len(matched)} entities -->",
+        "",
+    ]
+    used = 0
+    for name, content in matched:
+        chunk = f"## {name}\n\n{content}\n"
+        if used + len(chunk) > char_cap:
+            out.append(f"<!-- wiki.ask: truncated at budget; "
+                       f"{len(matched) - len(out) + 2} more not shown -->")
+            break
+        out.append(chunk)
+        used += len(chunk)
+    return "\n".join(out)
+
+
+@mcp.tool(name="wiki.add")
+def wiki_add(
+    events: list[dict],
+    brain: str | None = None,
+) -> str:
+    """Append events to the brain via EventStreamSource — the runtime-facing
+    alias for skills emitting findings back into the brain.
+
+    S2 from plan/prd-closed-loop.md. Each event dict needs `source_type`,
+    `source_ref`, `file_id`, `claim`; optional `entity_hint`, `embedding_id`,
+    `ts` (auto-stamped if absent). Returns the count of events appended
+    plus the events file path.
+
+    Closes the loop: a non-Python skill (Claude Code, n8n, cron) calls this
+    MCP verb instead of importing `EventStreamSource`.
+    """
+    from wiki.source_adapter import EventStreamSource
+
+    brain_dir = _resolve_brain_path(brain)
+    events_dir = brain_dir / "events"
+
+    _emit_telemetry("tool.call", tool="wiki.add", brain=str(brain_dir),
+                    n_events=len(events) if events else 0)
+
+    if not events:
+        return json.dumps({"appended": 0, "events_dir": str(events_dir)})
+
+    src = EventStreamSource(events_dir=events_dir)
+    try:
+        n = src.emit_events(events)
+    except ValueError as e:
+        return json.dumps({"error": "INVALID_EVENT", "message": str(e)})
+
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    return json.dumps({
+        "appended": n,
+        "events_file": str(events_dir / f"{today}.jsonl"),
+    })
+
+
+@mcp.tool(name="wiki.audit")
+def wiki_audit(
+    brain: str | None = None,
+    refresh: bool = False,
+) -> str:
+    """Read the latest audit/proposals.md, optionally re-running audit.py first.
+
+    S3 from plan/prd-closed-loop.md. The CLI runner `audit.py` is the
+    cron-driven primary; this MCP verb is a thin reader by default
+    (returns whatever audit.py last wrote). Pass refresh=True to force a
+    re-audit before reading — useful for ad-hoc operator queries.
+    """
+    brain_dir = _resolve_brain_path(brain)
+    proposals_path = brain_dir / "audit" / "proposals.md"
+
+    _emit_telemetry("tool.call", tool="wiki.audit", brain=str(brain_dir),
+                    refresh=refresh)
+
+    if refresh:
+        from wiki.audit import run_audit
+        result = run_audit(brain_dir)
+        if result["stale_supersessions"]:
+            for f in result["stale_supersessions"]:
+                _emit_telemetry("audit.flagged", rule="stale-supersession",
+                                source=f["source_slug"], target=f["target_slug"])
+        if result["freshness_expired"]:
+            for f in result["freshness_expired"]:
+                _emit_telemetry("freshness.expired", slug=f["slug"],
+                                score=f["score"], elapsed_days=f["elapsed_days"])
+
+    if not proposals_path.exists():
+        return (f"<!-- wiki.audit: no audit/proposals.md at {brain_dir}. "
+                f"Run with refresh=true or invoke `audit.py --brain {brain_dir}` first. -->")
+
+    return proposals_path.read_text(encoding="utf-8")
+
+
+# ──────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
