@@ -28,7 +28,16 @@ from typing import Any
 #   (a) corpus < 10k entities -> rerun wiki_init.py --rebuild from events
 #   (b) corpus >= 10k entities -> ship a migrate_v1_to_v2.py and friends
 # Both per phase-1.md §1.2.1.
-SCHEMA_VERSION = "1.0"
+#
+# 1.0 -> 1.1: make_id widened from sha256[:8] to sha256[:12] to push 1%
+# birthday-paradox collision past 16M entities. The hash *output* changes
+# even though the schema fields are identical, so any pre-1.1 brain has
+# stale `id:` values that no longer round-trip through wiki_init's
+# scope-by-id / supersedes-chain joins. Refusal-and-rebuild is the
+# documented remedy: validate_page rejects 1.0 pages, operator runs
+# `wiki_init.py --rebuild`, ids regenerate from the (unchanged) events.
+# events.SCHEMA_VERSION stays at 1.0 — events don't carry entity ids.
+SCHEMA_VERSION = "1.1"
 
 # Required frontmatter keys per phase-1.md §1.2 (after PR #20 schema additions).
 # `kind: decision` adds three more (supersedes/superseded_by/valid_until); those

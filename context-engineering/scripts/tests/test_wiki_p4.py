@@ -31,7 +31,7 @@ def _write_decision_page(wiki_dir: Path, slug: str, **fm) -> Path:
         "title": slug.replace("-", " ").title(),
         "slug": slug,
         "scope": "default",
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "confidence": "0.85",
         "updated": "2026-05-01T00:00:00Z",
         "last_verified_at": "2026-05-01T00:00:00Z",
@@ -64,7 +64,7 @@ def _write_concept_page(
         "title": slug.replace("-", " ").title(),
         "slug": slug,
         "scope": "default",
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "confidence": "0.85",
         "updated": "2026-05-01T00:00:00Z",
         "last_verified_at": last_verified,
@@ -376,7 +376,7 @@ class CodexRegressionTests(unittest.TestCase):
                 "title: Bad\n"
                 "slug: bad\n"
                 "scope: default\n"
-                "schema_version: \"1.0\"\n"
+                "schema_version: \"1.1\"\n"
                 "confidence: 0.85\n"
                 "updated: 2026-05-01T00:00:00Z\n"
                 "last_verified_at: NOT-A-VALID-ISO-TIMESTAMP\n"

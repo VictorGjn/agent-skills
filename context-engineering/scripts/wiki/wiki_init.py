@@ -57,10 +57,16 @@ def make_id(slug: str, sources_signature: str) -> str:
     Idempotent: same inputs -> same id. Renaming (slug change) does
     NOT change id, so callers should pass a STABLE signature derived
     from the source identities, not the rendered content.
+
+    Returns a 12-hex-char (48-bit) prefix. The earlier 8-hex (32-bit)
+    version had ~1% birthday-paradox collision at 77k entities — fine
+    for the demo, silent corruption for any Anabasis customer with a
+    real corpus. 48 bits gives ~1% at ~16M entities; ~0.001% at 77k.
+    Trivial to widen further if the brain ever crosses 10M entities.
     """
     import hashlib
     h = hashlib.sha256(f"{slug}:{sources_signature}".encode("utf-8")).hexdigest()
-    return f"ent_{h[:8]}"
+    return f"ent_{h[:12]}"
 
 
 def consolidate(events: list[dict]) -> dict[str, list[dict]]:
