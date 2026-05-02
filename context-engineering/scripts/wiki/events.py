@@ -30,7 +30,16 @@ from pathlib import Path
 # Canonical event-line schema. Bumping this requires a migrator under
 # scripts/wiki/migrations/ (per phase-1.md §1.2.1). read_events tolerates
 # legacy rows missing the field — treats them as v1.0.
-SCHEMA_VERSION = "1.0"
+#
+# L1 fix: renamed from SCHEMA_VERSION to EVENT_SCHEMA_VERSION to
+# disambiguate from validate_page.SCHEMA_VERSION (the wiki PAGE schema,
+# currently 1.1, evolves on a different cadence). Same name for two
+# different versioned schemas was a footgun for any future contributor
+# importing "from .events import SCHEMA_VERSION" expecting the page
+# schema. The legacy alias is kept as `SCHEMA_VERSION = EVENT_SCHEMA_VERSION`
+# for one release cycle to avoid breaking external imports.
+EVENT_SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = EVENT_SCHEMA_VERSION  # deprecated alias; remove next bump
 
 # Match canonical event-log filenames: <YYYY-MM-DD>.jsonl. Sidecar files like
 # <YYYY-MM-DD>.embeddings.jsonl must NOT be picked up by read_events — those
@@ -50,7 +59,7 @@ def append_event(events_dir: Path, *, source_type: str, source_ref: str,
     for small writes; on Windows we accept the rare interleaving risk because
     a corrupted line is recoverable (parser skips bad lines)."""
     rec = {
-        'schema_version': SCHEMA_VERSION,
+        'schema_version': EVENT_SCHEMA_VERSION,
         'ts': int(ts or time.time()),
         'source_type': source_type,
         'source_ref': source_ref,
