@@ -1,0 +1,3 @@
+# Stub-only deps — intentionally empty (stdlib is sufficient).
+# Production v1 will add: requests (provider HTTP), numpy (vectors),
+# octokit-via-PyGithub (GitHub App writes), pyjwt (App token signing).
