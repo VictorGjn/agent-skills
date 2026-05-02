@@ -124,7 +124,7 @@ class GraphDisplacementTests(unittest.TestCase):
         orig_traverse = code_graph.traverse_from
         orig_entry = code_graph.find_entry_points
         try:
-            code_graph.build_graph_with_fallback = lambda files, graphify_path=None: {}
+            code_graph.build_graph_with_fallback = lambda files, graphify_path=None, corpus_root=None: {}
             code_graph.find_entry_points = lambda scored, threshold=0.3: ['f00.py']
             code_graph.traverse_from = lambda entry_points, graph, **kw: [
                 {'path': f'f{i:02d}.py', 'relevance': 0.99, 'reason': 'graph'}
@@ -164,7 +164,7 @@ class GraphDisplacementTests(unittest.TestCase):
         orig_traverse = code_graph.traverse_from
         orig_entry = code_graph.find_entry_points
         try:
-            code_graph.build_graph_with_fallback = lambda files, graphify_path=None: {}
+            code_graph.build_graph_with_fallback = lambda files, graphify_path=None, corpus_root=None: {}
             code_graph.find_entry_points = lambda scored, threshold=0.3: ['f00.py']
             code_graph.traverse_from = lambda entry_points, graph, **kw: [
                 {'path': f'f{i:02d}.py', 'relevance': 0.7, 'reason': 'graph'}
@@ -197,7 +197,7 @@ class GraphDisplacementTests(unittest.TestCase):
         orig_traverse = code_graph.traverse_from
         orig_entry = code_graph.find_entry_points
         try:
-            code_graph.build_graph_with_fallback = lambda files, graphify_path=None: {}
+            code_graph.build_graph_with_fallback = lambda files, graphify_path=None, corpus_root=None: {}
             code_graph.find_entry_points = lambda scored, threshold=0.3: ['a.py']
             code_graph.traverse_from = lambda entry_points, graph, **kw: [
                 {'path': 'c.py', 'relevance': 0.5, 'reason': 'graph'},
@@ -236,6 +236,94 @@ class ResolveMdLinkTests(unittest.TestCase):
         nested = code_graph._resolve_md_link('sub/inner.md', 'docs', file_index)
         self.assertEqual(nested, 'docs/sub/inner.md')
         self.assertNotIn('\\', nested)
+
+
+class TsconfigAliasResolutionTests(unittest.TestCase):
+    """Verify TS tsconfig.json paths-alias resolution wires through build_graph.
+
+    Regression target: code_graph.py:302 used to skip every non-relative TS
+    import unconditionally, dropping `@/foo`-style aliases. With tsconfig
+    resolution wired in, an alias that maps to a real indexed file should
+    produce an `imports` edge.
+    """
+
+    def test_alias_resolves_to_indexed_file(self):
+        import json as _json
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'tsconfig.json').write_text(_json.dumps({
+                'compilerOptions': {
+                    'baseUrl': './src',
+                    'paths': {'@/*': ['*']},
+                },
+            }))
+            (root / 'src').mkdir()
+            foo = "import { bar } from '@/bar';\nexport const x = bar;\n"
+            bar = "export const bar = 1;\n"
+            (root / 'src' / 'foo.ts').write_text(foo)
+            (root / 'src' / 'bar.ts').write_text(bar)
+
+            files = [
+                {'path': 'src/foo.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+                {'path': 'src/bar.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': bar}, 'content': bar},
+            ]
+            graph = code_graph.build_graph(files, corpus_root=str(root))
+
+            edges = [(e['source'], e['target'], e['kind']) for e in graph['edges']]
+            self.assertIn(('src/foo.ts', 'src/bar.ts', 'imports'), edges)
+
+    def test_unresolved_alias_does_not_add_edge(self):
+        """Sanity: an alias that doesn't map to an indexed file is silently dropped
+        (existing behavior; will become structured signal in a follow-up PR)."""
+        import json as _json
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'tsconfig.json').write_text(_json.dumps({
+                'compilerOptions': {
+                    'baseUrl': './src',
+                    'paths': {'@/*': ['*']},
+                },
+            }))
+            (root / 'src').mkdir()
+            foo = "import { missing } from '@/does-not-exist';\n"
+            (root / 'src' / 'foo.ts').write_text(foo)
+
+            files = [
+                {'path': 'src/foo.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+            ]
+            graph = code_graph.build_graph(files, corpus_root=str(root))
+            # No edges expected — the only file imports something that doesn't exist
+            self.assertEqual(graph['stats']['total_edges'], 0)
+
+    def test_no_tsconfig_no_op(self):
+        """Corpora without tsconfig.json must be byte-identical to pre-fix behavior:
+        non-relative TS imports are silently skipped (current behavior preserved)."""
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'src').mkdir()
+            foo = "import { bar } from '@/bar';\n"
+            bar = "export const bar = 1;\n"
+            (root / 'src' / 'foo.ts').write_text(foo)
+            (root / 'src' / 'bar.ts').write_text(bar)
+
+            files = [
+                {'path': 'src/foo.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+                {'path': 'src/bar.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': bar}, 'content': bar},
+            ]
+            graph = code_graph.build_graph(files, corpus_root=str(root))
+            # No tsconfig → resolver returns None → existing skip applies → no edge
+            self.assertEqual(graph['stats']['total_edges'], 0)
 
 
 if __name__ == '__main__':

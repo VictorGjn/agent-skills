@@ -12,9 +12,16 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 from collections import defaultdict
 
 from tsconfig_resolver import TsconfigResolver
+
+# Module-level singleton: tsconfig walks + parses are expensive and idempotent
+# (tsconfig.json changes at path X stay valid until path X changes). Reusing
+# across build_graph calls saves the per-request re-walk in MCP-server mode.
+# Restart the process to pick up tsconfig.json changes.
+_TS_RESOLVER = TsconfigResolver()
 
 # Hard cap on edges built during graph construction. Prevents the silent
 # truncation pattern that produced `total_relations=12175` metadata while only
@@ -222,7 +229,7 @@ def _resolve_md_link(link_target: str, source_dir: str, file_index: dict) -> str
 
 # ── Build graph ──
 
-def build_graph(files: list, corpus_root: str = None) -> dict:
+def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
     """Build a relation graph from indexed files.
 
     Args:
@@ -236,7 +243,6 @@ def build_graph(files: list, corpus_root: str = None) -> dict:
     """
     if corpus_root is None:
         corpus_root = os.getcwd()
-    _ts_resolver = TsconfigResolver()
 
     # Normalize paths to forward slashes (Windows indexes store backslashes)
     file_index = {}
@@ -316,7 +322,7 @@ def build_graph(files: list, corpus_root: str = None) -> dict:
                         # Aliases like `@/auth/middleware` (defined in compilerOptions.paths)
                         # are silently dropped today; resolver maps them to real files.
                         abs_source = os.path.join(corpus_root, path)
-                        resolved_abs = _ts_resolver.resolve_alias(import_path, abs_source)
+                        resolved_abs = _TS_RESOLVER.resolve_alias(import_path, abs_source)
                         if resolved_abs:
                             try:
                                 rel = os.path.relpath(resolved_abs, corpus_root).replace('\\', '/')
@@ -498,7 +504,7 @@ def traverse_for_task(query: str, entry_points: list, graph: dict,
     )
 
 
-def build_graph_with_fallback(files: list, graphify_path: str = None, corpus_root: str = None) -> dict:
+def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, corpus_root: Optional[str] = None) -> dict:
     """Build graph from Graphify graph.json if available, else import-only fallback.
 
     `corpus_root` is forwarded to build_graph for tsconfig path-alias resolution
