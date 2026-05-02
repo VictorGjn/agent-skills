@@ -4,6 +4,7 @@ Run: python3 -m unittest context-engineering.scripts.tests.test_indexer_and_grap
  or: cd context-engineering/scripts && python3 -m unittest tests.test_indexer_and_graph
 """
 
+import os
 import sys
 import tempfile
 import unittest
@@ -340,6 +341,51 @@ class TsconfigAliasResolutionTests(unittest.TestCase):
             graph = code_graph.build_graph(files, corpus_root=str(root))
             self.assertEqual(graph['stats']['total_edges'], 0,
                              f"genuine package imports should be silent: {graph['edges']}")
+
+    def test_relative_corpus_root_resolves_against_cwd(self):
+        """Codex PR #17 P1 regression: legacy indexes from
+        `python index_workspace.py .` stored root='.'. Build_graph must
+        treat the relative root as cwd-relative (abspath internally) and
+        let the resolver fire — not silently skip TS alias resolution.
+        """
+        import json as _json
+        import code_graph
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'tsconfig.json').write_text(_json.dumps({
+                'compilerOptions': {
+                    'baseUrl': './src',
+                    'paths': {'@/*': ['*']},
+                },
+            }))
+            (root / 'src').mkdir()
+            foo = "import { bar } from '@/bar';\n"
+            bar = "export const bar = 1;\n"
+            (root / 'src' / 'foo.ts').write_text(foo)
+            (root / 'src' / 'bar.ts').write_text(bar)
+
+            files = [
+                {'path': 'src/foo.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': foo}, 'content': foo},
+                {'path': 'src/bar.ts', 'tokens': 5,
+                 'tree': {'totalTokens': 5, 'text': bar}, 'content': bar},
+            ]
+            # Run build_graph with cwd inside the corpus and corpus_root='.'
+            # (matches the legacy-index pattern).
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(str(root))
+                graph = code_graph.build_graph(files, corpus_root='.')
+            finally:
+                os.chdir(old_cwd)
+
+            edges = [(e['source'], e['target'], e['kind']) for e in graph['edges']]
+            self.assertIn(
+                ('src/foo.ts', 'src/bar.ts', 'imports'),
+                edges,
+                f"relative corpus_root should still resolve aliases. edges: {edges}",
+            )
 
     def test_logical_corpus_root_skips_resolution(self):
         """B1 corpus_root validity guard: github-indexed corpora write a

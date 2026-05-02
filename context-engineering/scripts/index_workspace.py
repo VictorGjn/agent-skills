@@ -224,7 +224,11 @@ def parse_code_tree(source: str, content: str, lang: str) -> dict:
 # ── Scanner ──
 
 def scan_directory(root_dir: str) -> dict:
-    root = Path(root_dir)
+    # Always resolve to absolute. Otherwise `index_workspace.py .` writes
+    # root='.' which is meaningless once the index is loaded from a
+    # different cwd (TS path-alias resolution silently no-ops, downstream
+    # `index.get('root')` lookups land in the wrong directory).
+    root = Path(root_dir).resolve()
     files = []
     total_tokens = 0
     skipped = 0

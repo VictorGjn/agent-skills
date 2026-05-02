@@ -251,16 +251,20 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
     if corpus_root is None:
         corpus_root = os.getcwd()
 
-    # B1 corpus_root validity guard: tsconfig path-alias resolution requires
-    # an existing absolute filesystem path to walk for tsconfig.json. github-
-    # indexed corpora write a logical 'root' like 'owner/repo@branch' which
-    # would cause the resolver to walk up from cwd and pick up an unrelated
-    # tsconfig. Detect that case and skip resolution silently.
-    ts_resolution_active = (
-        isinstance(corpus_root, str)
-        and os.path.isabs(corpus_root)
-        and os.path.isdir(corpus_root)
-    )
+    # B1 corpus_root validity guard: tsconfig path-alias resolution needs
+    # an existing filesystem directory to walk for tsconfig.json. Accept
+    # relative paths (legacy indexes wrote `root='.'` from
+    # `index_workspace.py .` — abspath against cwd to recover the meaning).
+    # Reject anything that doesn't resolve to a real directory — keeps
+    # github-indexed logical roots like 'owner/repo@branch' from making
+    # the resolver walk up from cwd and pick up an unrelated tsconfig.
+    if isinstance(corpus_root, str):
+        candidate = corpus_root if os.path.isabs(corpus_root) else os.path.abspath(corpus_root)
+        ts_resolution_active = os.path.isdir(candidate)
+        if ts_resolution_active:
+            corpus_root = candidate  # use the absolute form below
+    else:
+        ts_resolution_active = False
 
     # Normalize paths to forward slashes (Windows indexes store backslashes)
     file_index = {}
