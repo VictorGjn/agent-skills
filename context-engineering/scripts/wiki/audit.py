@@ -93,7 +93,7 @@ def _load_pages(wiki_dir: Path) -> tuple[dict[str, dict], list[str]]:
             warnings.append(f"skipped {path.name}: read failed ({e})")
             continue
         try:
-            fm = _validate_text(text, path)
+            fm = validate_page(path, text=text)
         except ValidationError as e:
             warnings.append(f"skipped {path.name}: {e}")
             continue
@@ -113,55 +113,6 @@ def _load_pages(wiki_dir: Path) -> tuple[dict[str, dict], list[str]]:
             "sources": sources,
         }
     return pages, warnings
-
-
-def _validate_text(text: str, path: Path) -> dict:
-    """validate_page() variant that takes already-read text. Avoids a
-    second disk read when _load_pages has already cached the bytes."""
-    # validate_page's signature accepts a Path; we re-invoke its logic by
-    # writing to a synthetic path-like wrapper isn't worth the indirection.
-    # Cleaner: validate_page is small enough that we re-parse here using
-    # its public helpers. We import lazily to keep the API surface narrow.
-    from .validate_page import _parse_simple_frontmatter, _FRONTMATTER_RE as _VP_FM_RE
-    from .validate_page import (
-        SCHEMA_VERSION, _REQUIRED_KEYS_ALL, _REQUIRED_KEYS_DECISION,
-        _VALID_KINDS,
-    )
-    fm_match = _VP_FM_RE.match(text)
-    if fm_match is None:
-        raise ValidationError(
-            f"{path}: missing YAML frontmatter (expected `---` block at top). "
-            f"Run `python3 scripts/wiki/wiki_init.py --rebuild` to regenerate."
-        )
-    frontmatter = _parse_simple_frontmatter(fm_match.group(1))
-    page_version = frontmatter.get("schema_version")
-    if page_version != SCHEMA_VERSION:
-        raise ValidationError(
-            f"{path}: schema_version={page_version!r} does not match current "
-            f"CE release {SCHEMA_VERSION!r}. "
-            f"Run `python3 scripts/wiki/wiki_init.py --rebuild` to regenerate "
-            f"from events log."
-        )
-    missing = _REQUIRED_KEYS_ALL - frontmatter.keys()
-    if missing:
-        raise ValidationError(
-            f"{path}: missing required frontmatter keys {sorted(missing)!r}. "
-            f"Run `python3 scripts/wiki/wiki_init.py --rebuild`."
-        )
-    kind = frontmatter.get("kind")
-    if kind not in _VALID_KINDS:
-        raise ValidationError(
-            f"{path}: kind={kind!r} not in {sorted(_VALID_KINDS)!r}."
-        )
-    if kind == "decision":
-        missing_decision = _REQUIRED_KEYS_DECISION - frontmatter.keys()
-        if missing_decision:
-            raise ValidationError(
-                f"{path}: kind=decision requires keys "
-                f"{sorted(missing_decision)!r}. Use null when the field is "
-                f"genuinely empty (e.g. supersedes: null for a fresh decision)."
-            )
-    return frontmatter
 
 
 def _parse_source_rows(text: str) -> list[dict]:
