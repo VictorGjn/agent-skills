@@ -168,7 +168,7 @@ The Auditor's "freshness expired" rule (§1.7) flags any entity where computed `
 ### 1.2.1 — Schema evolution policy
 
 **Wiki pages (`wiki/<slug>.md`)**: refusal-and-rebuild while corpus < 10k entities.
-- Frontmatter MUST include `schema_version: "1.0"`.
+- Frontmatter MUST include `schema_version: "1.1"` (current). Bumped from `1.0` when `make_id` widened to 12 hex chars — pre-1.1 brains must run `--rebuild`.
 - The validator in `scripts/wiki/validate_page.py` errors hard on mismatch with a clear remediation: "Run `python3 scripts/wiki/wiki_init.py --rebuild`."
 - When schema bumps occur, `wiki_init.py` regenerates all pages from the (immutable) `events/` log. Idempotent.
 - At ≥10k entities, switch to forward-migration: add `scripts/wiki/migrate_v1_to_v2.py` etc. Threshold revisit gated by `wiki_init.py` runtime exceeding 5 minutes.
