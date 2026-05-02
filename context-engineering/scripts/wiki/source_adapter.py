@@ -162,5 +162,147 @@ class EventStreamSource(Source):
             )
 
 
-# WorkspaceSource, GithubRepoSource, GraphifyWikiSource land in Wave 1
-# (per plan/prd-closed-loop.md S1). The ABC above is what they slot into.
+class GraphifyWikiSource(Source):
+    """Pull-shaped Source: consumes graphify v0.1.7+ ``--wiki`` output.
+
+    S1 from ``plan/prd-closed-loop.md`` (Wave 1). graphify
+    (`safishamsi/graphify`) writes Wikipedia-style entity pages under
+    ``graphify-out/wiki/`` — rich enough to seed CE, but lacking CE's
+    frontmatter (no `id`, no `last_verified_at`, no `scope`). This Source
+    reads those pages and re-emits each as one CE event keyed on the
+    page slug, so ``wiki_init`` consolidates them through CE's normal
+    pipeline.
+
+    Hybrid model per phase-1.md §1.2.0: preserves user choice (run
+    graphify upstream if you want; CE consumes it without duplicating
+    community-detection or wikilink generation).
+
+    AC9: ``list_artifacts()`` enumerates ``graphify-out/wiki/*.md``;
+    ``emit_events()`` produces CE-schema-compliant events per page.
+    """
+
+    SOURCE_KIND = "graphify-wiki"
+
+    def __init__(self, graphify_out_dir: Path, events_dir: Path):
+        self.graphify_out_dir = Path(graphify_out_dir)
+        self.events_dir = Path(events_dir)
+
+    def list_artifacts(self) -> list[str]:
+        wiki_dir = self.graphify_out_dir / "wiki"
+        if not wiki_dir.exists():
+            return []
+        return sorted(
+            str(p.relative_to(self.graphify_out_dir).as_posix())
+            for p in wiki_dir.glob("*.md")
+            if not p.name.startswith("_")
+        )
+
+    def fetch(self, ref: str) -> bytes:
+        path = self.graphify_out_dir / ref
+        return path.read_bytes()
+
+    def metadata(self, ref: str) -> dict:
+        path = self.graphify_out_dir / ref
+        try:
+            stat = path.stat()
+        except OSError:
+            return {"ref": ref, "exists": False}
+        return {
+            "ref": ref,
+            "mtime": int(stat.st_mtime),
+            "size": stat.st_size,
+            "exists": True,
+        }
+
+    def emit_events(self, events: list[dict] | None = None,
+                    *, ref: str | None = None,
+                    content: bytes | None = None) -> int:
+        """Parse graphify wiki page(s) and append CE events.
+
+        Three call shapes:
+            emit_events(ref="wiki/foo.md", content=<bytes>) → parse one artifact
+            emit_events(ref="wiki/foo.md") → self-fetch via self.fetch(ref)
+            emit_events() → walk every artifact in list_artifacts()
+        """
+        # Codex P2 fix: distinguish "explicit events list (possibly empty)"
+        # from "no events arg, walk artifacts." `if events:` treats `[]` as
+        # falsy and falls through to walk mode — that's semantically wrong
+        # and risks appending duplicate events when the caller meant a no-op.
+        if events is not None:
+            return EventStreamSource(self.events_dir).emit_events(events)
+
+        appended = 0
+        if ref is not None:
+            payload = content if content is not None else self.fetch(ref)
+            appended += self._emit_from_artifact(ref, payload)
+            return appended
+
+        for art_ref in self.list_artifacts():
+            try:
+                payload = self.fetch(art_ref)
+            except OSError:
+                continue
+            appended += self._emit_from_artifact(art_ref, payload)
+        return appended
+
+    def _emit_from_artifact(self, ref: str, payload: bytes) -> int:
+        """Convert one graphify wiki page to a single CE event.
+
+        V0.1: each page = one event whose claim is the page's first
+        non-frontmatter paragraph (or the file's title heading if no
+        paragraph). entity_hint = the file's slug.
+
+        Future: split per-section / per-wikilink so a 50-claim graphify
+        page produces 50 events for finer-grained consolidation.
+        """
+        try:
+            text = payload.decode("utf-8", errors="replace")
+        except (UnicodeDecodeError, AttributeError):
+            return 0
+
+        slug = Path(ref).stem
+        title = slug.replace("-", " ").replace("_", " ").title()
+        claim = _first_meaningful_paragraph(text) or title
+
+        append_event(
+            self.events_dir,
+            source_type=self.SOURCE_KIND,
+            source_ref=ref,
+            file_id=f"graphify-{slug}",
+            claim=claim,
+            entity_hint=slug,
+        )
+        return 1
+
+
+def _first_meaningful_paragraph(text: str) -> str:
+    """Skip frontmatter + heading lines; return first prose paragraph.
+
+    Caps the result at 280 chars so events stay scannable in the log.
+    """
+    in_frontmatter = False
+    started = False
+    para: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "---":
+            in_frontmatter = not in_frontmatter
+            continue
+        if in_frontmatter:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            if started:
+                break
+            continue
+        if stripped.startswith("#"):
+            continue
+        para.append(stripped)
+        started = True
+    if not para:
+        return ""
+    text_out = " ".join(para)
+    return text_out if len(text_out) <= 280 else text_out[:277] + "..."
+
+
+# WorkspaceSource and GithubRepoSource land later (per phase-1.md §1.4 +
+# Wave 2 scope). The Source ABC above is what they slot into when shipped.
