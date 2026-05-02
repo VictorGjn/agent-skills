@@ -17,6 +17,7 @@ import re
 import hashlib
 import time
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -369,6 +370,9 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
 
     return {
         'root': f'{owner}/{repo}@{branch}',
+        'indexer_version': '1.0',
+        'indexer': 'index_github_repo',
+        'indexed_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'totalFiles': len(files),
         'totalTokens': total_tokens,
         'directories': sorted(dirs),

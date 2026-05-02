@@ -174,6 +174,8 @@ Outputs a standalone `graph.html` — zero dependencies, interactive 3D visualiz
 
 If [Graphify](https://github.com/safishamsi/graphify) has been run in the workspace, `--graph` auto-detects `graphify-out/graph.json` and uses its richer call graphs, inheritance, and cross-language edges.
 
+**Note on TypeScript path aliases with graphify**: graphify v0.4 does not resolve `tsconfig.json` `compilerOptions.paths` aliases (verified against upstream source — no `tsconfig`/`baseUrl`/`compilerOptions` references). For TS-heavy corpora that rely on `@/foo`-style aliases, the graphify-preferred path will silently miss those imports as edges. CE's native graph (the fallback when `graphify-out/graph.json` is absent) DOES resolve them via `scripts/tsconfig_resolver.py`. Workaround for now: skip graphify when indexing TS monorepos with heavy alias usage; revisit when graphify ships tsconfig support upstream.
+
 ### Feature map (bird's-eye)
 
 ```bash

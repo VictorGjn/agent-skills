@@ -61,6 +61,17 @@ RELATION_KINDS = {
     'supersedes':    0.3,    # Doc versioning
     'related':       0.3,    # Semantic relation
     'co_located':    0.3,    # Same directory
+    # Diagnostic kind: import string matched a tsconfig paths pattern but
+    # didn't resolve to an indexed file. Surfaces broken aliases (typos,
+    # missing files, misconfigured tsconfig) without confusing them with
+    # genuine npm imports (still silent). Deliberately excluded from every
+    # task-preset follow_kinds — visible in edges[] but not navigable in BFS,
+    # so it doesn't pollute pack outputs.
+    # Weight 0.2 chosen below the lowest non-diagnostic kinds (`related`,
+    # `co_located` at 0.3) so any future edge ranker treats these as the
+    # weakest signal — they're "this looked like a connection but failed,"
+    # not "this is a real connection of low strength."
+    'unresolved_alias': 0.2,
 }
 
 DECAY = 0.65  # relevance decay per hop
@@ -244,6 +255,27 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
     if corpus_root is None:
         corpus_root = os.getcwd()
 
+    # B1 corpus_root validity guard: tsconfig path-alias resolution needs
+    # an existing filesystem directory to walk for tsconfig.json. Accept
+    # relative paths (legacy indexes wrote `root='.'` from
+    # `index_workspace.py .` — Path.resolve() against cwd to recover the
+    # meaning). Reject anything that doesn't resolve to a real directory —
+    # keeps github-indexed logical roots like 'owner/repo@branch' from
+    # making the resolver walk up from cwd and pick up an unrelated
+    # tsconfig. Path.resolve() (not os.path.abspath) matches the symlink
+    # semantics that index_workspace.scan_directory uses on the write side.
+    if isinstance(corpus_root, str):
+        try:
+            candidate = str(Path(corpus_root).resolve())
+            ts_resolution_active = Path(candidate).is_dir()
+        except (OSError, ValueError):
+            ts_resolution_active = False
+            candidate = corpus_root
+        if ts_resolution_active:
+            corpus_root = candidate  # absolute, symlink-resolved
+    else:
+        ts_resolution_active = False
+
     # Normalize paths to forward slashes (Windows indexes store backslashes)
     file_index = {}
     for f in files:
@@ -318,18 +350,29 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
                     continue
                 if ext in ('.ts', '.tsx', '.js', '.jsx', '.mjs'):
                     if not import_path.startswith('.') and not import_path.startswith('/'):
-                        # Try tsconfig.json path-alias resolution before skipping.
-                        # Aliases like `@/auth/middleware` (defined in compilerOptions.paths)
-                        # are silently dropped today; resolver maps them to real files.
-                        abs_source = os.path.join(corpus_root, path)
-                        resolved_abs = _TS_RESOLVER.resolve_alias(import_path, abs_source)
-                        if resolved_abs:
-                            try:
-                                rel = os.path.relpath(resolved_abs, corpus_root).replace('\\', '/')
-                            except ValueError:
-                                rel = None  # different drives on Windows
-                            if rel and rel in file_index and rel != path:
-                                _add_edge(path, rel, 'imports')
+                        if ts_resolution_active:
+                            # Try tsconfig.json path-alias resolution before skipping.
+                            # Aliases like `@/auth/middleware` (defined in
+                            # compilerOptions.paths) are silently dropped today;
+                            # resolver maps them to real files.
+                            abs_source = os.path.join(corpus_root, path)
+                            resolved_abs = _TS_RESOLVER.resolve_alias(import_path, abs_source)
+                            if resolved_abs:
+                                try:
+                                    rel = os.path.relpath(resolved_abs, corpus_root).replace('\\', '/')
+                                except ValueError:
+                                    rel = None  # different drives on Windows
+                                if rel and rel in file_index and rel != path:
+                                    _add_edge(path, rel, 'imports')
+                            elif _TS_RESOLVER.is_alias_pattern(import_path, abs_source):
+                                # B2: import matched a tsconfig paths pattern but
+                                # probe failed — broken alias (typo / missing file
+                                # / misconfigured tsconfig). Surface as diagnostic
+                                # edge so audits / `grep edges[].kind=unresolved_alias`
+                                # find it. Target is the raw import string, not a
+                                # real file path — kind is excluded from BFS
+                                # follow_kinds so it doesn't pollute pack outputs.
+                                _add_edge(path, import_path, 'unresolved_alias')
                         continue
 
                 target = _resolve_import(import_path, source_dir, file_index)
