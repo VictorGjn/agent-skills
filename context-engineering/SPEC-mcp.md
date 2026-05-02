@@ -87,6 +87,31 @@ This server is a Model Context Protocol server per [modelcontextprotocol.io/spec
 - **Resources**: in addition to the tools below, the server exposes corpora as MCP resources under the URI scheme `corpora://`. `corpora://` lists all visible corpora; `corpora://<id>/manifest` reads a single corpus manifest. Resource access is gated by the same `data_classification` rules as tool calls (§6.3). This is the canonical way for clients to enumerate corpora — `list_corpora` is preserved as a tool for clients without resource support.
 - **Discovery**: clients use `tools/list`, `resources/list`, `resources/templates/list` to enumerate. Tool descriptions include the "use when / don't use when" framing required for high-quality LLM tool-selection.
 
+### 3.0.1 Standard response field: `next_tool_suggestions`
+
+Every tool response MAY include an optional `next_tool_suggestions` array nudging the caller toward the cheap-first call sequence:
+
+```json
+"next_tool_suggestions": [
+  {
+    "tool": "pack_context",
+    "reason": "you called find_relevant_files; pack the top 3 hits",
+    "args_hint": { "corpus_id": "gh-syrocolab-foo-main" }
+  }
+]
+```
+
+**Server-side**: include this field when the just-completed tool call has an obvious next step. Typical pairs:
+- `find_relevant_files` → `pack_context` (pack the top hits)
+- `index_github_repo(async=true)` → `get_job_status` (poll for completion)
+- `list_corpora` → `pack_context` (chosen `corpus_id`)
+
+Maximum 2 suggestions per response. Suggestions are heuristic; the server is not required to provide them.
+
+**Client-side**: agents SHOULD prefer suggested tools when continuing a task — the server has more context about the cheap path than the agent does. Agents MUST NOT treat suggestions as required (they're hints, not contract).
+
+This is a forward-compatible **MINOR** addition (§ 8 versioning) — clients that ignore the field continue to work unchanged.
+
 ### 3.1 `pack_context`
 
 **Purpose**: Given a query and a corpus, return a depth-packed markdown bundle of relevant files sized to a token budget. The headline tool — 90% of consumer calls go here.
@@ -670,6 +695,7 @@ Reserved names — implementations MUST NOT use these for unrelated tools:
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
 - `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
+- `wiki_closure(entity_id, max_hops?, relation_kinds?, min_weight?, budget?)` — entity-rooted blast-radius closure with risk-score per affected entity. Currently only on the local stdio MCP (`scripts/mcp_server.py`) per Phase 2.4; reserved here for v2 promotion to the deployed MCP if customer demand surfaces.
 
 ---
 
@@ -776,3 +802,16 @@ Full rationale + alternatives considered in
 - Webhook-driven realtime client invalidation push (vs polling).
 - Cost attribution: which tokens (embedding API + LLM context) belong to which caller? Telemetry covers it; billing is out of scope for v1.
 - Cross-region replication of the brain repo (via GitHub mirror) for low-latency multi-region MCP.
+
+---
+
+## Appendix D — Recommended per-task budget (informative)
+
+For agents composing CE tools across a single user task (one Claude Code turn, one cron-routine iteration, one Anabasis Skill invocation):
+
+- **Tool calls per task**: aim for **≤5**. Most tasks resolve in 2–3 (`list_corpora` → `pack_context`, or `find_relevant_files` → `pack_context`).
+- **Total CE-served tokens per task**: aim for **≤30k for code corpora, ≤80k for doc corpora**. The `pack_context` budget envelope already enforces a per-call cap; this appendix is about *not making 4 redundant calls in a row*.
+- **First-call discipline**: prefer `list_corpora` (small, cheap) over `pack_context` with a guessed `corpus_id`. A `CORPUS_NOT_FOUND` error wastes a full RTT.
+- **Suggestion-following**: when a response includes `next_tool_suggestions` (§3.0.1), the suggested tool is usually the right next call. Agents that follow suggestions should resolve common workflows in ≤2 calls.
+
+These are guidelines for agent and skill authors. The server does not enforce them; the goal is to make the cheap path obvious in tool catalogs and skill prompts.
