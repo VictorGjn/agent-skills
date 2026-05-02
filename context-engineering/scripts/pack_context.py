@@ -214,7 +214,10 @@ def score_with_graph(index: dict, query_tokens: list, query_lower: str, top: int
         keyword_scored.sort(key=lambda x: x['relevance'], reverse=True)
 
     # Phase 2: Build graph from ALL indexed files (with graphify fallback)
-    graph = build_graph_with_fallback(index['files'], graphify_path=graphify_path)
+    # corpus_root: prefer index metadata if present, else cwd. tsconfig path-alias
+    # resolution in code_graph needs absolute paths to walk for tsconfig.json.
+    corpus_root = index.get('root') or os.getcwd()
+    graph = build_graph_with_fallback(index['files'], graphify_path=graphify_path, corpus_root=corpus_root)
 
     # Phase 3: Find entry points from top matches
     entry_points = find_entry_points(keyword_scored[:10], threshold=0.2)

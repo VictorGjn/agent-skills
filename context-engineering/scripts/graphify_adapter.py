@@ -25,8 +25,18 @@ _RELATION_MAP = {
     'contains': ('defined_in', 0.4),
     'rationale_for': ('documents', 0.5),
     'case_of': ('related', 0.3),
+    # Graphify v0.1.7+ semantic similarity edges (vector-based, not AST-based)
+    'semantic_similarity': ('related', 0.5),
 }
 _DEFAULT_RELATION = ('related', 0.3)
+
+# Graphify v2 (April 2026) introduced hyperedges in graph.json — links with
+# multiple `_src` and/or `_tgt` lists representing N-ary relationships
+# (e.g. a community of related nodes). They don't fit the binary edge model
+# above; the link-parsing loop below skips them by virtue of expecting
+# scalar `_src`/`_tgt`. To consume them, decompose pairwise (cross-product
+# of sources × targets) at parse time, tagged with kind='hyperedge_member'.
+# Deferred until we see them in real corpora.
 
 # Confidence string → weight multiplier. Graphify's real output uses these
 # string tags (confidence_score is documented but not emitted in practice).

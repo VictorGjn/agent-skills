@@ -172,7 +172,7 @@ def pack(
             if candidate.exists():
                 _gp = str(candidate)
 
-        graph = build_graph_with_fallback(index["files"], graphify_path=_gp)
+        graph = build_graph_with_fallback(index["files"], graphify_path=_gp, corpus_root=workspace_root)
         entry_points = find_entry_points(scored[:10], threshold=0.2)
         if entry_points:
             traversed = traverse_from(entry_points, graph, max_depth=3, max_files=top)
