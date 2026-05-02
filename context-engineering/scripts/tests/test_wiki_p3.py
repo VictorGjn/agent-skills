@@ -447,6 +447,38 @@ class CodexRegressionTests(unittest.TestCase):
             actions = write_wiki(brain, rebuild=True, now_iso="2026-05-01T00:00:00Z")
             self.assertEqual(actions, {"x": "created"})
 
+    def test_existing_page_scope_preserved_across_runs(self):
+        """Wave 0 demo regression: wiki_init was overwriting per-page
+        scope with the caller's `scope` arg on every run, breaking
+        idempotency for brains where scope was set per-entity (manually
+        or by a future source-aware indexer). Now: existing page's scope
+        is preserved; only fresh pages take the caller's `scope`.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            self._seed_events(brain / "events", [
+                {"entity_hint": "x", "claim": "first", "ts": 1700000000},
+            ])
+            # First run with scope="alpha"
+            write_wiki(brain, scope="alpha", now_iso="2026-05-01T00:00:00Z")
+            page = brain / "wiki" / "x.md"
+            self.assertIn("scope: alpha", page.read_text(encoding="utf-8"))
+
+            # Manually rewrite scope to "beta" — simulates an operator
+            # reassigning scope or a Wave 1 source-aware classifier
+            text = page.read_text(encoding="utf-8")
+            text = text.replace("scope: alpha", "scope: beta")
+            page.write_text(text, encoding="utf-8")
+
+            # Second run with scope="alpha" again — but the existing
+            # page's scope is "beta" and MUST be preserved.
+            actions = write_wiki(brain, scope="alpha", now_iso="2026-05-02T00:00:00Z")
+            self.assertEqual(actions, {"x": "unchanged"},
+                             f"existing scope must be preserved -> unchanged: {actions}")
+            self.assertIn("scope: beta", page.read_text(encoding="utf-8"))
+
+
     def test_collision_footnotes_idempotent_across_runs(self):
         """Codex P2: rerunning with same colliding inputs must not append
         duplicate collision footnotes. _index.md should be byte-identical
