@@ -46,6 +46,17 @@ brain/                          ← root, configurable via --brain-dir
 
 **Acceptance**: `python3 scripts/wiki/init_brain.py /path/to/brain/` produces the layout; `tree /path/to/brain/` matches above.
 
+### 1.2.0 — Relationship to graphify's `--wiki` output (decision)
+
+graphify v0.1.7+ ships a `--wiki` flag that generates Wikipedia-style entity pages with cross-community wikilinks, cohesion scores, and an audit trail (`graphify-out/wiki/`). CE's §1.2 schema overlaps that surface. **Decision**: hybrid via a `GraphifyWikiSource` (4th `Source` subclass alongside `WorkspaceSource` / `GithubRepoSource` / `EventStreamSource`) that consumes graphify's `wiki/` output as **input** when present and re-emits in CE's richer schema below.
+
+Rationale:
+- CE's frontmatter (`id`, `sources[]` with content_hash + ts, `confidence`, `centroid_embedding`, `links_in/out`, `kind`, `scope`) is a strict superset of graphify's output.
+- Treating graphify's wiki as an input source preserves user choice (run graphify first if you want; CE consumes it) without duplicating community-detection or wikilink generation.
+- CE's Auditor (`scripts/wiki/audit.py`) layers supersession/freshness rules on top — graphify ships neither.
+
+`GraphifyWikiSource` lives in `scripts/wiki/source_adapter.py` (see §1.4). Implementation defers to Phase 1.4; this section is the architectural decision.
+
 ### 1.2 — `wiki/<slug>.md` schema (S, 1 day)
 
 YAML frontmatter MUST include (per Animesh / Karpathy):
@@ -55,7 +66,9 @@ YAML frontmatter MUST include (per Animesh / Karpathy):
 id: ent_a4f3                    # immutable, stable across renames
 kind: concept | component | decision | actor | process | metric
 title: Authentication Middleware
-slug: auth-middleware           # readable filename
+slug: auth-middleware           # readable filename, collision-safe (see Acceptance below)
+scope: default                  # corpus / namespace; e.g. competitive-intel | code-context | leads
+                                # default: 'default' for un-scoped writes; multi-source loops MUST set scope
 sources:                        # full provenance per Animesh
   - { type: code, ref: src/auth/middleware.ts, line: 12, hash: <sha>, ts: 2026-04-15 }
   - { type: department-spec, ref: departments/eng/department-spec.md, hash: <sha>, ts: 2026-04-30 }
@@ -88,6 +101,29 @@ centroid_embedding: [...]       # mean of source-event embeddings, used for shif
 - `python3 scripts/wiki/validate_page.py wiki/auth-middleware.md` passes schema check
 - Slug is human-readable; `id` is stable (renames don't change `id`)
 - Every cited claim has `file:line + content_hash + ts`
+- **Slug collision rule** (MUST):
+  1. Slugify title to lowercase kebab-case (`Authentication Middleware` → `auth-middleware`).
+  2. Maintain a per-write-batch `used_slugs: set[str]` keyed by **lowercased** slug to handle case-insensitive filesystems (Windows NTFS + macOS APFS default).
+  3. On collision, append `-2`, `-3`, … until a free slug is found.
+  4. The colliding entity's `slug` frontmatter field reflects the final filename (e.g. `data-processing-2`); `id` remains the original immutable hash.
+  5. Renaming an entity (changing `title`) MUST NOT change `slug` or `id`. Only fresh writes participate in collision detection.
+  6. The `_index.md` table tracks collisions in a footnote so audits can surface near-misses ("`data-processing-2` collided with `data-processing` on 2026-05-15").
+- **Scope rule** (MUST): `scope` is required on multi-source writes; `wiki.ask --scope=<corpus_id>` filters by it; absent scope = `default` corpus only.
+
+### 1.2.1 — Schema evolution policy
+
+**Wiki pages (`wiki/<slug>.md`)**: refusal-and-rebuild while corpus < 10k entities.
+- Frontmatter MUST include `schema_version: "1.0"`.
+- The validator in `scripts/wiki/validate_page.py` errors hard on mismatch with a clear remediation: "Run `python3 scripts/wiki/wiki_init.py --rebuild`."
+- When schema bumps occur, `wiki_init.py` regenerates all pages from the (immutable) `events/` log. Idempotent.
+- At ≥10k entities, switch to forward-migration: add `scripts/wiki/migrate_v1_to_v2.py` etc. Threshold revisit gated by `wiki_init.py` runtime exceeding 5 minutes.
+
+**Events (`events/<YYYY-MM-DD>.jsonl`)**: forward-migrate from day one.
+- Each event line MUST include `schema_version`.
+- Loader in `scripts/wiki/load_events.py` runs migrators in order on legacy lines: `v0 → v1 → v2 …`. Migrators are pure functions in `scripts/wiki/migrations/`.
+- Events are append-only and may originate from sources that no longer exist (deleted Granola transcripts, removed Slack messages). Refusal-and-rebuild is not safe here.
+
+**Why split**: `wiki/` is materializable from `events/`; events are primary truth. Migration cost lives on the side that can't be rebuilt.
 
 ### 1.3 — `events/<YYYY-MM-DD>.jsonl` event extractor (M, 2 days)
 
