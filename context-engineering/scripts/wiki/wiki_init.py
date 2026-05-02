@@ -199,6 +199,14 @@ def write_wiki(
     actions: dict[str, str] = {}
     collision_log: list[tuple[str, str]] = []  # (final_slug, original_slug)
 
+    # Codex P1 fix: scope preservation must key on stable entity `id`,
+    # not slug filename. Slug assignment is collision-order dependent —
+    # adding a new hint that sorts earlier can shift an existing entity
+    # from foo.md to foo-2.md, and a slug-keyed lookup would copy scope
+    # from the new occupant of foo.md (a different entity). Pre-load
+    # existing-scope-by-id once before the main loop.
+    existing_scope_by_id = _load_existing_scope_by_id(wiki_dir)
+
     for hint in sorted(grouped):
         title = hint.replace("-", " ").replace("_", " ").title()
         base_slug = slugify(title)
@@ -220,17 +228,11 @@ def write_wiki(
         # superseded_by chains that key off id.
         entity_id = make_id(hint, sources_sig)
 
-        # If the target page already exists and declares a non-default scope,
-        # preserve it. This makes manual scope edits durable across runs
-        # AND emulates the future Wave-1 "scope derived from event source"
-        # behaviour without changing event-log semantics in v0.1. Pages
-        # never authored before fall back to the caller's `scope` arg.
+        # Scope preservation by stable entity_id (Codex P1 fix on PR #25):
+        # slug can shift on collision-order changes, so use entity_id as
+        # the join key. Falls back to caller's `scope` arg for new entities.
         target = wiki_dir / f"{slug}.md"
-        page_scope = scope
-        if target.exists():
-            existing_scope = _read_existing_scope(target)
-            if existing_scope is not None:
-                page_scope = existing_scope
+        page_scope = existing_scope_by_id.get(entity_id, scope)
 
         page_text = render_page(
             slug=slug, entity_id=entity_id, scope=page_scope, title=title,
@@ -268,33 +270,46 @@ def write_wiki(
     return actions
 
 
-def _read_existing_scope(path: Path) -> str | None:
-    """Extract `scope:` value from an existing page's frontmatter.
+def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
+    """Build {entity_id: scope} from all existing wiki/<slug>.md frontmatters.
 
-    Returns None if no closed --- block or no scope: line is found, so the
-    caller can fall back to the run-level scope. Cheap line-by-line parse
-    matching mcp_server._read_page_with_scope's strictness.
+    Keying on stable `id` (rather than slug filename) means scope
+    survives across runs even when a new hint causes slug-collision
+    renumbering — which is exactly the bug Codex caught on PR #25.
+    Pages with malformed/missing frontmatter or scope are skipped.
     """
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    in_fm = False
-    closed = False
-    scope: str | None = None
-    for line in content.splitlines():
-        if line.startswith("---"):
-            if in_fm:
-                closed = True
-                break
-            in_fm = True
+    out: dict[str, str] = {}
+    if not wiki_dir.exists():
+        return out
+    for path in wiki_dir.glob("*.md"):
+        if path.name.startswith("_"):
             continue
-        if in_fm and line.startswith("scope:"):
-            raw = line.split(":", 1)[1].strip().strip('"\'')
-            scope = raw if raw else None
-    if not closed:
-        return None
-    return scope
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        in_fm = False
+        closed = False
+        page_id: str | None = None
+        scope: str | None = None
+        for line in content.splitlines():
+            if line.startswith("---"):
+                if in_fm:
+                    closed = True
+                    break
+                in_fm = True
+                continue
+            if not in_fm:
+                continue
+            if line.startswith("id:"):
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                page_id = raw if raw else None
+            elif line.startswith("scope:"):
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                scope = raw if raw else None
+        if closed and page_id and scope is not None:
+            out[page_id] = scope
+    return out
 
 
 def _strip_updated_line(text: str) -> str:
