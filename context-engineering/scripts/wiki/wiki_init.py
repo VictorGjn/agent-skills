@@ -320,17 +320,15 @@ def write_wiki(
     return actions
 
 
-def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
-    """Build {entity_id: scope} from all existing wiki/<slug>.md frontmatters.
+def _iter_scope_records(wiki_dir: Path):
+    """Yield (entity_id, slug, scope) tuples for each well-formed page.
 
-    Keying on stable `id` (rather than slug filename) means scope
-    survives across runs even when a new hint causes slug-collision
-    renumbering — which is exactly the bug Codex caught on PR #25.
-    Pages with malformed/missing frontmatter or scope are skipped.
+    Single source of truth for the two scope maps below. First-occurrence
+    semantics for every key (L3 fix) so a hand-edited page with two
+    `scope:` lines yields the same scope from both maps.
     """
-    out: dict[str, str] = {}
     if not wiki_dir.exists():
-        return out
+        return
     for path in wiki_dir.glob("*.md"):
         if path.name.startswith("_"):
             continue
@@ -341,53 +339,6 @@ def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
         in_fm = False
         closed = False
         page_id: str | None = None
-        scope: str | None = None
-        for line in content.splitlines():
-            if line.startswith("---"):
-                if in_fm:
-                    closed = True
-                    break
-                in_fm = True
-                continue
-            if not in_fm:
-                continue
-            # L3 fix: first-occurrence wins for both keys, matching the
-            # demo's _scope_pages_by_hint helper. Two scope: lines on a
-            # hand-edited page used to oscillate between the two helpers
-            # because one used last-wins and the other first-wins.
-            if line.startswith("id:") and page_id is None:
-                raw = line.split(":", 1)[1].strip().strip('"\'')
-                page_id = raw if raw else None
-            elif line.startswith("scope:") and scope is None:
-                raw = line.split(":", 1)[1].strip().strip('"\'')
-                scope = raw if raw else None
-        if closed and page_id and scope is not None:
-            out[page_id] = scope
-    return out
-
-
-def _load_existing_scope_by_slug(wiki_dir: Path) -> dict[str, str]:
-    """Build {slug: scope} from all existing wiki/<slug>.md frontmatters.
-
-    Used as a fallback during ``--rebuild`` when scope-by-id breaks
-    (a schema bump that widens make_id changes every entity_id, so the
-    new id can't find the old scope). Slug is invariant for the same
-    title, so it survives the 1.0 → 1.1 schema bump cleanly.
-
-    Same first-occurrence semantics as ``_load_existing_scope_by_id``.
-    """
-    out: dict[str, str] = {}
-    if not wiki_dir.exists():
-        return out
-    for path in wiki_dir.glob("*.md"):
-        if path.name.startswith("_"):
-            continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        in_fm = False
-        closed = False
         slug: str | None = None
         scope: str | None = None
         for line in content.splitlines():
@@ -399,15 +350,36 @@ def _load_existing_scope_by_slug(wiki_dir: Path) -> dict[str, str]:
                 continue
             if not in_fm:
                 continue
-            if line.startswith("slug:") and slug is None:
+            if line.startswith("id:") and page_id is None:
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                page_id = raw if raw else None
+            elif line.startswith("slug:") and slug is None:
                 raw = line.split(":", 1)[1].strip().strip('"\'')
                 slug = raw if raw else None
             elif line.startswith("scope:") and scope is None:
                 raw = line.split(":", 1)[1].strip().strip('"\'')
                 scope = raw if raw else None
-        if closed and slug and scope is not None:
-            out[slug] = scope
-    return out
+        if closed and scope is not None:
+            yield (page_id, slug, scope)
+
+
+def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
+    """Build {entity_id: scope} — the canonical scope map for run-time
+    write_wiki calls. id is stable across collision-order changes
+    (Codex P1 fix on PR #25). Pages without an id are silently dropped.
+    """
+    return {pid: scope for (pid, _slug, scope) in _iter_scope_records(wiki_dir) if pid}
+
+
+def _load_existing_scope_by_slug(wiki_dir: Path) -> dict[str, str]:
+    """Build {slug: scope} — fallback for the `--rebuild` migration path.
+
+    A schema bump that widens make_id changes every entity_id, so
+    scope-by-id can't find the old scope. Slug is invariant for the
+    same title so it survives the 1.0 → 1.1 schema bump cleanly.
+    Pages without a slug are silently dropped.
+    """
+    return {slug: scope for (_pid, slug, scope) in _iter_scope_records(wiki_dir) if slug}
 
 
 def _strip_updated_line(text: str) -> str:

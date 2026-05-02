@@ -66,17 +66,21 @@ class ValidationError(Exception):
     user-facing and includes a remediation pointer."""
 
 
-def validate_page(path: Path) -> dict[str, Any]:
+def validate_page(path: Path, text: str | None = None) -> dict[str, Any]:
     """Read, parse, and validate a wiki/<slug>.md file.
 
     Returns the parsed frontmatter as a dict on success. Raises
     ValidationError on any failure (with a remediation message in the
     exception text).
-    """
-    if not path.is_file():
-        raise ValidationError(f"{path}: not a file")
 
-    text = path.read_text(encoding="utf-8")
+    If `text` is provided, it's used verbatim instead of re-reading the
+    file from disk. This keeps audit._load_pages's read-once-per-page
+    contract (C2 fix) without duplicating validation logic.
+    """
+    if text is None:
+        if not path.is_file():
+            raise ValidationError(f"{path}: not a file")
+        text = path.read_text(encoding="utf-8")
     fm_match = _FRONTMATTER_RE.match(text)
     if fm_match is None:
         raise ValidationError(
