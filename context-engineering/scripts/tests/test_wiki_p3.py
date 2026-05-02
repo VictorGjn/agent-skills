@@ -161,6 +161,23 @@ class ValidatePageTests(unittest.TestCase):
             self.assertIn("0.9", msg)
             self.assertIn("wiki_init.py --rebuild", msg)
 
+    def test_pre_1_1_pages_refused_with_rebuild_remediation(self):
+        """1.0 -> 1.1 bump (M1 from pre-ultrareview cleanup): widening
+        make_id from sha256[:8] to sha256[:12] changes the persisted
+        entity_id even though the schema fields are identical, which
+        breaks scope-by-id and supersedes-chain joins. Any pre-1.1 page
+        MUST be refused so the operator runs --rebuild and ids regenerate
+        from the (unchanged) events log. Documenting the upgrade path as
+        a regression test, not just a comment."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.md"
+            p.write_text(_valid_page(schema_version="1.0"), encoding="utf-8")
+            with self.assertRaises(ValidationError) as cm:
+                validate_page(p)
+            msg = str(cm.exception)
+            self.assertIn("1.0", msg)
+            self.assertIn("wiki_init.py --rebuild", msg)
+
     def test_missing_frontmatter_raises(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "test.md"
@@ -540,6 +557,17 @@ class ConsolidateTests(unittest.TestCase):
         a = make_id("auth-middleware", "src/auth.ts")
         b = make_id("auth-middleware", "src/auth-v2.ts")
         self.assertNotEqual(a, b)
+
+    def test_make_id_12_char_prefix(self):
+        """Pre-ultrareview cleanup M1: bumped from sha256[:8] (32 bits, ~1%
+        birthday collision at 77k entities) to sha256[:12] (48 bits) so the
+        brain doesn't silently corrupt under any realistic Anabasis corpus."""
+        result = make_id("anything", "anywhere")
+        self.assertTrue(result.startswith("ent_"))
+        # ent_ + 12 hex chars = 16 chars total
+        self.assertEqual(len(result), len("ent_") + 12)
+        # All hex
+        self.assertTrue(all(c in "0123456789abcdef" for c in result[len("ent_"):]))
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ or claim extracted from a source. We never rewrite an event. Synthesis
 (Phase 2) reads the queue, decides what to consolidate into wiki/, and marks
 the consumed events with a sidecar pointer — but never edits the events file.
 
-Schema:
+Schema (v1.0):
     {
+      schema_version: str,    # canonical SCHEMA_VERSION at write time
       ts: int,                # epoch seconds
       source_type: str,       # workspace | github | notion | …
       source_ref: str,        # path / repo@sha:path / notion page id / …
@@ -15,12 +16,21 @@ Schema:
       entity_hint: str|null,  # synthesizer's best guess at owning entity slug
       embedding_id: str|null  # → events/<date>.embeddings.jsonl
     }
+
+Per phase-1.md §1.2.1: events forward-migrate from day one (events are
+primary truth; sources may not exist anymore at migration time, so we
+can't rebuild). The schema_version field is what migrators key off.
 """
 from __future__ import annotations
 import json
 import re
 import time
 from pathlib import Path
+
+# Canonical event-line schema. Bumping this requires a migrator under
+# scripts/wiki/migrations/ (per phase-1.md §1.2.1). read_events tolerates
+# legacy rows missing the field — treats them as v1.0.
+SCHEMA_VERSION = "1.0"
 
 # Match canonical event-log filenames: <YYYY-MM-DD>.jsonl. Sidecar files like
 # <YYYY-MM-DD>.embeddings.jsonl must NOT be picked up by read_events — those
@@ -40,6 +50,7 @@ def append_event(events_dir: Path, *, source_type: str, source_ref: str,
     for small writes; on Windows we accept the rare interleaving risk because
     a corrupted line is recoverable (parser skips bad lines)."""
     rec = {
+        'schema_version': SCHEMA_VERSION,
         'ts': int(ts or time.time()),
         'source_type': source_type,
         'source_ref': source_ref,
