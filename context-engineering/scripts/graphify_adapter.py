@@ -33,11 +33,22 @@ _DEFAULT_RELATION = ('related', 0.3)
 # TODO(p3.2-followup): hyperedge support deferred. Graphify v2 (April 2026)
 # emits hyperedges in graph.json — links with multiple `_src` and/or `_tgt`
 # lists representing N-ary relationships (community membership, etc.). The
-# binary _src/_tgt parser below skips them silently. Forcing function for
-# de-deferral: a real corpus surfaces with hyperedges
+# binary _src/_tgt parser below skips them silently.
+#
+# Forcing function for de-deferral: a real corpus surfaces with hyperedges
 # (`any(isinstance(link.get('_src'), list) for link in graph.json['links'])`).
-# Implementation sketch + deferral conditions in
-# ~/.claude/handoffs/ce_must_should_prep.md "Follow-ups carried over" §B7.
+# When that happens, implement here:
+#   1. In the link-parsing loop, detect `isinstance(_src, list) or isinstance(_tgt, list)`.
+#   2. Decompose pairwise — for s in src_list × t in tgt_list, emit a regular
+#      edge tagged `kind='hyperedge_member'` with weight ≈ 0.4 (lower than direct
+#      imports/calls; reflects "co-membership in a community" semantic).
+#   3. Add `hyperedge_member` to RELATION_KINDS in code_graph.py.
+#   4. Emit a one-shot stderr line `<!-- decomposed N hyperedges from M links -->`
+#      so degradation/inflation is observable.
+#
+# Until then, skipping is the conservative behavior — losing community-edges
+# is preferable to inflating the graph with low-confidence pairwise relations
+# from any community we don't recognise.
 
 # Confidence string → weight multiplier. Graphify's real output uses these
 # string tags (confidence_score is documented but not emitted in practice).

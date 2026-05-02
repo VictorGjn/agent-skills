@@ -67,6 +67,10 @@ RELATION_KINDS = {
     # genuine npm imports (still silent). Deliberately excluded from every
     # task-preset follow_kinds — visible in edges[] but not navigable in BFS,
     # so it doesn't pollute pack outputs.
+    # Weight 0.2 chosen below the lowest non-diagnostic kinds (`related`,
+    # `co_located` at 0.3) so any future edge ranker treats these as the
+    # weakest signal — they're "this looked like a connection but failed,"
+    # not "this is a real connection of low strength."
     'unresolved_alias': 0.2,
 }
 
@@ -254,15 +258,21 @@ def build_graph(files: list, corpus_root: Optional[str] = None) -> dict:
     # B1 corpus_root validity guard: tsconfig path-alias resolution needs
     # an existing filesystem directory to walk for tsconfig.json. Accept
     # relative paths (legacy indexes wrote `root='.'` from
-    # `index_workspace.py .` — abspath against cwd to recover the meaning).
-    # Reject anything that doesn't resolve to a real directory — keeps
-    # github-indexed logical roots like 'owner/repo@branch' from making
-    # the resolver walk up from cwd and pick up an unrelated tsconfig.
+    # `index_workspace.py .` — Path.resolve() against cwd to recover the
+    # meaning). Reject anything that doesn't resolve to a real directory —
+    # keeps github-indexed logical roots like 'owner/repo@branch' from
+    # making the resolver walk up from cwd and pick up an unrelated
+    # tsconfig. Path.resolve() (not os.path.abspath) matches the symlink
+    # semantics that index_workspace.scan_directory uses on the write side.
     if isinstance(corpus_root, str):
-        candidate = corpus_root if os.path.isabs(corpus_root) else os.path.abspath(corpus_root)
-        ts_resolution_active = os.path.isdir(candidate)
+        try:
+            candidate = str(Path(corpus_root).resolve())
+            ts_resolution_active = Path(candidate).is_dir()
+        except (OSError, ValueError):
+            ts_resolution_active = False
+            candidate = corpus_root
         if ts_resolution_active:
-            corpus_root = candidate  # use the absolute form below
+            corpus_root = candidate  # absolute, symlink-resolved
     else:
         ts_resolution_active = False
 
