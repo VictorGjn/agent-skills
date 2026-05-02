@@ -86,6 +86,16 @@ DECAY = 0.65  # relevance decay per hop
 # kept) from "global hub" (a Redux store imported by 199 files → damped).
 # Override via env CONTEXT_ENG_HUB_THRESHOLD for corpora with different
 # import densities.
+# Edge kinds that participate in hub damping. The "many things use X" hub
+# effect applies to structural-use relations only — a file imported, called,
+# extended, or implemented by 50+ peers is a real BFS-flooding hub. Docs,
+# tests, sibling/co-located, and semantic relations are NOT hubs in the
+# same sense (a file with 8 doc-inbound + 1 import-inbound is imported once,
+# not a hub). Counting cross-kind would damp unrelated structural edges.
+HUB_DAMPING_KINDS = frozenset({
+    'imports', 'calls', 'uses_type', 'extends', 'implements',
+})
+
 _DEFAULT_HUB_THRESHOLD = 10
 try:
     HUB_THRESHOLD = int(os.environ.get('CONTEXT_ENG_HUB_THRESHOLD', _DEFAULT_HUB_THRESHOLD))
@@ -588,17 +598,28 @@ def _apply_hub_damping(edges: list, outgoing: dict, incoming: dict) -> None:
     itself remains discoverable directly, but using it as a stepping stone
     becomes proportionally more expensive in the BFS relevance-decay model.
 
-    Damping is computed once per build and applied uniformly to every
-    edge whose target is above HUB_THRESHOLD; both `edges[].weight` and the
-    matching entries in `outgoing` / `incoming` (which point at the same
-    edge dicts) reflect the new weight.
+    Damping is computed per (target, kind) and applied only to edges whose
+    kind is in HUB_DAMPING_KINDS — the structural-use relations where a
+    "many things use X" hub effect actually applies. Doc/test/co_located/
+    related edges intentionally aren't counted toward hub-ness AND aren't
+    damped: a code file with one import-inbound + 8 doc-inbound shouldn't
+    be classified as an import hub. Both `edges[].weight` and the matching
+    entries in `outgoing` / `incoming` (which point at the same edge dicts)
+    reflect the new weight.
     """
+    # Codex P2: in-degree counted per (target, kind), not globally — keeps
+    # cross-kind interference out (docs/tests don't damp imports).
     in_degree = {}
     for e in edges:
-        in_degree[e['target']] = in_degree.get(e['target'], 0) + 1
+        if e['kind'] not in HUB_DAMPING_KINDS:
+            continue
+        key = (e['target'], e['kind'])
+        in_degree[key] = in_degree.get(key, 0) + 1
 
     for e in edges:
-        deg = in_degree[e['target']]
+        if e['kind'] not in HUB_DAMPING_KINDS:
+            continue
+        deg = in_degree.get((e['target'], e['kind']), 0)
         if deg <= HUB_THRESHOLD:
             continue
         # idf-style: 1 / (1 + log2(deg / threshold))
@@ -613,6 +634,10 @@ def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, 
     `corpus_root` is forwarded to build_graph for tsconfig path-alias resolution
     on the fallback path. Graphify-driven path runs upstream and produces its own
     edges; alias resolution there would have to happen at graphify-extraction time.
+
+    Hub damping (P2.3) is applied uniformly across both paths — graphify-derived
+    graphs typically have higher edge density and stronger hub effects, so they
+    benefit more from damping, not less.
     """
     if graphify_path:
         from graphify_adapter import load_graphify_graph, adapt_to_code_graph
@@ -622,6 +647,10 @@ def build_graph_with_fallback(files: list, graphify_path: Optional[str] = None, 
             indexed_paths = {f['path'] for f in files}
             graph = adapt_to_code_graph(graphify_data, indexed_paths)
             if graph['edges']:
+                # Codex P1 fix: damping was previously only inside build_graph,
+                # bypassed when graphify graph was available. Apply at the
+                # fallback boundary so both paths damp uniformly.
+                _apply_hub_damping(graph['edges'], graph['outgoing'], graph['incoming'])
                 print(f"<!-- Graph source: graphify ({graph['stats']['total_nodes']} nodes, "
                       f"{graph['stats']['total_edges']} edges) -->", file=sys.stderr)
                 return graph

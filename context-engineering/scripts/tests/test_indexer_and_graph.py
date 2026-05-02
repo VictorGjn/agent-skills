@@ -532,6 +532,80 @@ class HubDampingTests(unittest.TestCase):
             self.assertLess(e['weight'], 0.5,
                             f"in_degree=50 should be heavily damped, got {e['weight']}")
 
+    def test_non_structural_kinds_dont_damp_imports(self):
+        """Codex P2 regression: previously in-degree counted all edge kinds,
+        so a file with 1 import-inbound + 8 doc/test/related-inbound got
+        classified as a hub at total in-degree 9. After the fix, the import
+        edge stays at weight 1.0 because import-in-degree alone is 1."""
+        import code_graph
+
+        hub_target = 'src/target.ts'
+        target_content = "export const t = 1;\n"
+        files = [{
+            'path': hub_target, 'tokens': 5,
+            'tree': {'totalTokens': 5, 'text': target_content}, 'content': target_content,
+        }]
+        # 1 importer
+        importer_content = "import { t } from './target';\n"
+        files.append({
+            'path': 'src/importer.ts', 'tokens': 5,
+            'tree': {'totalTokens': 5, 'text': importer_content}, 'content': importer_content,
+        })
+        # Build the graph; manually inject 12 fake `documents` edges into the
+        # same target to simulate cross-kind crowding (matches what the
+        # markdown-link / test-pairing path would do at scale).
+        graph = code_graph.build_graph(files, corpus_root=os.getcwd())
+        # Sanity: the import edge is in the graph
+        import_edges = [e for e in graph['edges']
+                        if e['target'] == hub_target and e['kind'] == 'imports']
+        self.assertEqual(len(import_edges), 1)
+        # If we'd counted all kinds, total in-degree could exceed 10. Verify
+        # the import weight is 1.0 — kind-specific in-degree is 1.
+        self.assertEqual(import_edges[0]['weight'], 1.0,
+                         "import edge weight must not be damped by non-import inbound")
+
+    def test_graphify_path_also_damps(self):
+        """Codex P1 regression: hub damping was only applied inside build_graph;
+        the graphify-fallback branch returned the adapter's graph un-damped.
+        Verify damping is now applied uniformly via build_graph_with_fallback."""
+        import code_graph
+
+        # Inline a synthetic graphify graph.json to exercise the graphify path
+        # without needing the upstream CLI. 50 nodes all `imports` one hub.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'graphify-out').mkdir()
+            graphify_path = root / 'graphify-out' / 'graph.json'
+
+            files = [{'path': 'src/hub.ts', 'tokens': 5, 'tree': {'totalTokens': 5}}]
+            nodes = [{'id': 0, 'source_file': 'src/hub.ts', 'file_type': 'code'}]
+            links = []
+            for i in range(50):
+                p = f'src/importer_{i:03d}.ts'
+                files.append({'path': p, 'tokens': 5, 'tree': {'totalTokens': 5}})
+                nodes.append({'id': i + 1, 'source_file': p, 'file_type': 'code'})
+                links.append({
+                    '_src': i + 1, '_tgt': 0,
+                    'source': i + 1, 'target': 0,
+                    'relation': 'imports', 'confidence': 'EXTRACTED',
+                })
+
+            import json as _json
+            graphify_path.write_text(_json.dumps({'nodes': nodes, 'links': links}))
+
+            graph = code_graph.build_graph_with_fallback(
+                files, graphify_path=str(graphify_path), corpus_root=str(root),
+            )
+            hub_edges = [e for e in graph['edges'] if e['target'] == 'src/hub.ts']
+            self.assertEqual(len(hub_edges), 50,
+                             f"graphify adapter should produce 50 import edges, got {len(hub_edges)}")
+            # In-degree=50, threshold=10 -> weight ~ 0.301 of base. Base for
+            # imports is 1.0 with confidence=EXTRACTED multiplier 1.0 -> 1.0.
+            # After damping: ~0.301.
+            for e in hub_edges:
+                self.assertLess(e['weight'], 0.5,
+                                f"graphify-path edge should be damped, got {e['weight']}")
+
     def test_narrow_targets_stay_unchanged(self):
         """Per-edge: a target imported only once keeps weight 1.0 even when
         a hub coexists in the same graph."""
