@@ -17,4 +17,6 @@ from .events import append_event, read_events  # noqa: F401
 from .semantic_shift import (  # noqa: F401
     cosine_distance, should_consolidate, ShiftReport,
 )
-from .source_adapter import Source, EventStreamSource  # noqa: F401
+from .source_adapter import (  # noqa: F401
+    Source, EventStreamSource, GraphifyWikiSource,
+)
