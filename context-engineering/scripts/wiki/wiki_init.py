@@ -213,7 +213,12 @@ def write_wiki(
 
         events_for_entity = grouped[hint]
         sources_sig = ",".join(sorted({e.get("source_ref", "") for e in events_for_entity}))
-        entity_id = make_id(base_slug, sources_sig)
+        # Codex P1 fix: salt id with `hint` (which is unique per group),
+        # not `base_slug` (which can collide across groups). Without this,
+        # two distinct hints whose titles slugify identically AND that share
+        # source_refs collapse to the same id — breaking supersedes /
+        # superseded_by chains that key off id.
+        entity_id = make_id(hint, sources_sig)
 
         page_text = render_page(
             slug=slug, entity_id=entity_id, scope=scope, title=title,
@@ -222,6 +227,19 @@ def write_wiki(
 
         target = wiki_dir / f"{slug}.md"
         if target.exists():
+            # Codex P1 fix: refusal-and-rebuild model (§1.2.1) requires
+            # stale-schema pages to error out, not get silently overwritten.
+            # Validate before deciding "unchanged" / "updated"; if validation
+            # fails (schema bump, missing keys), raise — caller runs --rebuild.
+            from .validate_page import validate_page, ValidationError
+            try:
+                validate_page(target)
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"wiki_init: existing page failed validation; "
+                    f"the refusal-and-rebuild policy requires --rebuild "
+                    f"to regenerate from events. Original error: {e}"
+                )
             existing = target.read_text(encoding="utf-8")
             # Idempotent compare: ignore the `updated:` line which is wall-clock-
             # driven; everything else must match for "unchanged".
@@ -247,20 +265,72 @@ def _strip_updated_line(text: str) -> str:
     )
 
 
+_COLLISION_HEADER = "## Collision footnotes"
+_COLLISION_RE = re.compile(r"^- `([^`]+)` collided with `([^`]+)` on \d{4}-\d{2}-\d{2}\s*$")
+
+
 def _write_index_collisions(wiki_dir: Path, collisions: list[tuple[str, str]]) -> None:
-    """Append a collision footnote to wiki/_index.md per phase-1.md §1.2 rule 6."""
+    """Maintain a collision footnote section in wiki/_index.md per
+    phase-1.md §1.2 rule 6.
+
+    Codex P2 fix: idempotent — only ADD entries for collisions not already
+    recorded (keyed by `final_slug`). Re-running with unchanged inputs
+    produces an unchanged _index.md.
+    """
     index = wiki_dir / "_index.md"
     today = time.strftime("%Y-%m-%d", time.gmtime())
-    lines = []
+
+    head_lines: list[str] = []
+    existing_entries: list[tuple[str, str, str]] = []  # (final_slug, original, date)
+    in_section = False
+
     if index.exists():
-        lines.append(index.read_text(encoding="utf-8").rstrip())
-        lines.append("")
-    lines.append("## Collision footnotes")
-    lines.append("")
+        existing = index.read_text(encoding="utf-8")
+        for line in existing.splitlines():
+            if line.startswith(_COLLISION_HEADER):
+                in_section = True
+                continue
+            if in_section and line.startswith("## "):
+                # New section after the collision block — collision section
+                # ends here. (We don't currently emit other ## sections after
+                # collisions, but be defensive.)
+                in_section = False
+                head_lines.append(line)
+                continue
+            if in_section:
+                m = _COLLISION_RE.match(line)
+                if m:
+                    existing_entries.append((m.group(1), m.group(2), line))
+                # Skip blank lines / non-matching lines inside the section.
+                continue
+            head_lines.append(line)
+
+    recorded_finals = {entry[0] for entry in existing_entries}
+    new_entries: list[tuple[str, str, str]] = []
     for final_slug, original in collisions:
-        lines.append(f"- `{final_slug}` collided with `{original}` on {today}")
-    lines.append("")
-    index.write_text("\n".join(lines), encoding="utf-8")
+        if final_slug in recorded_finals:
+            continue
+        new_entries.append((
+            final_slug, original,
+            f"- `{final_slug}` collided with `{original}` on {today}",
+        ))
+
+    # If we have nothing to write AND no existing collisions, skip the index
+    # rewrite entirely — preserves idempotency for non-colliding runs.
+    if not existing_entries and not new_entries:
+        return
+
+    out_lines = list(head_lines)
+    while out_lines and not out_lines[-1].strip():
+        out_lines.pop()
+    if out_lines:
+        out_lines.append("")
+    out_lines.append(_COLLISION_HEADER)
+    out_lines.append("")
+    for entry in existing_entries + new_entries:
+        out_lines.append(entry[2])
+    out_lines.append("")
+    index.write_text("\n".join(out_lines), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -354,6 +354,131 @@ class WikiInitTests(unittest.TestCase):
             self.assertEqual(fm["kind"], "concept")
 
 
+class CodexRegressionTests(unittest.TestCase):
+    """Regressions for the three Codex P1+P2 findings on PR #22."""
+
+    def _seed_events(self, events_dir: Path, events: list[dict]) -> None:
+        for e in events:
+            append_event(
+                events_dir,
+                source_type=e.get("source_type", "manual"),
+                source_ref=e.get("source_ref", "test"),
+                file_id=e.get("file_id", "fid"),
+                claim=e.get("claim", "test claim"),
+                entity_hint=e.get("entity_hint"),
+                ts=e.get("ts"),
+            )
+
+    def test_id_distinct_across_slug_collisions_with_shared_sources(self):
+        """Codex P1: two distinct entity_hints whose titles slugify to the
+        same base AND share source_refs MUST produce distinct ids
+        (otherwise supersedes/superseded_by chains break)."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            self._seed_events(brain / "events", [
+                {"entity_hint": "data-processing", "claim": "v1", "ts": 1700000000,
+                 "source_ref": "shared-src"},
+                {"entity_hint": "Data_Processing", "claim": "v2", "ts": 1700001000,
+                 "source_ref": "shared-src"},
+            ])
+            write_wiki(brain, now_iso="2026-05-01T00:00:00Z")
+            page_a = (brain / "wiki" / "data-processing.md").read_text(encoding="utf-8")
+            page_b = (brain / "wiki" / "data-processing-2.md").read_text(encoding="utf-8")
+            id_a = next(
+                line.split("id:", 1)[1].strip()
+                for line in page_a.splitlines() if line.startswith("id:")
+            )
+            id_b = next(
+                line.split("id:", 1)[1].strip()
+                for line in page_b.splitlines() if line.startswith("id:")
+            )
+            self.assertNotEqual(
+                id_a, id_b,
+                "colliding entities must have distinct ids; shared sources_sig "
+                "previously collapsed them.",
+            )
+
+    def test_existing_stale_schema_page_blocks_incremental(self):
+        """Codex P1: refusal-and-rebuild policy means an existing page with
+        bad schema must error out, not silently get overwritten."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            (brain / "wiki").mkdir()
+            stale = brain / "wiki" / "x.md"
+            # Write a stale-schema page in place
+            stale.write_text(
+                "---\n"
+                "id: ent_old\n"
+                "kind: concept\n"
+                "title: X\n"
+                "slug: x\n"
+                "scope: default\n"
+                "schema_version: \"0.9\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-01-01T00:00:00Z\n"
+                "last_verified_at: 2026-01-01T00:00:00Z\n"
+                "sources: []\n"
+                "---\n# X\n",
+                encoding="utf-8",
+            )
+            self._seed_events(brain / "events", [
+                {"entity_hint": "x", "claim": "new", "ts": 1700000000},
+            ])
+            with self.assertRaises(RuntimeError) as cm:
+                write_wiki(brain, now_iso="2026-05-01T00:00:00Z")
+            msg = str(cm.exception)
+            self.assertIn("--rebuild", msg)
+
+    def test_existing_stale_schema_page_can_be_rebuilt(self):
+        """Codex P1 corollary: --rebuild deletes the stale page, regen succeeds."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            (brain / "wiki").mkdir()
+            stale = brain / "wiki" / "x.md"
+            stale.write_text(
+                '---\nschema_version: "0.9"\n---\n', encoding="utf-8",
+            )
+            self._seed_events(brain / "events", [
+                {"entity_hint": "x", "claim": "new", "ts": 1700000000},
+            ])
+            actions = write_wiki(brain, rebuild=True, now_iso="2026-05-01T00:00:00Z")
+            self.assertEqual(actions, {"x": "created"})
+
+    def test_collision_footnotes_idempotent_across_runs(self):
+        """Codex P2: rerunning with same colliding inputs must not append
+        duplicate collision footnotes. _index.md should be byte-identical
+        on the second run."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            self._seed_events(brain / "events", [
+                {"entity_hint": "data-processing", "claim": "v1",
+                 "ts": 1700000000, "source_ref": "src-a"},
+                {"entity_hint": "Data_Processing", "claim": "v2",
+                 "ts": 1700001000, "source_ref": "src-b"},
+            ])
+            write_wiki(brain, now_iso="2026-05-01T00:00:00Z")
+            index1 = (brain / "wiki" / "_index.md").read_text(encoding="utf-8")
+            self.assertIn("collided with", index1)
+
+            # Second run with same inputs
+            write_wiki(brain, now_iso="2026-05-02T00:00:00Z")
+            index2 = (brain / "wiki" / "_index.md").read_text(encoding="utf-8")
+            self.assertEqual(
+                index1, index2,
+                "_index.md must be byte-identical across runs with same input",
+            )
+            # And not duplicated
+            self.assertEqual(
+                index2.count("data-processing-2"),
+                1,
+                "collision entry must appear exactly once",
+            )
+
+
 class ConsolidateTests(unittest.TestCase):
     def test_groups_by_entity_hint(self):
         events = [
