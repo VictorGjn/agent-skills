@@ -31,6 +31,13 @@ HALF_LIVES: dict[str, int] = {
     "notion": 60,
     "rfc": 180,
     "department-spec": 180,
+    # M1 fix: GraphifyWikiSource (PR #26) tags every event with
+    # source_type="graphify-wiki" and originally fell through to the
+    # 60-day default — wrong for graphify's primary use case (code
+    # corpora). Match `code`'s half-life until upstream graphify carries
+    # the original source_type in its page frontmatter (then
+    # GraphifyWikiSource can re-emit with the recovered type).
+    "graphify-wiki": 90,
     "default": 60,
 }
 
@@ -111,6 +118,16 @@ def compute_freshness_multi_source(
 
     This is the canonical entry point for entities with heterogeneous
     `sources[]`. See module docstring for rationale.
+
+    L2 note (v0.1 simplification): the entity carries ONE
+    ``last_verified_at`` (max-ts of all events), not a per-source
+    timestamp. So an entity with [code:fresh, web:ancient] is governed
+    by web's 30-day half-life starting from the most-recent verification
+    — including any verification that came from the still-fresh code
+    source. This is a slight over-flag (more conservative than per-
+    source verification would yield) and matches the spec's "as fresh
+    as the fastest-decaying source" principle. Per-source
+    last_verified_at is a Wave 2 schema change.
     """
     types = list(source_types)
     if not types:

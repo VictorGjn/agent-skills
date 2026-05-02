@@ -265,5 +265,161 @@ class EndToEndLoopViaMCPTests(unittest.TestCase):
             self.assertIn("# audit/proposals.md", audit)
 
 
+class WikiAskValidationGateTests(unittest.TestCase):
+    """F1 fix: wiki.ask must skip pages that fail validate_page (e.g.,
+    stale-schema pages from a brain that hasn't been --rebuilt after a
+    bump). Skipped pages count is reflected in the response comment."""
+
+    def test_stale_schema_page_skipped_not_returned(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+            # A 1.0-schema page (pre-bump). Should be REFUSED by validate_page.
+            (wiki / "stale.md").write_text(
+                "---\n"
+                "id: ent_stale01\n"
+                "kind: concept\n"
+                "title: Stale\n"
+                "slug: stale\n"
+                "scope: default\n"
+                "schema_version: \"1.0\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-05-01T00:00:00Z\n"
+                "last_verified_at: 2026-05-01T00:00:00Z\n"
+                "sources: []\n"
+                "---\n# Stale\nBody mentions something.\n",
+                encoding="utf-8",
+            )
+            # A 1.1-schema page (current). Should pass.
+            (wiki / "fresh.md").write_text(
+                "---\n"
+                "id: ent_fresh001\n"
+                "kind: concept\n"
+                "title: Fresh\n"
+                "slug: fresh\n"
+                "scope: default\n"
+                "schema_version: \"1.1\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-05-01T00:00:00Z\n"
+                "last_verified_at: 2026-05-01T00:00:00Z\n"
+                "sources: []\n"
+                "---\n# Fresh\nBody mentions something.\n",
+                encoding="utf-8",
+            )
+            out = mcp_server.wiki_ask("something", scope="default",
+                                      brain=str(brain))
+            self.assertIn("fresh", out, "1.1-schema page must come through")
+            self.assertNotIn("Stale\nBody", out,
+                             "1.0-schema page MUST be skipped, not returned")
+
+    def test_all_pages_stale_returns_empty_with_skip_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+            (wiki / "p1.md").write_text(
+                "---\nschema_version: \"1.0\"\nslug: p1\nscope: default\n---\n",
+                encoding="utf-8",
+            )
+            out = mcp_server.wiki_ask("anything", scope="default",
+                                      brain=str(brain))
+            # No matches because the only page failed validation.
+            self.assertIn("no entities", out)
+            self.assertIn("skipped", out, "skip count surfaced in the comment")
+
+
+class WikiAddTelemetryTests(unittest.TestCase):
+    """M2 + M3 fix: wiki.add reports appended count separately from
+    requested count, and emit_events is now atomic — partial-batch
+    failure leaves nothing on disk."""
+
+    def test_atomic_batch_failure_reports_zero_appended(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            invalid = {
+                "source_type": "web",
+                # Missing source_ref/file_id/claim
+            }
+            r = json.loads(mcp_server.wiki_add([invalid], brain=str(brain)))
+            self.assertEqual(r.get("error"), "INVALID_EVENT")
+            self.assertEqual(r.get("appended_before_error"), 0,
+                             "atomic batch contract: nothing landed on disk")
+
+    def test_valid_batch_appended_count_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "events").mkdir()
+            r = json.loads(mcp_server.wiki_add([
+                {
+                    "source_type": "web", "source_ref": "ref-a",
+                    "file_id": "fid-a", "claim": "claim a",
+                },
+                {
+                    "source_type": "web", "source_ref": "ref-b",
+                    "file_id": "fid-b", "claim": "claim b",
+                },
+            ], brain=str(brain)))
+            self.assertEqual(r["appended"], 2)
+
+
+class RebuildScopePreservationTests(unittest.TestCase):
+    """F2 fix: --rebuild reads scope-by-id and scope-by-slug BEFORE
+    deleting pages, so multi-scope brains don't reset scope on schema
+    upgrade."""
+
+    def test_rebuild_preserves_scope_via_slug(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            events = brain / "events"
+            wiki = brain / "wiki"
+            events.mkdir()
+            wiki.mkdir()
+            # Seed an event so wiki_init has something to consolidate.
+            from wiki.events import append_event
+            append_event(
+                events,
+                source_type="web",
+                source_ref="https://acme.com",
+                file_id="acme-1",
+                claim="Acme is a competitor.",
+                entity_hint="acme-corp",
+                ts=1700000000,
+            )
+
+            # First write: scope=competitive-intel.
+            write_wiki(brain, scope="competitive-intel",
+                       now_iso="2026-05-01T00:00:00Z")
+            page = (wiki / "acme-corp.md").read_text(encoding="utf-8")
+            self.assertIn("scope: competitive-intel", page)
+
+            # Now rebuild with default scope — but the existing page's scope
+            # should be carried over via slug (since id widening hypothetically
+            # changed it; here ids match, but scope-by-slug fallback is the
+            # real test).
+            write_wiki(brain, scope="default",
+                       now_iso="2026-05-02T00:00:00Z", rebuild=True)
+            page = (wiki / "acme-corp.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "scope: competitive-intel", page,
+                "F2: --rebuild MUST carry forward the original scope, "
+                "not reset to the caller's default arg",
+            )
+
+    def test_rebuild_with_no_events_dir_raises_clearly(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            (brain / "wiki").mkdir()
+            # Note: no events/ created
+            with self.assertRaises(FileNotFoundError) as cm:
+                write_wiki(brain, rebuild=True)
+            msg = str(cm.exception)
+            self.assertIn("events", msg)
+            self.assertIn("primary truth", msg,
+                          "F2 follow-up: error must explain why events/ "
+                          "is required (it's the only source of truth)")
+
+
 if __name__ == "__main__":
     unittest.main()

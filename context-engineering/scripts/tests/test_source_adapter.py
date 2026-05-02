@@ -221,9 +221,11 @@ class EventStreamSourceEmitTests(unittest.TestCase):
                     src.emit_events([bad])
                 self.assertIn(missing_key, str(cm.exception))
 
-    def test_emit_validates_no_partial_writes_on_invalid(self):
-        """If event N in the batch is invalid, prior events still appended,
-        but the invalid one raises (caller must handle resume semantics)."""
+    def test_emit_atomic_batch_on_invalid(self):
+        """M3 fix: emit_events validates the ENTIRE batch up front, so a
+        malformed event at index N never leaves events 0..N-1 written.
+        The exception carries `failed_index` and `appended_before_error`
+        attributes so callers can resume cleanly."""
         with tempfile.TemporaryDirectory() as td:
             events_dir = Path(td)
             src = EventStreamSource(events_dir=events_dir)
@@ -232,15 +234,19 @@ class EventStreamSourceEmitTests(unittest.TestCase):
             invalid = self._required_event(claim='bad')
             del invalid['source_type']
 
-            with self.assertRaises(ValueError):
+            with self.assertRaises(ValueError) as cm:
                 src.emit_events([valid, invalid])
 
-            # The valid one was already appended before the invalid one
-            # raised. This is documented behavior — emit_events doesn't
-            # transactionally batch.
+            # Exception carries the index of the bad event AND the count
+            # of events appended before the failure (always 0 under M3
+            # atomic semantics — this is the contract callers can rely on).
+            self.assertEqual(getattr(cm.exception, "failed_index", None), 1)
+            self.assertEqual(getattr(cm.exception, "appended_before_error", None), 0)
+
+            # Disk is empty — no partial batch on disk.
             events = read_events(events_dir)
-            self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]['claim'], 'ok')
+            self.assertEqual(len(events), 0,
+                             "atomic batch: nothing should land on disk on validation failure")
 
     def test_round_trip_with_entity_hint_filter(self):
         """Events emitted with entity_hint are filterable via read_events."""
