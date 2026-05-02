@@ -93,20 +93,21 @@ Same entity, three different lenses, three different orderings.
 - 3 different lens queries on the same entity produce 3 different `[[See also]]` orderings
 - Lens reranking respects edge weights (won't promote a `co_located` neighbor over an `extends` neighbor without strong cosine signal)
 
-### 2.4 — MCP `wiki.{ask,add,audit,export}` tools (M, 2 days)
+### 2.4 — MCP `wiki.{ask,add,audit,export,closure}` tools (M, 2 days)
 
-Extend `mcp_server.py` with four new tools:
+Extend `mcp_server.py` with five new tools:
 
 | Tool | Args | Returns |
 |---|---|---|
-| `wiki.ask` | `query`, `budget`, `lens?`, `multi_hop?` | depth-packed markdown |
+| `wiki.ask` | `query`, `budget`, `lens?`, `multi_hop?`, `scope?` | depth-packed markdown |
 | `wiki.add` | `source_ref`, `claims[]` | events appended |
 | `wiki.audit` | (none) | `audit/proposals.md` content |
 | `wiki.export` | `format` (obsidian / json-ld / static-html) | archive bytes |
+| `wiki.closure` | `entity_id`, `relation_kinds?` (filter), `max_hops?` (default 3), `min_weight?` (default 0.3), `budget?` | `{entities: [{id, slug, title, hop, edge_in: {kind, weight}, risk_score}], paths: [...], tokens_used}` |
 
 These are the MCP calls Anabasis runtime makes. Stable names; same shapes survive into v0.2 spec freeze.
 
-**`wiki.ask`** is the find-links primary surface — wraps `pack --wiki` with optional lens + multi-hop.
+**`wiki.ask`** is the find-links primary surface — wraps `pack --wiki` with optional lens + multi-hop. The `scope` arg filters entity pages by their `scope: <corpus_id>` frontmatter (see Phase 1.2). Absent `scope` = default corpus only.
 
 **`wiki.add`** is the runtime's emit-back surface — when a connector produces new claims, runtime calls `wiki.add(source_ref, claims)` to append events.
 
@@ -114,9 +115,19 @@ These are the MCP calls Anabasis runtime makes. Stable names; same shapes surviv
 
 **`wiki.export`** lets users take the brain elsewhere (Obsidian vault, JSON-LD for graph DBs, static HTML for sharing). Critical for the open-core "your data is yours" promise.
 
+**`wiki.closure`** is the blast-radius / impact-analysis primitive. Given an entity, return the transitive closure of entities reachable through `[[wiki-links]]` within `max_hops`, ranked by edge weight. Each returned entity carries a `risk_score ∈ [0, 1]` derived from `edge_weight × (1/hop_distance)` — the simple formula CRG validates with F1=0.54 conservative-recall posture (false positives cost tokens, false negatives cost correctness; favor over-inclusion). Swap for centrality-based scoring if eval shows it matters.
+
+Use cases:
+- "What changes when `auth-middleware` is renamed?" → `wiki.closure(entity_id=ent_a4f3)` returns all entities citing it.
+- Anabasis runtime running `audit-process` on a renamed entity calls `wiki.closure` to scope the audit deterministically.
+
+Distinct from `wiki.ask --multi-hop`: `multi-hop` is query-rooted (semantic match → traversal); `closure` is entity-rooted (no query, deterministic graph walk). Same underlying primitive, different framing.
+
 **Acceptance**:
-- All 4 tools registered in MCP introspection
+- All 5 tools registered in MCP introspection
 - `wiki.ask` over a 50-entity brain returns ≤ 8000 token output in <2s
+- `wiki.ask --scope=competitive-intel` returns only scoped entities; `wiki.ask` (no scope) returns the default corpus
+- `wiki.closure(entity_id=<known>)` returns ≥1 hop with `risk_score` populated and recall consistent with `pack --wiki --graph` over the same entity
 - `wiki.export obsidian` produces a vault that opens in Obsidian with graph view + backlinks
 - MCP HTTP hardening (Phase 0.11) applies — auth required by default
 
