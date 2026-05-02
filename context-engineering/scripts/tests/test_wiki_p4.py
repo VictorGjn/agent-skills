@@ -396,6 +396,127 @@ class CodexRegressionTests(unittest.TestCase):
             proposals = (brain / "audit" / "proposals.md").read_text(encoding="utf-8")
             self.assertIn("Validation warnings", proposals)
 
+    def test_body_extraction_survives_dashes_in_frontmatter_ref(self):
+        """C1 fix: body extraction via FRONTMATTER_RE (not naive split('---', 2))
+        must preserve body content when a frontmatter `ref:` value contains
+        the literal `---` token (Notion URLs, date ranges, etc.). Naive split
+        would orphan frontmatter content into the body and the wikilink past
+        the bad split point would never be found."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+
+            _write_decision_page(wiki, "decision-y", superseded_by="ent_y_v2")
+            _write_decision_page(wiki, "decision-y-v2")
+
+            # Concept page with `---` inside the source ref. The pre-C1
+            # body parser would chop the body at the first body `---`
+            # encountered after the second outer `---`; with C1 we use
+            # FRONTMATTER_RE which only consumes the OUTER block.
+            slug = "consumer-with-dashes"
+            tricky_ref = "https://notion.so/--Page-Title---abc123def"
+            page = (
+                "---\n"
+                f"id: ent_{slug.replace('-', '_')[:8]}\n"
+                "kind: concept\n"
+                f"title: Consumer With Dashes\n"
+                f"slug: {slug}\n"
+                "scope: default\n"
+                "schema_version: \"1.1\"\n"
+                "confidence: 0.85\n"
+                "updated: 2026-05-01T00:00:00Z\n"
+                "last_verified_at: 2026-05-01T00:00:00Z\n"
+                "sources:\n"
+                "  -\n"
+                "    type: notion\n"
+                f"    ref: {tricky_ref}\n"
+                "    ts: 2026-05-01T00:00:00Z\n"
+                "---\n"
+                "\n"
+                "# Consumer With Dashes\n"
+                "\n"
+                "Refers to [[decision-y]] which is superseded.\n"
+            )
+            (wiki / f"{slug}.md").write_text(page, encoding="utf-8")
+
+            result = run_audit(brain)
+            stale = result["stale_supersessions"]
+            self.assertEqual(
+                len(stale), 1,
+                f"the wikilink past the dashy ref must still be found; "
+                f"got {len(stale)}: {stale}",
+            )
+            self.assertEqual(stale[0]["source_slug"], slug)
+
+    def test_block_style_sources_parsed_correctly(self):
+        """M4 fix: wiki_init now emits block-style YAML for sources;
+        audit's _parse_source_rows must handle it. Cover the canonical
+        emit shape (`  -` then `    type/ref/ts:` lines) plus a ref
+        containing characters that broke the old inline regex."""
+        from wiki.audit import _parse_source_rows
+        text = (
+            "---\n"
+            "id: ent_x\n"
+            "sources:\n"
+            "  -\n"
+            "    type: notion\n"
+            "    ref: https://notion.so/page,with-comma#anchor\n"
+            "    ts: 2026-05-01T00:00:00Z\n"
+            "  -\n"
+            "    type: code\n"
+            "    ref: src/foo.ts\n"
+            "    ts: 2026-05-02T00:00:00Z\n"
+            "---\n"
+            "# body\n"
+        )
+        sources = _parse_source_rows(text)
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(sources[0]["type"], "notion")
+        self.assertEqual(
+            sources[0]["ref"],
+            "https://notion.so/page,with-comma#anchor",
+            "comma in ref must not split — block style is the whole point of M4",
+        )
+        self.assertEqual(sources[1]["type"], "code")
+
+    def test_superseded_by_id_resolved_to_slug_in_report(self):
+        """M5 fix: when superseded_by is an entity_id (e.g. ent_a4f3a4f3a4f3),
+        the audit report should print the resolved target slug instead of
+        the opaque id, so the operator can navigate to the new decision."""
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)
+            wiki = brain / "wiki"
+            wiki.mkdir()
+
+            # decision-z is superseded; superseded_by points at v2's ID
+            _write_decision_page(wiki, "decision-z-v2",
+                                 id="ent_decision_z_v2_aabb")
+            _write_decision_page(wiki, "decision-z",
+                                 superseded_by="ent_decision_z_v2_aabb")
+            _write_concept_page(
+                wiki, "consumer-z",
+                body="Per [[decision-z]] we should...",
+            )
+
+            result = run_audit(brain)
+            stale = result["stale_supersessions"]
+            self.assertEqual(len(stale), 1)
+            self.assertEqual(
+                stale[0]["superseded_by_slug"], "decision-z-v2",
+                "id must be resolved to the target page's slug",
+            )
+
+            proposals = (brain / "audit" / "proposals.md").read_text(encoding="utf-8")
+            self.assertIn(
+                "superseded by `decision-z-v2`", proposals,
+                "report must print the slug, not the raw id",
+            )
+            self.assertNotIn(
+                "ent_decision_z_v2_aabb", proposals,
+                "the raw id should NOT leak into the operator-facing report",
+            )
+
     def test_repeated_wikilink_in_one_page_dedupes(self):
         """Codex P2: repeated `[[same-decision]]` links in one page must
         produce ONE flag, not N."""

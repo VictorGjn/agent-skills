@@ -132,12 +132,28 @@ class EventStreamSource(Source):
 
         `ref` and `content` are ignored on this Source — they're for the
         pull-shape contract.
+
+        M3 fix: validates the WHOLE batch before appending any event, so
+        a malformed event at index N never leaves events 0..N-1 written
+        to disk. The prior validate-inside-the-loop semantics required
+        the caller to inspect ``e.appended_before_error`` to resume; now
+        the batch is atomic — either all events land or none do.
         """
         if events is None:
             return 0
+        # Batch-validate up front. Any failure raises with the bad index
+        # AND appended_before_error=0 attached to the exception (consumers
+        # may still look for it; emitted as a structured attribute rather
+        # than embedded in the message).
+        for i, ev in enumerate(events):
+            try:
+                self._validate(ev)
+            except ValueError as e:
+                e.appended_before_error = 0  # type: ignore[attr-defined]
+                e.failed_index = i  # type: ignore[attr-defined]
+                raise
         appended = 0
         for ev in events:
-            self._validate(ev)
             append_event(
                 self.events_dir,
                 source_type=ev['source_type'],

@@ -44,10 +44,22 @@ except ImportError:  # script execution
 
 # Wiki-link extraction: `[[slug]]` or `[[slug|display]]` anywhere in body.
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]")
-# Source-row parser for the simple inline-yaml shape wiki_init.py emits:
-# `  - { type: code, ref: src/foo.ts, ts: 2026-04-01T00:00:00Z }`
-_SOURCE_ROW_RE = re.compile(
-    r"^\s*-\s*\{\s*type:\s*([^,}\s]+)\s*,\s*ref:\s*([^,}]+?)\s*(?:,\s*ts:\s*([^,}\s]+))?\s*\}",
+# Frontmatter delimiter: must mirror validate_page._FRONTMATTER_RE so the
+# body extraction is robust to `---` characters appearing inside frontmatter
+# values (e.g., Notion URLs like `notion.so/--Page---abc123`, date ranges).
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# Source-row parser for the block-style YAML wiki_init.py emits post-M4:
+#   sources:
+#     - type: code
+#       ref: src/foo.ts
+#       ts: 2026-04-01T00:00:00Z
+# The legacy inline shape `- { type: ..., ref: ..., ts: ... }` is still
+# accepted for backwards compat with pages written before M4 lands.
+_SOURCE_BLOCK_DASH_RE = re.compile(r"^\s*-\s*$")
+_SOURCE_BLOCK_KV_RE = re.compile(r"^\s+(type|ref|ts):\s*(.+?)\s*$")
+_SOURCE_INLINE_RE = re.compile(
+    r"^\s*-\s*\{\s*type:\s*([^,}\s]+)\s*,\s*ref:\s*([^,}]+?)\s*"
+    r"(?:,\s*ts:\s*([^,}\s]+))?\s*\}",
 )
 # Freshness threshold from phase-1.md §1.7: flag below 0.3 AND elapsed > half_life.
 _FRESHNESS_FLOOR = 0.3
@@ -70,17 +82,30 @@ def _load_pages(wiki_dir: Path) -> tuple[dict[str, dict], list[str]]:
     for path in sorted(wiki_dir.glob("*.md")):
         if path.name.startswith("_"):
             continue
+        # C2 fix: read the file ONCE and pass the cached text to every
+        # downstream extractor. Three independent reads (validate_page,
+        # body split, _parse_source_rows) opened a TOCTOU window where a
+        # concurrent wiki_init / --rebuild could leave fm, body, and
+        # sources desynchronized. Read-once also halves I/O.
         try:
-            fm = validate_page(path)
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            warnings.append(f"skipped {path.name}: read failed ({e})")
+            continue
+        try:
+            fm = _validate_text(text, path)
         except ValidationError as e:
             warnings.append(f"skipped {path.name}: {e}")
             continue
         slug = fm.get("slug") or path.stem
-        body = path.read_text(encoding="utf-8").split("---", 2)[-1] if "---" in path.read_text(encoding="utf-8") else ""
-        # Re-extract sources from the page text (the simple frontmatter parser
-        # in validate_page collapses `sources:` to a string; we re-walk the
-        # YAML rows directly to get type/ref pairs needed for freshness).
-        sources = _parse_source_rows(path.read_text(encoding="utf-8"))
+        # C1 fix: extract body via the same frontmatter regex validate_page
+        # uses. Naive `text.split("---", 2)[-1]` orphans frontmatter
+        # content into the body when a value (e.g., a Notion URL ref)
+        # contains `---`, which silently drops `[[wikilinks]]` past the
+        # bad split point and produces false negatives in the audit.
+        fm_match = _FRONTMATTER_RE.match(text)
+        body = text[fm_match.end():] if fm_match else ""
+        sources = _parse_source_rows(text)
         pages[slug] = {
             "fm": fm,
             "body": body,
@@ -90,30 +115,110 @@ def _load_pages(wiki_dir: Path) -> tuple[dict[str, dict], list[str]]:
     return pages, warnings
 
 
+def _validate_text(text: str, path: Path) -> dict:
+    """validate_page() variant that takes already-read text. Avoids a
+    second disk read when _load_pages has already cached the bytes."""
+    # validate_page's signature accepts a Path; we re-invoke its logic by
+    # writing to a synthetic path-like wrapper isn't worth the indirection.
+    # Cleaner: validate_page is small enough that we re-parse here using
+    # its public helpers. We import lazily to keep the API surface narrow.
+    from .validate_page import _parse_simple_frontmatter, _FRONTMATTER_RE as _VP_FM_RE
+    from .validate_page import (
+        SCHEMA_VERSION, _REQUIRED_KEYS_ALL, _REQUIRED_KEYS_DECISION,
+        _VALID_KINDS,
+    )
+    fm_match = _VP_FM_RE.match(text)
+    if fm_match is None:
+        raise ValidationError(
+            f"{path}: missing YAML frontmatter (expected `---` block at top). "
+            f"Run `python3 scripts/wiki/wiki_init.py --rebuild` to regenerate."
+        )
+    frontmatter = _parse_simple_frontmatter(fm_match.group(1))
+    page_version = frontmatter.get("schema_version")
+    if page_version != SCHEMA_VERSION:
+        raise ValidationError(
+            f"{path}: schema_version={page_version!r} does not match current "
+            f"CE release {SCHEMA_VERSION!r}. "
+            f"Run `python3 scripts/wiki/wiki_init.py --rebuild` to regenerate "
+            f"from events log."
+        )
+    missing = _REQUIRED_KEYS_ALL - frontmatter.keys()
+    if missing:
+        raise ValidationError(
+            f"{path}: missing required frontmatter keys {sorted(missing)!r}. "
+            f"Run `python3 scripts/wiki/wiki_init.py --rebuild`."
+        )
+    kind = frontmatter.get("kind")
+    if kind not in _VALID_KINDS:
+        raise ValidationError(
+            f"{path}: kind={kind!r} not in {sorted(_VALID_KINDS)!r}."
+        )
+    if kind == "decision":
+        missing_decision = _REQUIRED_KEYS_DECISION - frontmatter.keys()
+        if missing_decision:
+            raise ValidationError(
+                f"{path}: kind=decision requires keys "
+                f"{sorted(missing_decision)!r}. Use null when the field is "
+                f"genuinely empty (e.g. supersedes: null for a fresh decision)."
+            )
+    return frontmatter
+
+
 def _parse_source_rows(text: str) -> list[dict]:
-    """Walk the frontmatter for `sources:` block rows and parse type/ref/ts."""
+    """Walk the frontmatter for `sources:` block rows and parse type/ref/ts.
+
+    Accepts both the block-style YAML wiki_init emits post-M4 and the
+    legacy inline ``- { type: ..., ref: ..., ts: ... }`` shape for any
+    pages written before the M4 cutover. M6 fix: closing-`---` while
+    inside the sources block ends parsing unconditionally — the prior
+    `and out` guard left in_sources=True past frontmatter when the
+    sources block was empty, leaking body bullets into source-types.
+    """
     out: list[dict] = []
     in_sources = False
+    current: dict[str, str] | None = None  # block-style: row in progress
     for line in text.splitlines():
-        stripped = line.lstrip()
-        if line.startswith("---") and out and in_sources:
-            # End of frontmatter while inside sources block — done.
+        if line.startswith("---") and in_sources:
+            # M6 fix: closing frontmatter delimiter ALWAYS ends the
+            # sources block, even when zero rows were parsed.
+            if current:
+                out.append(current)
+                current = None  # prevent post-loop tail append
             break
         if line.startswith("sources:"):
             in_sources = True
             continue
-        if in_sources:
-            if not line.startswith(" ") and not line.startswith("\t") and line.strip():
-                # Top-level frontmatter key — sources block ended.
-                in_sources = False
-                continue
-            m = _SOURCE_ROW_RE.match(line)
-            if m:
-                out.append({
-                    "type": m.group(1),
-                    "ref": m.group(2),
-                    "ts": m.group(3) or "",
-                })
+        if not in_sources:
+            continue
+        # Top-level (un-indented, non-empty) frontmatter key ends the block.
+        if line.strip() and not line.startswith((" ", "\t")):
+            if current:
+                out.append(current)
+                current = None
+            in_sources = False
+            continue
+        # Try inline shape first — it's the legacy format and matches in
+        # one line, no state machine needed.
+        m_inline = _SOURCE_INLINE_RE.match(line)
+        if m_inline:
+            out.append({
+                "type": m_inline.group(1),
+                "ref": m_inline.group(2),
+                "ts": m_inline.group(3) or "",
+            })
+            continue
+        # Block style: `- ` opens a new row, then `<indent>key: value`
+        # lines populate it until the next `- ` or block end.
+        if _SOURCE_BLOCK_DASH_RE.match(line):
+            if current:
+                out.append(current)
+            current = {"type": "", "ref": "", "ts": ""}
+            continue
+        m_kv = _SOURCE_BLOCK_KV_RE.match(line)
+        if m_kv and current is not None:
+            current[m_kv.group(1)] = m_kv.group(2)
+    if current:
+        out.append(current)
     return out
 
 
@@ -141,6 +246,18 @@ def find_stale_supersessions(pages: dict[str, dict]) -> list[dict]:
     if not superseded_decisions:
         return flags
 
+    # M5 fix: build an id -> slug index so we can resolve `superseded_by`
+    # values that operators have written in id form (e.g. ent_a4f3a4f3a4f3)
+    # back to the slug an operator can actually open. The audit's matching
+    # was already correct — we look for `[[<superseded-decision-slug>]]`
+    # wikilinks — but the report printed the raw id, which the operator
+    # could not follow. Resolve here so the report shows a clickable slug.
+    id_to_slug: dict[str, str] = {}
+    for slug, page in pages.items():
+        page_id = page["fm"].get("id")
+        if page_id:
+            id_to_slug[page_id] = slug
+
     # Track seen (source, target) pairs to dedupe within a page.
     seen_pairs: set[tuple[str, str]] = set()
     for src_slug, src in pages.items():
@@ -153,11 +270,14 @@ def find_stale_supersessions(pages: dict[str, dict]) -> list[dict]:
                 continue
             seen_pairs.add(pair)
             target = superseded_decisions[target_slug]
+            sb_raw = target["fm"].get("superseded_by")
+            sb_slug = id_to_slug.get(sb_raw) if isinstance(sb_raw, str) else None
             flags.append({
                 "rule": "stale-supersession",
                 "source_slug": src_slug,
                 "target_slug": target_slug,
-                "superseded_by": target["fm"].get("superseded_by"),
+                "superseded_by": sb_raw,
+                "superseded_by_slug": sb_slug,  # None if id has no matching page
             })
     return flags
 
@@ -292,9 +412,13 @@ def render_proposals(
     lines.append("")
     if stale_supersessions:
         for f in stale_supersessions:
+            # M5 fix: prefer the resolved slug for the report; fall back to
+            # the raw `superseded_by` only when the id doesn't resolve to a
+            # page in this brain (cross-brain reference, or stale id).
+            sb_display = f.get("superseded_by_slug") or f["superseded_by"]
             lines.append(
                 f"- `{f['source_slug']}` references superseded "
-                f"`{f['target_slug']}` (superseded by `{f['superseded_by']}`). "
+                f"`{f['target_slug']}` (superseded by `{sb_display}`). "
                 f"Update the link or revoke the supersession."
             )
     else:
