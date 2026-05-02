@@ -137,9 +137,17 @@ def render_page(
         f"last_verified_at: {last_verified_iso}",
         "sources:",
     ]
+    # M4 fix: emit sources in block-style YAML, not inline `{...}`. Inline
+    # form broke the audit's source-row parser whenever ref contained a
+    # comma, brace, hash, or `]` (Notion URLs, GitHub paths with query
+    # strings, anchored refs). Block style sidesteps the regex hazard
+    # entirely — each value lives on its own line bounded by `\s*$`.
     for s in sources:
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(s["ts"])) if s["ts"] else ""
-        fm_lines.append(f"  - {{ type: {s['type']}, ref: {s['ref']}, ts: {ts_iso} }}")
+        fm_lines.append("  -")
+        fm_lines.append(f"    type: {s['type']}")
+        fm_lines.append(f"    ref: {s['ref']}")
+        fm_lines.append(f"    ts: {ts_iso}")
     fm_lines.append("---")
 
     body_lines = [
@@ -189,11 +197,41 @@ def write_wiki(
     wiki_dir = brain_dir / "wiki"
     wiki_dir.mkdir(parents=True, exist_ok=True)
 
+    # F2 fix: load scope-by-id BEFORE rebuild deletion (the prior delete →
+    # load order silently reset every non-default scope on multi-scope
+    # brains because the loader ran against an empty wiki/).
+    #
+    # Codex P2 fix: scope-by-slug fallback is RESTRICTED to rebuild mode.
+    # A schema bump that widens make_id changes every entity_id, so during
+    # rebuild the new id can't find the old scope and we must fall back to
+    # slug. But in non-rebuild mode, applying the same fallback is a
+    # correctness regression: when a NEW entity hint collides with an
+    # existing slug (taking foo.md, pushing the existing entity to
+    # foo-2.md), the NEW entity would inherit the old page's scope through
+    # the slug map. Restricting the fallback to rebuild=True keeps the
+    # migration path while preserving id-keyed scope discipline elsewhere.
+    existing_scope_by_id = _load_existing_scope_by_id(wiki_dir)
+    existing_scope_by_slug = (
+        _load_existing_scope_by_slug(wiki_dir) if rebuild else {}
+    )
+
     if rebuild:
         for old in wiki_dir.glob("*.md"):
             if old.name.startswith("_"):
                 continue  # keep _index.md, _contradictions.md etc.
             old.unlink()
+
+    if not events_dir.exists():
+        # F2 fix follow-up: --rebuild on a brain with no events/ would
+        # silently produce 0 pages. Surface the missing-events case as
+        # a clear error so the operator can recover the events dir
+        # (events.jsonl is primary truth; wiki/ is derived).
+        raise FileNotFoundError(
+            f"wiki_init: no events directory at {events_dir}. "
+            f"events/ is primary truth (wiki/ is derived from it); "
+            f"a missing events/ means we have nothing to consolidate. "
+            f"Restore events/ from backup or git, then re-run."
+        )
 
     events = read_events(events_dir)
     grouped = consolidate(events)
@@ -204,14 +242,6 @@ def write_wiki(
     used_slugs_lower: set[str] = set()
     actions: dict[str, str] = {}
     collision_log: list[tuple[str, str]] = []  # (final_slug, original_slug)
-
-    # Codex P1 fix: scope preservation must key on stable entity `id`,
-    # not slug filename. Slug assignment is collision-order dependent —
-    # adding a new hint that sorts earlier can shift an existing entity
-    # from foo.md to foo-2.md, and a slug-keyed lookup would copy scope
-    # from the new occupant of foo.md (a different entity). Pre-load
-    # existing-scope-by-id once before the main loop.
-    existing_scope_by_id = _load_existing_scope_by_id(wiki_dir)
 
     for hint in sorted(grouped):
         title = hint.replace("-", " ").replace("_", " ").title()
@@ -234,11 +264,17 @@ def write_wiki(
         # superseded_by chains that key off id.
         entity_id = make_id(hint, sources_sig)
 
-        # Scope preservation by stable entity_id (Codex P1 fix on PR #25):
-        # slug can shift on collision-order changes, so use entity_id as
-        # the join key. Falls back to caller's `scope` arg for new entities.
+        # Scope preservation by stable entity_id (Codex P1 fix on PR #25),
+        # with a slug fallback for the schema-bump case (F2): when --rebuild
+        # widens every id, scope-by-id has no entry for the new entity_id,
+        # so we look up the same slug in the pre-deletion snapshot. Final
+        # fallback is the caller's `scope` arg (genuinely new entities).
         target = wiki_dir / f"{slug}.md"
-        page_scope = existing_scope_by_id.get(entity_id, scope)
+        page_scope = (
+            existing_scope_by_id.get(entity_id)
+            or existing_scope_by_slug.get(slug)
+            or scope
+        )
 
         page_text = render_page(
             slug=slug, entity_id=entity_id, scope=page_scope, title=title,
@@ -254,11 +290,21 @@ def write_wiki(
             try:
                 validate_page(target)
             except ValidationError as e:
+                # F3 fix: spell out the migration cost so the operator can
+                # plan the rebuild rather than running it blind. Scope
+                # carry-over is via slug, which is robust for normal
+                # collision-free rebuilds but can drift when a new entity
+                # hint sorts ahead of an old one and shifts its slug.
                 raise RuntimeError(
-                    f"wiki_init: existing page failed validation; "
-                    f"the refusal-and-rebuild policy requires --rebuild "
-                    f"to regenerate from events. Original error: {e}"
-                )
+                    f"wiki_init: existing page {target.name} failed "
+                    f"schema validation; refusal-and-rebuild policy requires "
+                    f"`wiki_init.py --rebuild` to regenerate from the "
+                    f"(unchanged) events log. Scope assignments are carried "
+                    f"forward by slug across the rebuild; review wiki/ after "
+                    f"rebuild for any pages whose scope unexpectedly reset to "
+                    f"the default — that signals a slug shift caused by a "
+                    f"new colliding entity hint. Original error: {e}"
+                ) from e
             existing = target.read_text(encoding="utf-8")
             # Idempotent compare: ignore the `updated:` line which is wall-clock-
             # driven; everything else must match for "unchanged".
@@ -276,17 +322,15 @@ def write_wiki(
     return actions
 
 
-def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
-    """Build {entity_id: scope} from all existing wiki/<slug>.md frontmatters.
+def _iter_scope_records(wiki_dir: Path):
+    """Yield (entity_id, slug, scope) tuples for each well-formed page.
 
-    Keying on stable `id` (rather than slug filename) means scope
-    survives across runs even when a new hint causes slug-collision
-    renumbering — which is exactly the bug Codex caught on PR #25.
-    Pages with malformed/missing frontmatter or scope are skipped.
+    Single source of truth for the two scope maps below. First-occurrence
+    semantics for every key (L3 fix) so a hand-edited page with two
+    `scope:` lines yields the same scope from both maps.
     """
-    out: dict[str, str] = {}
     if not wiki_dir.exists():
-        return out
+        return
     for path in wiki_dir.glob("*.md"):
         if path.name.startswith("_"):
             continue
@@ -297,6 +341,7 @@ def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
         in_fm = False
         closed = False
         page_id: str | None = None
+        slug: str | None = None
         scope: str | None = None
         for line in content.splitlines():
             if line.startswith("---"):
@@ -307,15 +352,36 @@ def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
                 continue
             if not in_fm:
                 continue
-            if line.startswith("id:"):
+            if line.startswith("id:") and page_id is None:
                 raw = line.split(":", 1)[1].strip().strip('"\'')
                 page_id = raw if raw else None
-            elif line.startswith("scope:"):
+            elif line.startswith("slug:") and slug is None:
+                raw = line.split(":", 1)[1].strip().strip('"\'')
+                slug = raw if raw else None
+            elif line.startswith("scope:") and scope is None:
                 raw = line.split(":", 1)[1].strip().strip('"\'')
                 scope = raw if raw else None
-        if closed and page_id and scope is not None:
-            out[page_id] = scope
-    return out
+        if closed and scope is not None:
+            yield (page_id, slug, scope)
+
+
+def _load_existing_scope_by_id(wiki_dir: Path) -> dict[str, str]:
+    """Build {entity_id: scope} — the canonical scope map for run-time
+    write_wiki calls. id is stable across collision-order changes
+    (Codex P1 fix on PR #25). Pages without an id are silently dropped.
+    """
+    return {pid: scope for (pid, _slug, scope) in _iter_scope_records(wiki_dir) if pid}
+
+
+def _load_existing_scope_by_slug(wiki_dir: Path) -> dict[str, str]:
+    """Build {slug: scope} — fallback for the `--rebuild` migration path.
+
+    A schema bump that widens make_id changes every entity_id, so
+    scope-by-id can't find the old scope. Slug is invariant for the
+    same title so it survives the 1.0 → 1.1 schema bump cleanly.
+    Pages without a slug are silently dropped.
+    """
+    return {slug: scope for (_pid, slug, scope) in _iter_scope_records(wiki_dir) if slug}
 
 
 def _strip_updated_line(text: str) -> str:

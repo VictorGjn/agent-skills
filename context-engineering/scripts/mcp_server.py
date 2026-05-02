@@ -466,15 +466,41 @@ def wiki_ask(
                     brain=str(brain_dir))
 
     if not wiki_dir.exists():
+        _emit_telemetry("tool.result", tool="wiki.ask", status="ok",
+                        matched=0, reason="no_wiki_dir")
         return f"<!-- wiki.ask: no wiki/ directory at {brain_dir} -->"
 
+    # F1 fix: gate every page on validate_page so stale-schema pages
+    # (e.g., a brain still at schema_version=1.0 after the 1.0 -> 1.1 bump)
+    # don't silently leak through wiki.ask. Skipped pages emit a structured
+    # warning telemetry event so operators can tell why a brain looks empty.
+    from wiki.validate_page import validate_page, ValidationError
+
     matched: list[tuple[str, str]] = []
+    skipped = 0
     for path in sorted(wiki_dir.glob("*.md")):
         if path.name.startswith("_"):
             continue
-        page_scope, content = _read_page_with_scope(path)
-        if page_scope is None:
+        # Codex P2 (#28): read the page once; OSError must not escape the
+        # loop or one bad file takes down the whole wiki.ask request.
+        # Also avoids the double-read (validate_page would re-read for us).
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as e:
+            skipped += 1
+            _emit_telemetry("tool.skip", tool="wiki.ask",
+                            reason="io_error", page=path.name,
+                            error=str(e)[:200])
             continue
+        try:
+            fm = validate_page(path, text=content)
+        except ValidationError as e:
+            skipped += 1
+            _emit_telemetry("tool.skip", tool="wiki.ask",
+                            reason="validation", page=path.name,
+                            error=str(e)[:200])
+            continue
+        page_scope = fm.get("scope")
         if page_scope != target_scope:
             continue
         # Lightweight query filter: case-insensitive substring on whole content.
@@ -484,8 +510,12 @@ def wiki_ask(
         matched.append((path.name, content))
 
     if not matched:
+        _emit_telemetry("tool.result", tool="wiki.ask", status="ok",
+                        matched=0, skipped=skipped)
         return (f"<!-- wiki.ask: no entities in scope={target_scope!r} "
-                f"matched query={query!r} -->")
+                f"matched query={query!r}"
+                + (f"; {skipped} pages skipped on validation" if skipped else "")
+                + " -->")
 
     # Pack within budget — naive: concatenate until ~budget chars (≈ tokens × 4).
     char_cap = budget * 4
@@ -494,14 +524,21 @@ def wiki_ask(
         "",
     ]
     used = 0
-    for name, content in matched:
+    truncated_at = None
+    for i, (name, content) in enumerate(matched):
         chunk = f"## {name}\n\n{content}\n"
         if used + len(chunk) > char_cap:
+            # L4 fix: track i explicitly; remaining = total - already-included.
+            remaining = len(matched) - i
             out.append(f"<!-- wiki.ask: truncated at budget; "
-                       f"{len(matched) - len(out) + 2} more not shown -->")
+                       f"{remaining} more not shown -->")
+            truncated_at = i
             break
         out.append(chunk)
         used += len(chunk)
+    _emit_telemetry("tool.result", tool="wiki.ask", status="ok",
+                    matched=len(matched), skipped=skipped,
+                    truncated=(truncated_at is not None))
     return "\n".join(out)
 
 
@@ -526,19 +563,38 @@ def wiki_add(
     brain_dir = _resolve_brain_path(brain)
     events_dir = brain_dir / "events"
 
+    requested = len(events) if events else 0
     _emit_telemetry("tool.call", tool="wiki.add", brain=str(brain_dir),
-                    n_events=len(events) if events else 0)
+                    n_events=requested)
 
     if not events:
+        # M2 fix: tool.result fires on every exit path. Prior code emitted
+        # tool.call only, so empty/error exits left dangling spans in the
+        # telemetry stream and operators couldn't tell appended-count from
+        # requested-count.
+        _emit_telemetry("tool.result", tool="wiki.add", status="ok",
+                        appended=0, requested=0)
         return json.dumps({"appended": 0, "events_dir": str(events_dir)})
 
     src = EventStreamSource(events_dir=events_dir)
     try:
         n = src.emit_events(events)
     except ValueError as e:
-        return json.dumps({"error": "INVALID_EVENT", "message": str(e)})
+        # M2 fix: report appended-before-error count so the caller can
+        # resume from the right index. EventStreamSource carries this
+        # in the message tail (see source_adapter.py M3 fix).
+        _emit_telemetry("tool.result", tool="wiki.add", status="error",
+                        error_kind="INVALID_EVENT",
+                        appended=getattr(e, "appended_before_error", 0),
+                        requested=requested)
+        return json.dumps({
+            "error": "INVALID_EVENT", "message": str(e),
+            "appended_before_error": getattr(e, "appended_before_error", 0),
+        })
 
     today = time.strftime("%Y-%m-%d", time.gmtime())
+    _emit_telemetry("tool.result", tool="wiki.add", status="ok",
+                    appended=n, requested=requested)
     return json.dumps({
         "appended": n,
         "events_file": str(events_dir / f"{today}.jsonl"),
@@ -576,10 +632,16 @@ def wiki_audit(
                                 score=f["score"], elapsed_days=f["elapsed_days"])
 
     if not proposals_path.exists():
+        _emit_telemetry("tool.result", tool="wiki.audit", status="ok",
+                        proposals_exists=False, refreshed=refresh)
         return (f"<!-- wiki.audit: no audit/proposals.md at {brain_dir}. "
                 f"Run with refresh=true or invoke `audit.py --brain {brain_dir}` first. -->")
 
-    return proposals_path.read_text(encoding="utf-8")
+    body = proposals_path.read_text(encoding="utf-8")
+    _emit_telemetry("tool.result", tool="wiki.audit", status="ok",
+                    proposals_exists=True, refreshed=refresh,
+                    bytes_returned=len(body))
+    return body
 
 
 # ──────────────────────────────────────────────────────────────────

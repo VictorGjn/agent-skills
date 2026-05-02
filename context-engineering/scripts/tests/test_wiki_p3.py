@@ -89,6 +89,17 @@ class HalfLifeLookupTests(unittest.TestCase):
         self.assertEqual(half_life_days("rfc"), 180)
         self.assertEqual(half_life_days("department-spec"), 180)
 
+    def test_graphify_wiki_registered(self):
+        """M1 fix: GraphifyWikiSource (PR #26) tags events with
+        source_type='graphify-wiki'. The freshness policy must register
+        a half-life for it, otherwise every graphify-sourced entity
+        falls through to the 60-day default. We treat graphify like
+        code (90d) since graphify's primary input is code corpora."""
+        self.assertEqual(half_life_days("graphify-wiki"), 90)
+        self.assertIn("graphify-wiki", HALF_LIVES,
+                      "spec drift between PR #22 (HALF_LIVES) and PR #26 "
+                      "(GraphifyWikiSource.SOURCE_KIND) must be closed")
+
 
 class MultiSourceFreshnessTests(unittest.TestCase):
     def test_shortest_half_life_governs(self):
