@@ -699,6 +699,22 @@ Reserved names — implementations MUST NOT use these for unrelated tools:
 
 ---
 
+## 10b. lat.md interop tools (Phase 4 of CE × lat.md, local stdio MCP)
+
+Five thin wrappers exposing lat.md's verb surface (`locate / section / refs / search / expand`) on top of CE primitives. Currently local stdio MCP only; v2 may promote to the deployed MCP if customer demand surfaces. All five emit `tool.call` + `tool.result` telemetry per §9. Implemented in `scripts/mcp_server.py` (Phase 4 commit landed 2026-05-03).
+
+- `lat.locate(ref, brain?)` — resolve a wiki/code ref (`[[slug]]`, `[[slug#section]]`, or `[[src/file.ts#symbol]]`) to its location. Returns markdown with file path + line range (code refs) or section anchor (section refs). Slug refs glob `wiki/<slug>.md`; code refs load `cache/code_index.json` via `wiki.code_index.resolve_symbol`.
+- `lat.section(ref, brain?, budget?)` — return the body slice for a ref. Slug → entire page body (frontmatter stripped). Section → heading-bounded slice (case-insensitive + slug-normalized match). Code → symbol's line range as a fenced code block. Output capped at `budget * 4` characters.
+- `lat.refs(target, brain?)` — list every wiki page that references `target`. Walks `brain/wiki/*.md`, parses every wikiref via `wiki.wikiref.parse_wikirefs`, dedupes by `(source_slug, raw_ref)`, returns one bullet per inbound ref with `kind` annotation.
+- `lat.search(query, brain?, budget?)` — case-insensitive substring search across wiki page bodies AND `cache/code_index.json` symbol names. Returns a markdown blob with two sections (wiki pages, code symbols). Capped at `budget * 4` chars; first 50 results per section.
+- `lat.expand(ref, brain?, depth?, budget?)` — BFS recursive expansion. Fetches `lat.section(ref)`, parses every wikiref it contains, follows up to `depth` hops, dedupes visited refs, concatenates into one markdown blob. Stops once `budget * 4` chars reached.
+
+The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAuth Flow`, `src/foo.ts#bar`) or fully-bracketed refs (`[[auth-middleware]]`). Brackets are optional but recommended for parity with lat.md's CLI.
+
+Naming convention: `lat.*` for lat.md interop; `wiki.*` for CE-native; deployed-MCP non-wiki tools stay snake_case. Forward compatibility — when lat.md adds new verbs, add them under `lat.*` only if CE has a meaningful primitive to back them.
+
+---
+
 ## 11. Skill-author migration path (informative)
 
 The existing `context-engineering` skill at `agent-skills/context-engineering/` is CLI-first. After v1 deploy, it becomes a thin MCP client. Migration semantics:
