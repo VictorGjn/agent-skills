@@ -90,11 +90,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
+    # Codex P2 (PR #30 fix): catch missing-or-stale code-index failures and
+    # surface them as the documented exit-2 "configuration error" path
+    # instead of leaking a Python traceback through CI / pre-commit.
     code_index: dict | None = None
-    if args.code_index is not None:
-        code_index = load_code_index(args.code_index)
-    elif args.code_root is not None:
-        code_index = build_code_index(args.code_root)
+    try:
+        if args.code_index is not None:
+            code_index = load_code_index(args.code_index)
+        elif args.code_root is not None:
+            if not args.code_root.exists():
+                raise FileNotFoundError(
+                    f"--code-root {args.code_root} does not exist"
+                )
+            code_index = build_code_index(args.code_root)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"lat_check: configuration error: {e}", file=sys.stderr)
+        return 2
 
     result = run_audit(args.brain, code_index=code_index)
 

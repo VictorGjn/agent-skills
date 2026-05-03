@@ -108,6 +108,58 @@ class FindBrokenRefsTests(unittest.TestCase):
                 f"expected 3 distinct broken-ref reasons, got: {reasons}",
             )
 
+    def test_subsection_anchor_validated(self):
+        # Codex P1 (PR #30): `[[target#Section#MissingSub]]` must flag
+        # section_not_found when the sub-anchor doesn't exist on the page,
+        # even if `Section` itself is a valid heading.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            # Target has only a top-level "Intro" heading, no "MissingSub".
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\nIntro body.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\nDeep link: [[target#Intro#MissingSub]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages)
+            self.assertEqual(len(flags), 1)
+            f = flags[0]
+            self.assertEqual(f["reason"], "section_not_found")
+            self.assertEqual(f["sub_anchor"], "MissingSub")
+            self.assertEqual(f["missing_segment"], "MissingSub")
+
+    def test_subsection_anchor_passes_when_both_exist(self):
+        # Conversely: when both the anchor and sub_anchor have matching
+        # headings, no flag is raised. (Heading-tree nesting strictness is
+        # post-Phase 2.)
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\n### Subsection\n\nbody.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n[[target#Intro#Subsection]]\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            self.assertEqual(find_broken_refs(pages), [])
+
     def test_no_code_index_skips_code_refs(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
@@ -186,6 +238,42 @@ class LatCheckCLITests(unittest.TestCase):
                     "--code-root", str(repo),
                 ])
             self.assertEqual(rc, 0)
+
+    def test_missing_code_index_returns_exit_2(self):
+        # Codex P2 (PR #30): --code-index pointing at a missing file must
+        # exit 2 (config error), not 1 (broken refs) or crash with a traceback.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-index", "/nonexistent/path/idx.json",
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn("configuration error", buf.getvalue())
+
+    def test_missing_code_root_returns_exit_2(self):
+        # Same path, via --code-root.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", "/nonexistent/repo/root",
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
 
     def test_strict_exits_0_when_clean(self):
         with tempfile.TemporaryDirectory() as td:

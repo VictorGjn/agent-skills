@@ -410,13 +410,25 @@ def find_broken_refs(
                 else:
                     target_page = pages[ref.target]
                     headings = _extract_headings(target_page["body"])
-                    # Match against verbatim, lowercase, or slug-normalized.
-                    candidates = {
-                        ref.anchor or "",
-                        (ref.anchor or "").lower(),
-                        re.sub(r"[^a-z0-9]+", "-", (ref.anchor or "").lower()).strip("-"),
-                    }
-                    if not (candidates & headings):
+
+                    def _heading_matches(name: str) -> bool:
+                        # Match verbatim, lowercased, or slug-normalized.
+                        if not name:
+                            return True
+                        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+                        return bool({name, name.lower(), slug} & headings)
+
+                    anchor_ok = _heading_matches(ref.anchor or "")
+                    # Codex P1 (PR #30 fix): also validate sub_anchor for
+                    # `[[target#Section#Subsection]]` so deep-link rot is
+                    # caught. Heading-tree nesting check is post-Phase 2; for
+                    # now we require both names to exist as headings on the
+                    # target page (a `section_not_found` if either is missing).
+                    sub_ok = _heading_matches(ref.sub_anchor or "")
+                    if not anchor_ok or not sub_ok:
+                        # Surface the missing segment in the flag so report
+                        # output points at the precise broken anchor.
+                        missing = ref.anchor if not anchor_ok else ref.sub_anchor
                         flags.append({
                             "rule": "broken-ref",
                             "source_slug": src_slug,
@@ -425,6 +437,8 @@ def find_broken_refs(
                             "reason": "section_not_found",
                             "target": ref.target,
                             "anchor": ref.anchor,
+                            "sub_anchor": ref.sub_anchor,
+                            "missing_segment": missing,
                         })
 
             elif ref.kind == "code":
