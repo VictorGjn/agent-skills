@@ -90,6 +90,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
+    # Codex P1 (PR #30 round 3): fail loudly when --brain is misconfigured.
+    # _load_pages silently treats a missing wiki/ as an empty dataset, so
+    # without this guard a typo'd CE_BRAIN_PATH in CI returns "0 broken
+    # refs, exit 0" while auditing nothing -- the worst possible outcome
+    # for a CI gate.
+    if not args.brain.is_dir():
+        print(
+            f"lat_check: configuration error: --brain {args.brain} is not a "
+            f"directory",
+            file=sys.stderr,
+        )
+        return 2
+    if not (args.brain / "wiki").is_dir():
+        print(
+            f"lat_check: configuration error: --brain {args.brain} has no "
+            f"wiki/ subdirectory; nothing to audit",
+            file=sys.stderr,
+        )
+        return 2
+
     # Codex P2 (PR #30 fix): catch missing-or-stale code-index failures and
     # surface them as the documented exit-2 "configuration error" path
     # instead of leaking a Python traceback through CI / pre-commit.
@@ -98,9 +118,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.code_index is not None:
             code_index = load_code_index(args.code_index)
         elif args.code_root is not None:
-            if not args.code_root.exists():
+            # Codex P2 (PR #30 round 3): require directory, not just existence.
+            # `.exists()` passes for files; build_code_index then walks zero
+            # files and silently disables symbol validation.
+            if not args.code_root.is_dir():
                 raise FileNotFoundError(
-                    f"--code-root {args.code_root} does not exist"
+                    f"--code-root {args.code_root} is not a directory"
                 )
             code_index = build_code_index(args.code_root)
     except (FileNotFoundError, ValueError) as e:

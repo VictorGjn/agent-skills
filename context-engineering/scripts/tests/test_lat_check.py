@@ -275,6 +275,50 @@ class LatCheckCLITests(unittest.TestCase):
                 ])
             self.assertEqual(rc, 2)
 
+    def test_missing_brain_dir_returns_exit_2(self):
+        # Codex P1 (PR #30 round 3): nonexistent brain dir fails loudly,
+        # never returns 0 -- silent-success on a CI typo is the worst case.
+        with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+            rc = lat_check_main([
+                "--brain", "/nonexistent/brain/path",
+                "--strict",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("not a directory", buf.getvalue())
+
+    def test_brain_without_wiki_subdir_returns_exit_2(self):
+        # Codex P1 (PR #30 round 3): brain dir exists but has no wiki/ -- still
+        # exit 2, not silent 0.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)  # exists but no wiki/ subdirectory inside
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main(["--brain", str(brain), "--strict"])
+            self.assertEqual(rc, 2)
+            self.assertIn("no wiki/ subdirectory", buf.getvalue())
+
+    def test_code_root_pointing_at_file_returns_exit_2(self):
+        # Codex P2 (PR #30 round 3): --code-root must be a DIRECTORY. A file
+        # path passes .exists() but build_code_index walks zero files.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            # Create a regular file and pass it as --code-root.
+            file_path = Path(td) / "not-a-dir.txt"
+            file_path.write_text("hi", encoding="utf-8")
+
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", str(file_path),
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn("not a directory", buf.getvalue())
+
     def test_strict_exits_0_when_clean(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
