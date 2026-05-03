@@ -160,6 +160,57 @@ class FindBrokenRefsTests(unittest.TestCase):
             pages, _ = _load_pages(wiki)
             self.assertEqual(find_broken_refs(pages), [])
 
+    def test_dedupe_distinguishes_sub_anchor(self):
+        # Codex P1 (PR #30 round 4): two refs sharing (target, anchor) but
+        # differing in sub_anchor must be validated independently. Prior
+        # dedupe key was (source_slug, target, anchor) -- the second ref
+        # collapsed and a broken deep link slipped through.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\n### Good\n\nbody.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n"
+                + "Healthy: [[target#Intro#Good]].\n"
+                + "Broken:  [[target#Intro#Missing]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages)
+            self.assertEqual(len(flags), 1, f"expected exactly 1 flag, got: {flags}")
+            self.assertEqual(flags[0]["sub_anchor"], "Missing")
+
+    def test_dedupe_distinguishes_kind(self):
+        # Same target string, different kind -- must validate each path.
+        # `[[example.ts]]` is a code ref (extension); `[[example-ts]]` is a
+        # slug ref. They should not collapse, even though target strings
+        # differ in punctuation only.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n"
+                + "Code ref to ghost: [[src/ghost.ts#nope]].\n"
+                + "Slug ref to ghost: [[ghost-page]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages, code_index={"files": {}})
+            kinds = sorted({f["kind"] for f in flags})
+            self.assertEqual(kinds, ["code", "slug"])
+
     def test_no_code_index_skips_code_refs(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
