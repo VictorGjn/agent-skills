@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# CE pre-commit hook -- runs `lat_check` against staged wiki changes.
+#
+# Install:
+#   cp hooks/pre-commit.sample .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Or symlink so future updates flow:
+#   ln -sf ../../hooks/pre-commit.sample .git/hooks/pre-commit
+#
+# Configuration via env vars:
+#   CE_BRAIN     -- path to the brain root (default: ./brain)
+#   CE_CODE_ROOT -- path to the repository root for code-symbol resolution
+#                   (default: . -- the repo root); set empty to skip code refs.
+#   CE_PYTHON    -- python interpreter (default: python3)
+#
+# Exits non-zero on any broken reference, blocking the commit.
+
+set -euo pipefail
+
+CE_BRAIN="${CE_BRAIN:-./brain}"
+CE_CODE_ROOT="${CE_CODE_ROOT-.}"  # `-` so an empty assignment from caller is honored
+CE_PYTHON="${CE_PYTHON:-python3}"
+
+# Skip when no wiki/* or code/* file is staged -- avoids paying for a code
+# index rebuild on a docs-only commit that doesn't touch references.
+staged="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if ! grep -qE '(\.md$|\.ts$|\.tsx$|\.js$|\.jsx$|\.py$|\.rs$|\.go$|\.java$|\.rb$|\.cs$|\.kt$|\.scala$|\.php$|\.swift$|\.c$|\.cc$|\.cpp$|\.h$|\.hpp$)' <<<"$staged"; then
+    exit 0
+fi
+
+# Locate lat_check.py relative to this hook script.
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+lat_check="$hook_dir/../context-engineering/scripts/wiki/lat_check.py"
+
+if [ ! -f "$lat_check" ]; then
+    echo "pre-commit: lat_check.py not found at $lat_check" >&2
+    echo "pre-commit: skipping CE broken-ref check" >&2
+    exit 0
+fi
+
+if [ ! -d "$CE_BRAIN/wiki" ]; then
+    echo "pre-commit: $CE_BRAIN/wiki not found; skipping CE check" >&2
+    exit 0
+fi
+
+cmd=("$CE_PYTHON" "$lat_check" "--brain" "$CE_BRAIN" "--strict")
+if [ -n "$CE_CODE_ROOT" ]; then
+    cmd+=("--code-root" "$CE_CODE_ROOT")
+fi
+
+"${cmd[@]}"
