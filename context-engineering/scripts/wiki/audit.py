@@ -34,16 +34,22 @@ try:
     from .freshness_policy import (
         compute_freshness_multi_source, half_life_days, shortest_half_life,
     )
+    from .wikiref import parse_wikirefs
 except ImportError:  # script execution
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from wiki.validate_page import validate_page, ValidationError
     from wiki.freshness_policy import (
         compute_freshness_multi_source, half_life_days, shortest_half_life,
     )
+    from wiki.wikiref import parse_wikirefs
 
 
-# Wiki-link extraction: `[[slug]]` or `[[slug|display]]` anywhere in body.
-_WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]")
+# Wiki-link extraction is now handled by wikiref.parse_wikirefs (Phase 1 of
+# CE x lat.md interop). The legacy `[[slug]]` / `[[slug|display]]` form is
+# returned as `WikiRef(kind="slug", ...)`; new forms `[[slug#section]]`
+# (kind=section) and `[[src/file#symbol]]` (kind=code) are also recognized.
+# Existing audit rules consume only kind="slug" refs to preserve flag
+# counts. Phase 2's broken-ref rule consumes section/code refs.
 # Frontmatter delimiter: must mirror validate_page._FRONTMATTER_RE so the
 # body extraction is robust to `---` characters appearing inside frontmatter
 # values (e.g., Notion URLs like `notion.so/--Page---abc123`, date ranges).
@@ -212,8 +218,14 @@ def find_stale_supersessions(pages: dict[str, dict]) -> list[dict]:
     # Track seen (source, target) pairs to dedupe within a page.
     seen_pairs: set[tuple[str, str]] = set()
     for src_slug, src in pages.items():
-        for m in _WIKILINK_RE.finditer(src["body"]):
-            target_slug = m.group(1).strip()
+        for ref in parse_wikirefs(src["body"]):
+            # Phase 1 backward-compat: only kind="slug" refs feed this rule
+            # (preserves the prior `[[slug]]` / `[[slug|display]]` regex
+            # semantics). Section/code refs are captured by parse_wikirefs
+            # but ignored here — Phase 2's broken-ref auditor consumes them.
+            if ref.kind != "slug":
+                continue
+            target_slug = ref.target
             if target_slug not in superseded_decisions:
                 continue
             pair = (src_slug, target_slug)
