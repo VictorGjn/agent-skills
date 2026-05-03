@@ -175,6 +175,62 @@ class ParseWikirefCodeTests(unittest.TestCase):
         self.assertEqual(r.slug, "auth")
 
 
+class PathBasedSectionRefTests(unittest.TestCase):
+    """Path-shaped targets that point at NON-code files must parse as
+    section refs, not code refs.
+
+    Codex review on PR #29 P1 fix: ``[[docs/auth.md#OAuth Flow]]`` is a
+    valid section ref into a markdown doc; the prior `/`-based heuristic
+    misclassified it as ``kind="code"`` and would have routed it to the
+    Phase 2 broken-symbol auditor instead of heading-anchor resolution.
+    """
+
+    def test_markdown_path_with_anchor_is_section(self):
+        r = parse_wikiref("docs/auth.md#OAuth Flow")
+        self.assertEqual(r.kind, "section")
+        self.assertEqual(r.target, "docs/auth.md")
+        self.assertEqual(r.anchor, "OAuth Flow")
+
+    def test_markdown_path_no_anchor_is_slug(self):
+        # No anchor + no code extension -> falls through to slug.
+        # Reasonable: there's nothing to anchor to.
+        r = parse_wikiref("docs/auth.md")
+        self.assertEqual(r.kind, "slug")
+        self.assertEqual(r.target, "docs/auth.md")
+
+    def test_mdx_path_with_anchor_is_section(self):
+        r = parse_wikiref("docs/guide.mdx#Step 1")
+        self.assertEqual(r.kind, "section")
+        self.assertEqual(r.anchor, "Step 1")
+
+    def test_rst_path_is_section(self):
+        r = parse_wikiref("docs/api.rst#authenticate")
+        self.assertEqual(r.kind, "section")
+        self.assertEqual(r.target, "docs/api.rst")
+
+    def test_path_no_extension_with_anchor_is_section(self):
+        # Slash but no extension -> section if anchor, slug if not.
+        r = parse_wikiref("wiki/sub-area#Topic")
+        self.assertEqual(r.kind, "section")
+        self.assertEqual(r.target, "wiki/sub-area")
+        self.assertEqual(r.anchor, "Topic")
+
+    def test_path_no_extension_no_anchor_is_slug(self):
+        r = parse_wikiref("wiki/sub-area")
+        self.assertEqual(r.kind, "slug")
+        self.assertEqual(r.target, "wiki/sub-area")
+
+    def test_code_extension_still_wins_over_section(self):
+        # If the path DOES end with a code extension, kind=code regardless
+        # of how the anchor reads.
+        r = parse_wikiref("docs/example.ts#Section name")
+        self.assertEqual(r.kind, "code")
+        self.assertEqual(r.target, "docs/example.ts")
+        # Anchor still parses as the symbol/section name — Phase 2's auditor
+        # does the disambiguation when resolving against code_index.
+        self.assertEqual(r.anchor, "Section name")
+
+
 class ParseWikirefsBatchTests(unittest.TestCase):
     """parse_wikirefs(text) — yields all refs in document order."""
 

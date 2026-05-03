@@ -87,16 +87,20 @@ class WikiRef:
 
 
 def _looks_like_code_path(target: str) -> bool:
-    """Heuristic: target is a code reference if it contains a path separator
-    OR ends with a known code-file extension.
+    """Heuristic: target is a code reference iff it ends with a known
+    code-file extension.
 
-    Trade-off: a wiki page literally titled ``foo.py`` would parse as ``code``.
-    Acceptable — wiki slugs don't carry file extensions in practice (slugify
-    strips dots), so this is a vanishingly rare collision and the existing
-    ``[[slug]]`` form already disambiguates by omitting the dot.
+    A path separator alone is NOT sufficient — ``[[docs/auth.md#OAuth Flow]]``
+    is a valid section ref into a markdown doc, not a symbol ref into code
+    (Codex review on PR #29 P1 fix). The disambiguator is the file
+    extension: ``.ts/.py/.rs/...`` → ``kind="code"``; ``.md/.txt/`` or no
+    extension → falls through to ``slug``/``section`` branches based on
+    anchor presence.
+
+    Trade-off: a wiki page literally titled ``foo.py`` would parse as
+    ``code``. Acceptable — wiki slugs don't carry file extensions in
+    practice (slugify strips dots), so this is a vanishingly rare collision.
     """
-    if "/" in target:
-        return True
     lower = target.lower()
     dot = lower.rfind(".")
     if dot < 0:
