@@ -38,15 +38,18 @@ jobs:
           pip install -e "git+https://github.com/victorgjn/agent-skills#egg=context-engineering&subdirectory=context-engineering"
 
       - name: Run lat_check
+        # CE registers `scripts` and `scripts.wiki` as packages (see
+        # context-engineering/pyproject.toml line 49). Module path is
+        # `scripts.wiki.lat_check`, NOT `wiki.lat_check`.
         run: |
           set -e
           if [ -n "${{ env.CE_CODE_ROOT }}" ]; then
-            python -m wiki.lat_check \
+            python -m scripts.wiki.lat_check \
               --brain "${{ env.CE_BRAIN_PATH }}" \
               --code-root "${{ env.CE_CODE_ROOT }}" \
               --strict
           else
-            python -m wiki.lat_check \
+            python -m scripts.wiki.lat_check \
               --brain "${{ env.CE_BRAIN_PATH }}" \
               --strict
           fi
