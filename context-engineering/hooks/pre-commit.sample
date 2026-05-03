@@ -10,17 +10,25 @@
 #   ln -sf ../../hooks/pre-commit.sample .git/hooks/pre-commit
 #
 # Configuration via env vars:
-#   CE_BRAIN     -- path to the brain root (default: ./brain)
-#   CE_CODE_ROOT -- path to the repository root for code-symbol resolution
-#                   (default: . -- the repo root); set empty to skip code refs.
-#   CE_PYTHON    -- python interpreter (default: python3)
+#   CE_BRAIN       -- path to the brain root (default: <repo>/brain)
+#   CE_CODE_ROOT   -- path to the repo root for code-symbol resolution
+#                     (default: <repo> root); set empty to skip code refs.
+#   CE_PYTHON      -- python interpreter (default: python3)
+#   CE_LAT_CHECK   -- absolute path to lat_check.py; only set this if you've
+#                     vendored CE somewhere other than <repo>/context-engineering/.
 #
 # Exits non-zero on any broken reference, blocking the commit.
 
 set -euo pipefail
 
-CE_BRAIN="${CE_BRAIN:-./brain}"
-CE_CODE_ROOT="${CE_CODE_ROOT-.}"  # `-` so an empty assignment from caller is honored
+# When run as a git hook, `pwd` is the repo root, but `BASH_SOURCE` is in
+# `.git/hooks/`. Use git rev-parse to anchor paths to the working tree
+# regardless of where the hook lives (real file in .git/hooks/ vs. symlink
+# vs. core.hooksPath redirection).
+repo_root="$(git rev-parse --show-toplevel)"
+
+CE_BRAIN="${CE_BRAIN:-$repo_root/brain}"
+CE_CODE_ROOT="${CE_CODE_ROOT-$repo_root}"  # `-` so an empty assignment is honored
 CE_PYTHON="${CE_PYTHON:-python3}"
 
 # Skip when no wiki/* or code/* file is staged -- avoids paying for a code
@@ -30,13 +38,19 @@ if ! grep -qE '(\.md$|\.ts$|\.tsx$|\.js$|\.jsx$|\.py$|\.rs$|\.go$|\.java$|\.rb$|
     exit 0
 fi
 
-# Locate lat_check.py relative to this hook script.
-hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lat_check="$hook_dir/../context-engineering/scripts/wiki/lat_check.py"
+# Locate lat_check.py: explicit env override wins; otherwise resolve from
+# the repo root (NOT from BASH_SOURCE, which lives under .git/hooks/ once
+# the hook is installed and so cannot find context-engineering/).
+if [ -n "${CE_LAT_CHECK:-}" ]; then
+    lat_check="$CE_LAT_CHECK"
+else
+    lat_check="$repo_root/context-engineering/scripts/wiki/lat_check.py"
+fi
 
 if [ ! -f "$lat_check" ]; then
     echo "pre-commit: lat_check.py not found at $lat_check" >&2
     echo "pre-commit: skipping CE broken-ref check" >&2
+    echo "pre-commit: set CE_LAT_CHECK to the script path if you've vendored CE elsewhere" >&2
     exit 0
 fi
 
