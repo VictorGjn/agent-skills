@@ -869,7 +869,13 @@ def lat_refs(
     and returns one bullet per (source_page, ref) pair where the ref's
     target equals the requested target (or matches as a code-ref slug).
     """
+    # Codex P1 (PR #32): docs claim bracketed and bare refs both work for
+    # the lat.* tools, but lat.refs only stripped whitespace. Strip the
+    # `[[...]]` envelope here so `lat.refs("[[token-store]]")` matches the
+    # same inbound refs as `lat.refs("token-store")`.
     target = target.strip()
+    if target.startswith("[[") and target.endswith("]]"):
+        target = target[2:-2].strip()
     _emit_telemetry("tool.call", tool="lat.refs", target=target)
 
     brain_dir = _resolve_brain_path(brain)
@@ -924,6 +930,11 @@ def lat_search(
     query = query.strip()
     _emit_telemetry("tool.call", tool="lat.search", query=query)
     if not query:
+        # Codex P2 (PR #32): every `tool.call` must have a matching
+        # `tool.result` per SPEC-mcp.md §9. Empty-query early return
+        # previously left a dangling invocation in telemetry pipelines.
+        _emit_telemetry("tool.result", tool="lat.search", status="error",
+                        reason="empty_query")
         return "<!-- lat.search: empty query -->"
 
     brain_dir = _resolve_brain_path(brain)
