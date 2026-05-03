@@ -133,10 +133,17 @@ def render_page(
     # confidence scoring is post-Phase-1.
     confidence = min(0.5 + 0.1 * len(sources), 0.95)
 
+    # Phase 3 (CE x lat.md): when every source event is a code-backlink
+    # (// @lat: comment), emit `kind: code`. Mixed corpora (any non-
+    # code-backlink event present) keep `kind: concept` -- the entity is
+    # primarily conceptual and code refs are just supporting evidence.
+    source_types = {e.get("source_type", "default") for e in events}
+    kind = "code" if source_types == {"code-backlink"} else "concept"
+
     fm_lines = [
         "---",
         f"id: {entity_id}",
-        "kind: concept",
+        f"kind: {kind}",
         f"title: {title}",
         f"slug: {slug}",
         f"scope: {scope}",

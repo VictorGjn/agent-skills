@@ -247,7 +247,7 @@ class EndToEndAC9Tests(unittest.TestCase):
 
             # Step 3: produced pages have CE schema (not graphify schema)
             alpha_page = (brain / "wiki" / "alpha.md").read_text(encoding="utf-8")
-            self.assertIn("schema_version: \"1.1\"", alpha_page)
+            self.assertIn("schema_version: \"1.2\"", alpha_page)
             # wiki_init renders sources rows with "type: <source_type>"; the
             # graphify ingest path tagged events with source_type=graphify-wiki
             self.assertIn("graphify-wiki", alpha_page)

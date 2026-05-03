@@ -54,10 +54,19 @@ def _today_path(events_dir: Path) -> Path:
 
 def append_event(events_dir: Path, *, source_type: str, source_ref: str,
                  file_id: str, claim: str, entity_hint: str | None = None,
-                 embedding_id: str | None = None, ts: int | None = None) -> None:
+                 embedding_id: str | None = None, ts: int | None = None,
+                 symbol: str | None = None) -> None:
     """Append one event line. Never blocks on a lock — append is atomic in POSIX
     for small writes; on Windows we accept the rare interleaving risk because
-    a corrupted line is recoverable (parser skips bad lines)."""
+    a corrupted line is recoverable (parser skips bad lines).
+
+    Phase 3 (CE x lat.md): optional ``symbol`` kwarg carries the AST-
+    resolved symbol name for code-backlink events (`source_type=
+    "code-backlink"`). When present, ``wiki_init`` emits the source
+    citation as a lat.md-compatible ``[[src/path#symbol]]`` ref. Older
+    callers omit ``symbol``; the field is written only when non-None so
+    legacy event-line shape is preserved.
+    """
     rec = {
         'schema_version': EVENT_SCHEMA_VERSION,
         'ts': int(ts or time.time()),
@@ -68,6 +77,8 @@ def append_event(events_dir: Path, *, source_type: str, source_ref: str,
         'entity_hint': entity_hint,
         'embedding_id': embedding_id,
     }
+    if symbol is not None:
+        rec['symbol'] = symbol
     path = _today_path(events_dir)
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(rec, ensure_ascii=False) + '\n')
