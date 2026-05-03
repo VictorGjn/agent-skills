@@ -122,6 +122,49 @@ class WalkAndExtractTests(unittest.TestCase):
             self.assertEqual(log[0]["entity_hint"], "ok-slug")
 
 
+class EventStreamSourceForwardsSymbolTests(unittest.TestCase):
+    """Codex P2 (PR #31): EventStreamSource (and the
+    SourceCommentBacklinkSource.emit_events(events=[...]) passthrough that
+    delegates to it) must forward the new `symbol` field, not silently
+    drop it.
+    """
+
+    def test_event_stream_source_persists_symbol(self):
+        from wiki.source_adapter import EventStreamSource
+        with tempfile.TemporaryDirectory() as td:
+            events_dir = Path(td)
+            src = EventStreamSource(events_dir)
+            src.emit_events([{
+                "source_type": "code-backlink",
+                "source_ref": "src/foo.ts:42",
+                "file_id": "sha256:0123456789ab",
+                "claim": "claim text",
+                "entity_hint": "auth-middleware",
+                "symbol": "validateToken",
+            }])
+            log = read_events(events_dir)
+            self.assertEqual(len(log), 1)
+            self.assertEqual(log[0]["symbol"], "validateToken")
+
+    def test_source_comment_backlink_passthrough_keeps_symbol(self):
+        # SourceCommentBacklinkSource.emit_events(events=[...]) delegates
+        # to EventStreamSource. Symbol must survive that delegation.
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            events_dir = repo / "events"
+            src = SourceCommentBacklinkSource(repo, events_dir)
+            src.emit_events([{
+                "source_type": "code-backlink",
+                "source_ref": "src/bar.py:7",
+                "file_id": "sha256:9876543210ab",
+                "claim": "test",
+                "entity_hint": "user-service",
+                "symbol": "get_user",
+            }])
+            log = read_events(events_dir)
+            self.assertEqual(log[0]["symbol"], "get_user")
+
+
 class WikiInitWithCodeBacklinksTests(unittest.TestCase):
     """End-to-end: `// @lat:` -> events -> wiki/<slug>.md with kind=code."""
 
