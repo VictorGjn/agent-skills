@@ -23,6 +23,7 @@ from wiki.wikiref import (  # noqa: E402
     parse_wikiref,
     parse_wikirefs,
     format_wikiref,
+    strip_line_suffix,
 )
 
 
@@ -285,6 +286,58 @@ class BackwardCompatibilityTests(unittest.TestCase):
                 r = parse_wikiref(slug)
                 self.assertEqual(r.kind, "slug")
                 self.assertEqual(r.target, slug)
+
+
+class StripLineSuffixTests(unittest.TestCase):
+    """``strip_line_suffix`` removes ``:<digits>`` only at end of string.
+
+    Codex review #29 (P2) caught that the prior naive ``split(":", 1)[0]``
+    truncated Windows drive paths (``C:\\repo\\foo.ts``) to just ``C``.
+    These tests pin the Windows-safe behavior.
+    """
+
+    def test_unix_path_with_line(self):
+        self.assertEqual(strip_line_suffix("src/foo.ts:142"), "src/foo.ts")
+
+    def test_unix_path_no_line(self):
+        self.assertEqual(strip_line_suffix("src/foo.ts"), "src/foo.ts")
+
+    def test_windows_drive_no_line(self):
+        # Drive-letter colon must NOT be stripped.
+        self.assertEqual(strip_line_suffix(r"C:\repo\src\foo.ts"), r"C:\repo\src\foo.ts")
+
+    def test_windows_drive_with_line(self):
+        # Drive-letter colon preserved; trailing line-number stripped.
+        self.assertEqual(
+            strip_line_suffix(r"C:\repo\src\foo.ts:142"),
+            r"C:\repo\src\foo.ts",
+        )
+
+    def test_windows_forward_slashes_with_line(self):
+        # Mixed-slash form (legitimate on Windows). Trailing line stripped.
+        self.assertEqual(
+            strip_line_suffix("C:/repo/src/foo.ts:142"),
+            "C:/repo/src/foo.ts",
+        )
+
+    def test_zero_line_number_stripped(self):
+        # `:0` is digits, must strip.
+        self.assertEqual(strip_line_suffix("src/foo.ts:0"), "src/foo.ts")
+
+    def test_multidigit_line_number_stripped(self):
+        self.assertEqual(strip_line_suffix("src/foo.ts:9999"), "src/foo.ts")
+
+    def test_colon_in_path_no_line(self):
+        # A colon followed by a non-digit segment is NOT a line suffix.
+        self.assertEqual(strip_line_suffix("ext:gam-wu-2026"), "ext:gam-wu-2026")
+
+    def test_idempotent(self):
+        once = strip_line_suffix("src/foo.ts:142")
+        twice = strip_line_suffix(once)
+        self.assertEqual(once, twice)
+
+    def test_empty_string(self):
+        self.assertEqual(strip_line_suffix(""), "")
 
 
 if __name__ == "__main__":
