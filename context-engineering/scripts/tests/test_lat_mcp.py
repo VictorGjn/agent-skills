@@ -228,6 +228,22 @@ class LatRefsTests(unittest.TestCase):
             self.assertIn("token-store", out)
             self.assertIn('"event": "tool.result"', buf.getvalue())
 
+    def test_bracketed_target_strips_to_match(self):
+        # Codex P1 (PR #32): lat.refs accepts bracketed and bare refs.
+        # `[[token-store]]` must match the same inbound refs as `token-store`.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            _seed_brain(brain)
+            with redirect_stderr(io.StringIO()):
+                bare = lat_refs(target="token-store", brain=str(brain))
+                bracketed = lat_refs(target="[[token-store]]", brain=str(brain))
+            self.assertIn("auth-middleware", bracketed)
+            # Both forms must surface the same inbound source page.
+            self.assertEqual(
+                "auth-middleware" in bracketed,
+                "auth-middleware" in bare,
+            )
+
     def test_no_refs_returns_empty_marker(self):
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
@@ -259,12 +275,19 @@ class LatSearchTests(unittest.TestCase):
             self.assertIn("validateToken", out)
 
     def test_empty_query_handled(self):
+        # Codex P2 (PR #32): empty-query early return must still emit
+        # a matching tool.result so telemetry pipelines don't see
+        # dangling tool.call invocations.
         with tempfile.TemporaryDirectory() as td:
             brain = Path(td) / "brain"
             _seed_brain(brain)
-            with redirect_stderr(io.StringIO()):
+            with redirect_stderr(io.StringIO()) as buf:
                 out = lat_search(query="", brain=str(brain))
             self.assertIn("empty query", out)
+            telemetry = buf.getvalue()
+            self.assertIn('"event": "tool.call"', telemetry)
+            self.assertIn('"event": "tool.result"', telemetry)
+            self.assertIn('"reason": "empty_query"', telemetry)
 
 
 class LatExpandTests(unittest.TestCase):
