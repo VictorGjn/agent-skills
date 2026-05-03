@@ -34,12 +34,12 @@ from pathlib import Path
 try:
     from .events import read_events
     from .validate_page import SCHEMA_VERSION
-    from .wikiref import format_wikiref
+    from .wikiref import format_wikiref, strip_line_suffix
 except ImportError:  # script execution
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from wiki.events import read_events
     from wiki.validate_page import SCHEMA_VERSION
-    from wiki.wikiref import format_wikiref
+    from wiki.wikiref import format_wikiref, strip_line_suffix
 
 
 # Slug-collision discipline per phase-1.md §1.2 acceptance rule:
@@ -182,7 +182,10 @@ def render_page(
         # when no symbol is present.
         symbol = s.get("symbol")
         if symbol and s["type"] in ("code", "code-backlink"):
-            path_only = s["ref"].split(":", 1)[0]
+            # Windows-safe: only strips trailing `:<digits>`. A ref like
+            # `C:\repo\src\foo.ts:142` becomes `C:\repo\src\foo.ts`, NOT
+            # truncated to `C` (Codex review #29 P2 fix).
+            path_only = strip_line_suffix(s["ref"])
             ref_str = format_wikiref(kind="code", target=path_only, anchor=symbol)
             body_lines.append(f"- {ref_str} ({s['type']})")
         else:

@@ -171,6 +171,26 @@ def parse_wikirefs(text: str) -> Iterator[WikiRef]:
             yield ref
 
 
+# Trailing `:<digits>` line suffix, e.g. `src/foo.ts:142`. Anchored at end so
+# Windows drive letters (`C:\repo\src\foo.ts`) aren't truncated — only digits
+# after the FINAL colon are stripped. `:` inside the path itself is preserved.
+_LINE_SUFFIX_RE = re.compile(r":\d+$")
+
+
+def strip_line_suffix(ref: str) -> str:
+    """Drop a trailing ``:<line-number>`` suffix from a source ref.
+
+    Used when rendering ``[[src/path#symbol]]`` from an event whose
+    ``source_ref`` carries a line locator (``src/foo.ts:142``). The symbol
+    anchor already pinpoints the entity, so the line number is redundant
+    inside the wiki ref.
+
+    **Windows-safe**: refs like ``C:\\repo\\src\\foo.ts`` are returned
+    unchanged. Only a trailing colon-then-digits is stripped.
+    """
+    return _LINE_SUFFIX_RE.sub("", ref)
+
+
 def format_wikiref(
     *,
     kind: str,
