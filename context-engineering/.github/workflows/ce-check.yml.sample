@@ -1,0 +1,63 @@
+# CE broken-reference linter -- GitHub Actions workflow
+#
+# Drop into your repo as `.github/workflows/ce-check.yml` (rename: strip
+# the `.sample` suffix). Runs on every PR + push to main.
+#
+# Inputs (workflow-level env, override per repo):
+#   CE_BRAIN_PATH  -- relative path to your brain root (default: ./brain)
+#   CE_CODE_ROOT   -- relative path to the repo to symbol-index
+#                     (default: .); set to "" to skip code-symbol checks.
+
+name: CE broken-ref check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CE_BRAIN_PATH: ./brain
+  CE_CODE_ROOT: .
+
+jobs:
+  lat_check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CE
+        run: |
+          # Adjust if you've vendored CE into your repo or pinned to a tag.
+          pip install -e "git+https://github.com/victorgjn/agent-skills#egg=context-engineering&subdirectory=context-engineering"
+
+      - name: Run lat_check
+        # CE registers `scripts` and `scripts.wiki` as packages (see
+        # context-engineering/pyproject.toml line 49). Module path is
+        # `scripts.wiki.lat_check`, NOT `wiki.lat_check`.
+        run: |
+          set -e
+          if [ -n "${{ env.CE_CODE_ROOT }}" ]; then
+            python -m scripts.wiki.lat_check \
+              --brain "${{ env.CE_BRAIN_PATH }}" \
+              --code-root "${{ env.CE_CODE_ROOT }}" \
+              --strict
+          else
+            python -m scripts.wiki.lat_check \
+              --brain "${{ env.CE_BRAIN_PATH }}" \
+              --strict
+          fi
+
+      - name: Upload audit/proposals.md on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ce-audit-proposals
+          path: ${{ env.CE_BRAIN_PATH }}/audit/proposals.md
+          retention-days: 14

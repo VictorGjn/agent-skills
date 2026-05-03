@@ -1,0 +1,388 @@
+"""End-to-end tests for scripts/wiki/lat_check.py + broken-ref auditor.
+
+Phase 2 of CE x lat.md interop. Validates PRD AC2:
+
+> Given a brain with 3 deliberately-broken refs (missing file, wrong
+> symbol, wrong section), when ``lat_check.py --brain ./brain --strict``
+> is invoked, then it exits 1 and ``audit/proposals.md`` lists all 3
+> broken refs by location + reason.
+"""
+from __future__ import annotations
+
+import io
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPTS))
+
+from wiki.audit import find_broken_refs  # noqa: E402
+from wiki.code_index import build_code_index  # noqa: E402
+from wiki.lat_check import main as lat_check_main  # noqa: E402
+
+
+# Canonical 1.1-schema page header used in fixtures.
+_HEADER = (
+    "---\n"
+    "id: ent_test1234\n"
+    "kind: concept\n"
+    "title: {title}\n"
+    "slug: {slug}\n"
+    "scope: default\n"
+    "schema_version: \"1.1\"\n"
+    "confidence: 0.80\n"
+    "updated: 2026-05-01T00:00:00Z\n"
+    "last_verified_at: 2026-05-01T00:00:00Z\n"
+    "sources:\n"
+    "  -\n"
+    "    type: code\n"
+    "    ref: src/test.ts\n"
+    "    ts: 2026-05-01T00:00:00Z\n"
+    "---\n\n"
+)
+
+
+def _seed_brain(brain: Path) -> None:
+    """Seed a minimal brain with three pages and three deliberately broken refs."""
+    wiki = brain / "wiki"
+    wiki.mkdir(parents=True)
+
+    # Page 1: target page that will be referenced (exists).
+    (wiki / "auth-middleware.md").write_text(
+        _HEADER.format(title="Auth Middleware", slug="auth-middleware")
+        + "# Auth Middleware\n\n## Claims\n\n## OAuth Flow\n\n"
+        "Some content about OAuth.\n",
+        encoding="utf-8",
+    )
+
+    # Page 2: source page with three deliberately broken refs.
+    body = (
+        "# Has Broken Refs\n\n"
+        "## Claims\n\n"
+        "- Healthy ref to [[auth-middleware]].\n"
+        "- Healthy section ref [[auth-middleware#OAuth Flow]].\n"
+        "- BROKEN missing-page slug: [[ghost-page]].\n"
+        "- BROKEN missing-section: [[auth-middleware#Phantom Section]].\n"
+        "- BROKEN missing-symbol: [[src/auth.ts#nonexistent_symbol]].\n"
+    )
+    (wiki / "has-broken-refs.md").write_text(
+        _HEADER.format(title="Has Broken Refs", slug="has-broken-refs") + body,
+        encoding="utf-8",
+    )
+
+
+def _seed_codebase(repo: Path) -> None:
+    """Seed a tiny codebase the broken-symbol ref will fail against."""
+    src = repo / "src"
+    src.mkdir(parents=True)
+    (src / "auth.ts").write_text(
+        "export function validateToken(t: string) { return true; }\n"
+        "function helper() {}\n",
+        encoding="utf-8",
+    )
+
+
+class FindBrokenRefsTests(unittest.TestCase):
+    """Direct unit tests on ``find_broken_refs``."""
+
+    def test_three_broken_refs_each_reason(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            repo = Path(td) / "repo"
+            _seed_brain(brain)
+            _seed_codebase(repo)
+            code_index = build_code_index(repo)
+
+            # Load pages via the audit's own helper to mirror runtime path.
+            from wiki.audit import _load_pages
+            pages, _warnings = _load_pages(brain / "wiki")
+            flags = find_broken_refs(pages, code_index=code_index)
+
+            reasons = sorted(f["reason"] for f in flags)
+            self.assertEqual(
+                reasons,
+                ["page_not_found", "section_not_found", "symbol_not_found"],
+                f"expected 3 distinct broken-ref reasons, got: {reasons}",
+            )
+
+    def test_subsection_anchor_validated(self):
+        # Codex P1 (PR #30): `[[target#Section#MissingSub]]` must flag
+        # section_not_found when the sub-anchor doesn't exist on the page,
+        # even if `Section` itself is a valid heading.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            # Target has only a top-level "Intro" heading, no "MissingSub".
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\nIntro body.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\nDeep link: [[target#Intro#MissingSub]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages)
+            self.assertEqual(len(flags), 1)
+            f = flags[0]
+            self.assertEqual(f["reason"], "section_not_found")
+            self.assertEqual(f["sub_anchor"], "MissingSub")
+            self.assertEqual(f["missing_segment"], "MissingSub")
+
+    def test_subsection_anchor_passes_when_both_exist(self):
+        # Conversely: when both the anchor and sub_anchor have matching
+        # headings, no flag is raised. (Heading-tree nesting strictness is
+        # post-Phase 2.)
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\n### Subsection\n\nbody.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n[[target#Intro#Subsection]]\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            self.assertEqual(find_broken_refs(pages), [])
+
+    def test_dedupe_distinguishes_sub_anchor(self):
+        # Codex P1 (PR #30 round 4): two refs sharing (target, anchor) but
+        # differing in sub_anchor must be validated independently. Prior
+        # dedupe key was (source_slug, target, anchor) -- the second ref
+        # collapsed and a broken deep link slipped through.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "target.md").write_text(
+                _HEADER.format(title="Target", slug="target")
+                + "# Target\n\n## Intro\n\n### Good\n\nbody.\n",
+                encoding="utf-8",
+            )
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n"
+                + "Healthy: [[target#Intro#Good]].\n"
+                + "Broken:  [[target#Intro#Missing]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages)
+            self.assertEqual(len(flags), 1, f"expected exactly 1 flag, got: {flags}")
+            self.assertEqual(flags[0]["sub_anchor"], "Missing")
+
+    def test_dedupe_distinguishes_kind(self):
+        # Same target string, different kind -- must validate each path.
+        # `[[example.ts]]` is a code ref (extension); `[[example-ts]]` is a
+        # slug ref. They should not collapse, even though target strings
+        # differ in punctuation only.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "src.md").write_text(
+                _HEADER.format(title="Src", slug="src")
+                + "# Src\n\n"
+                + "Code ref to ghost: [[src/ghost.ts#nope]].\n"
+                + "Slug ref to ghost: [[ghost-page]].\n",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            flags = find_broken_refs(pages, code_index={"files": {}})
+            kinds = sorted({f["kind"] for f in flags})
+            self.assertEqual(kinds, ["code", "slug"])
+
+    def test_no_code_index_skips_code_refs(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            _seed_brain(brain)
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(brain / "wiki")
+            flags = find_broken_refs(pages, code_index=None)
+
+            # Without a code_index we only catch the slug + section breaks.
+            kinds = sorted({f["kind"] for f in flags})
+            self.assertEqual(kinds, ["section", "slug"])
+
+    def test_clean_brain_no_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n\nLink to [[b]].",
+                encoding="utf-8",
+            )
+            (wiki / "b.md").write_text(
+                _HEADER.format(title="B", slug="b") + "# B\n\nNo refs.",
+                encoding="utf-8",
+            )
+
+            from wiki.audit import _load_pages
+            pages, _ = _load_pages(wiki)
+            self.assertEqual(find_broken_refs(pages), [])
+
+
+class LatCheckCLITests(unittest.TestCase):
+    """End-to-end CLI invocations."""
+
+    def test_strict_exits_1_when_broken(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            repo = Path(td) / "repo"
+            _seed_brain(brain)
+            _seed_codebase(repo)
+
+            buf_err = io.StringIO()
+            buf_out = io.StringIO()
+            with redirect_stderr(buf_err), redirect_stdout(buf_out):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", str(repo),
+                    "--strict",
+                ])
+            self.assertEqual(rc, 1)
+
+            stderr = buf_err.getvalue()
+            self.assertIn("3 broken reference", stderr)
+            self.assertIn("page_not_found".replace("_", " "), stderr)
+            self.assertIn("section_not_found".replace("_", " "), stderr)
+            self.assertIn("symbol_not_found".replace("_", " "), stderr)
+
+            # AC2: proposals.md must list all 3 broken refs.
+            proposals = (brain / "audit" / "proposals.md").read_text(encoding="utf-8")
+            self.assertIn("Broken refs", proposals)
+            self.assertIn("ghost-page", proposals)
+            self.assertIn("Phantom Section", proposals)
+            self.assertIn("nonexistent_symbol", proposals)
+
+    def test_non_strict_exits_0_with_findings(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            repo = Path(td) / "repo"
+            _seed_brain(brain)
+            _seed_codebase(repo)
+
+            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", str(repo),
+                ])
+            self.assertEqual(rc, 0)
+
+    def test_missing_code_index_returns_exit_2(self):
+        # Codex P2 (PR #30): --code-index pointing at a missing file must
+        # exit 2 (config error), not 1 (broken refs) or crash with a traceback.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-index", "/nonexistent/path/idx.json",
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn("configuration error", buf.getvalue())
+
+    def test_missing_code_root_returns_exit_2(self):
+        # Same path, via --code-root.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", "/nonexistent/repo/root",
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
+
+    def test_missing_brain_dir_returns_exit_2(self):
+        # Codex P1 (PR #30 round 3): nonexistent brain dir fails loudly,
+        # never returns 0 -- silent-success on a CI typo is the worst case.
+        with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+            rc = lat_check_main([
+                "--brain", "/nonexistent/brain/path",
+                "--strict",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("not a directory", buf.getvalue())
+
+    def test_brain_without_wiki_subdir_returns_exit_2(self):
+        # Codex P1 (PR #30 round 3): brain dir exists but has no wiki/ -- still
+        # exit 2, not silent 0.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td)  # exists but no wiki/ subdirectory inside
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main(["--brain", str(brain), "--strict"])
+            self.assertEqual(rc, 2)
+            self.assertIn("no wiki/ subdirectory", buf.getvalue())
+
+    def test_code_root_pointing_at_file_returns_exit_2(self):
+        # Codex P2 (PR #30 round 3): --code-root must be a DIRECTORY. A file
+        # path passes .exists() but build_code_index walks zero files.
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n", encoding="utf-8"
+            )
+            # Create a regular file and pass it as --code-root.
+            file_path = Path(td) / "not-a-dir.txt"
+            file_path.write_text("hi", encoding="utf-8")
+
+            with redirect_stderr(io.StringIO()) as buf, redirect_stdout(io.StringIO()):
+                rc = lat_check_main([
+                    "--brain", str(brain),
+                    "--code-root", str(file_path),
+                    "--strict",
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn("not a directory", buf.getvalue())
+
+    def test_strict_exits_0_when_clean(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain = Path(td) / "brain"
+            wiki = brain / "wiki"
+            wiki.mkdir(parents=True)
+            (wiki / "a.md").write_text(
+                _HEADER.format(title="A", slug="a") + "# A\n\nNo refs.",
+                encoding="utf-8",
+            )
+            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = lat_check_main(["--brain", str(brain), "--strict"])
+            self.assertEqual(rc, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
