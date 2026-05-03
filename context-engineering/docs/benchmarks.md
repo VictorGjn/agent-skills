@@ -74,11 +74,12 @@ If the goal is "give the agent enough context to answer at the smallest token co
 
 ## What ships with the eval harness
 
-`scripts/eval/` already contains the full evaluator infrastructure used internally:
+`scripts/eval/` currently contains the runners that landed pre-Phase-5:
 
-- `run_harness.py` — multi-mode multi-query runner
-- `judge_llm.py` — LLM-as-judge for answer quality at fixed pack
-- `cases/` — golden-set queries with expected answers
-- `diff_runs.py` — cross-version regression detection
+- `run_eval.py` — single-pass eval against a small reference set
+- `run_eval_fastify.py` / `run_eval_flask.py` — repo-specific fixtures
+- `eval_graph_vs_keyword.py` — A/B compare resolution modes
 
-These are not run as part of the demo benchmarks above. When CE goes through a quality-driven release (post-Phase 5), the harness produces the numbers. Until then: the table above + reproducible commands are what's published.
+A larger cross-version harness (`run_harness.py`, `judge_llm.py`, golden-set `cases/`, `diff_runs.py`) is in-progress on a separate branch and lands in a follow-on PR. The numbers in this document do **not** depend on that harness — they come from running `pack_context.py` directly via the methodology above.
+
+Until the cross-version harness ships and `value_over_proof` is lifted, the table above + reproducible commands are the published surface.

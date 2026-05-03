@@ -57,10 +57,21 @@ git clone https://github.com/1st1/lat.md /tmp/lat.md
 # Install CE (or `pip install -e .` from the agent-skills checkout)
 pip install context-engineering
 
-# Build a code index from the repo
-python -m scripts.wiki.code_index /tmp/lat.md --cache /tmp/code-index.json
+# Build a code index where the MCP server expects it. By default the
+# lat.* tools read `<brain>/../cache/code_index.json` (overridable via
+# the CE_CODE_INDEX env var). For a brain at /tmp/lat.md/brain that
+# means writing to /tmp/lat.md/cache/code_index.json:
+mkdir -p /tmp/lat.md/cache
+python -m scripts.wiki.code_index /tmp/lat.md \
+    --cache /tmp/lat.md/cache/code_index.json
 
-# Run lat-style queries via CE's MCP
+# Or stash the index anywhere and point CE at it:
+#   export CE_CODE_INDEX=/tmp/code-index.json
+#   python -m scripts.wiki.code_index /tmp/lat.md --cache "$CE_CODE_INDEX"
+
+# Run lat-style queries via CE's MCP. CE_BRAIN_DIR (default ./brain)
+# determines where the lat.* tools look for the wiki and cache.
+export CE_BRAIN_DIR=/tmp/lat.md/brain
 python -m scripts.mcp_server  # starts stdio server
 # In another shell, an MCP client calls:
 #   lat.locate(ref="src/auth.ts#validateToken")  -> identical result to lat locate
