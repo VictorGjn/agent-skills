@@ -370,13 +370,18 @@ def find_broken_refs(
     """
     flags: list[dict] = []
     code_files: dict = (code_index or {}).get("files", {})
-    seen: set[tuple[str, str, str]] = set()  # dedupe (source, target, anchor)
+    # Dedupe key includes kind + sub_anchor so refs that share target+anchor
+    # but differ on the second segment (e.g. `[[t#A#X]]` vs `[[t#A#Y]]`) or
+    # on kind (slug vs section vs code with same target string) are
+    # validated independently. Codex P1 (PR #30 round 4 fix).
+    seen: set[tuple[str, str, str, str, str]] = set()
 
     for src_slug, src in pages.items():
         body = src["body"]
         for ref in parse_wikirefs(body):
             anchor = ref.anchor or ""
-            key = (src_slug, ref.target, anchor)
+            sub_anchor = ref.sub_anchor or ""
+            key = (src_slug, ref.kind, ref.target, anchor, sub_anchor)
             if key in seen:
                 continue
             seen.add(key)
