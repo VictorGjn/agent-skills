@@ -166,6 +166,12 @@ class EventStreamSource(Source):
                 entity_hint=ev.get('entity_hint'),
                 embedding_id=ev.get('embedding_id'),
                 ts=ev.get('ts'),
+                # Phase 3 (PR #31 Codex P2 fix): forward `symbol` so callers
+                # batching prebuilt code-backlink events through the
+                # documented emit_events(events=[...]) path keep their AST
+                # anchors. Without this, wiki_init silently loses the
+                # [[src/path#symbol]] provenance rendering.
+                symbol=ev.get('symbol'),
             )
             appended += 1
         return appended
