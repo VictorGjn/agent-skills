@@ -8,6 +8,11 @@ mcp_tools:
   - context-engineering.index_github_repo
   - context-engineering.build_embeddings
   - context-engineering.resolve
+  - context-engineering.lat_locate
+  - context-engineering.lat_section
+  - context-engineering.lat_refs
+  - context-engineering.lat_search
+  - context-engineering.lat_expand
   - context-engineering.stats
 requiredApps: []
 repository: https://github.com/victorgjn/agent-skills
@@ -17,7 +22,9 @@ transports: [stdio, http]
 
 # Context Engineering
 
-**The engine for building and querying a queryable, compounding company brain — across code, human-curated knowledge, and connector streams.**
+**Multi-corpus context engineering — indexes your codebase ([lat.md](https://github.com/1st1/lat.md)-compatible), Granola transcripts, Notion DBs, Gmail labels, HubSpot notes. Depth-aware packing. Concept-quality scoring.**
+
+The engine for building and querying a token-efficient, provenance-tracked company brain across code, human-curated knowledge, and connector streams.
 
 Five tightly-coupled capabilities ship as one skill:
 
@@ -27,7 +34,17 @@ Five tightly-coupled capabilities ship as one skill:
 4. **Synthesizer + Auditor** — GAM-grade semantic-shift detector (consolidate only on cosine drift, never on every event); `wiki_init.py` one-shot seeder; Auditor proposes splits / merges / contradictions / dead links.
 5. **Retrieval surface** — depth-aware packer (5 levels, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion + authority signals + anti-hallucination filters + knowledge-type priority.
 
-Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, and Phase 2 `wiki.{ask,add,audit,export}`).
+Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, `wiki.{ask,add,audit}`, and `lat.{locate,section,refs,search,expand}` — 14 tools total).
+
+## Comparison vs adjacent tools
+
+| Tool | Layer | Differentiator |
+|---|---|---|
+| [lat.md](https://github.com/1st1/lat.md) (Yury Selivanov) | Codebase docs only | Standardized link grammar + `// @lat:` source backlinks + CI validation |
+| [Context Signals MCP](https://github.com/dineshraghupatruni/context-signals-mcp) (Dinesh Raghupatruni) | Code symbol map only | Published 79–95% context reduction numbers |
+| **Context Engineering (this skill)** | **All of the above + multi-corpus** | **Depth-aware packing + concept-quality scoring + Granola/Notion/Gmail/HubSpot Source ABC** |
+
+Honest comparisons in [`docs/vs-lat-md.md`](./docs/vs-lat-md.md), [`docs/vs-context-signals.md`](./docs/vs-context-signals.md), [`docs/benchmarks.md`](./docs/benchmarks.md).
 
 The depth packer is one of these five capabilities, not the headline. The full brain — index + EntityStore + synthesis + retrieval — is what makes this skill the reference implementation of Anabasis's `find-links` (spec v0.2).
 
