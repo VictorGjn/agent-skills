@@ -34,10 +34,12 @@ from pathlib import Path
 try:
     from .events import read_events
     from .validate_page import SCHEMA_VERSION
+    from .wikiref import format_wikiref
 except ImportError:  # script execution
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from wiki.events import read_events
     from wiki.validate_page import SCHEMA_VERSION
+    from wiki.wikiref import format_wikiref
 
 
 # Slug-collision discipline per phase-1.md §1.2 acceptance rule:
@@ -109,6 +111,12 @@ def render_page(
     # Sources are derived from event source_refs, deduplicated, sorted for
     # idempotency. Each source carries its source_type for the multi-source
     # freshness rule in §1.2.2.
+    #
+    # Phase 1 (CE x lat.md): when events carry an optional `symbol` field
+    # (Phase 3+ code-backlink events resolve // @lat: comments to AST
+    # symbols), forward it so the body's Provenance section can render
+    # lat.md-compatible [[src/path#symbol]] refs. Older events without
+    # `symbol` keep the current `- src/path (type)` rendering verbatim.
     sources_seen: dict[tuple[str, str], dict] = {}
     for e in events:
         key = (e.get("source_type", "default"), e.get("source_ref", ""))
@@ -117,6 +125,7 @@ def render_page(
                 "type": key[0],
                 "ref": key[1],
                 "ts": e.get("ts", 0),
+                "symbol": e.get("symbol"),
             }
     sources = sorted(sources_seen.values(), key=lambda s: (s["type"], s["ref"]))
 
@@ -166,7 +175,18 @@ def render_page(
     body_lines.append("## Provenance")
     body_lines.append("")
     for s in sources:
-        body_lines.append(f"- `{s['ref']}` ({s['type']})")
+        # Phase 1 (CE x lat.md): emit lat.md-compatible [[src/path#symbol]]
+        # for code/code-backlink events that carry symbol info. Strip any
+        # `:line` suffix from the ref since the symbol anchor already
+        # locates the entity. Falls back to the legacy `- ref (type)` form
+        # when no symbol is present.
+        symbol = s.get("symbol")
+        if symbol and s["type"] in ("code", "code-backlink"):
+            path_only = s["ref"].split(":", 1)[0]
+            ref_str = format_wikiref(kind="code", target=path_only, anchor=symbol)
+            body_lines.append(f"- {ref_str} ({s['type']})")
+        else:
+            body_lines.append(f"- `{s['ref']}` ({s['type']})")
     body_lines.append("")
 
     return "\n".join(fm_lines + body_lines)
