@@ -36,6 +36,76 @@ A small repo — useful for quick verification but understates reduction (every 
 
 Smaller repos compress less because every file is plausibly relevant. The interesting numbers are on larger repos.
 
+## Reference: windmar-demo (246 files, 121,171 tokens)
+
+[`windmar-nav/windmar-demo`](https://github.com/windmar-nav/windmar-demo) — a real maritime route-optimization app: weather-aware A* routing, Holtrop-Mennen vessel modeling, Copernicus weather ingestion. Mixed Python (55%) + TypeScript/TSX (25%) + Markdown (19%). Realistic mid-size repo for benchmarking.
+
+### `pack` reduction (depth-graded packing)
+
+| Query | Budget | Pack output | Time | Reduction |
+|---|---:|---:|---:|---:|
+| `weather-aware A* routing algorithm` | 8,000 | ~11,321 | 152ms | **90.7%** |
+| `Holtrop-Mennen vessel resistance model` | 8,000 | ~10,460 | 155ms | **91.4%** |
+| `Copernicus weather data ingestion` | 8,000 | ~9,011 | 147ms | **92.6%** |
+| `voyage cost calculation` | 4,000 | ~4,693 | 150ms | **96.1%** |
+| `frontend route visualization` | 4,000 | ~4,185 | 153ms | **96.5%** |
+| `API authentication endpoint` | 4,000 | ~4,627 | 155ms | **96.2%** |
+| `alembic database migrations` | 4,000 | ~5,658 | 157ms | **95.3%** |
+| `docker compose production setup` | 4,000 | ~6,866 | 146ms | **94.3%** |
+
+**Average reduction: 94.1%** across 8 representative queries. Times include resolution + packing; cold-cache index build is amortized once per repo.
+
+### `code_index` (symbol-map only, comparable to Context Signals MCP)
+
+| Metric | Value |
+|---|---:|
+| Files indexed | 238 |
+| Symbols extracted | 4,337 |
+| Cold build | 669ms |
+| Warm rebuild (mtime+sha cache) | 44ms |
+| Cache size | 800 KB |
+| Source bytes (code files only) | 2,807,467 |
+| Symbol-map bytes (signal only) | 240,996 |
+| **Symbol-map reduction** | **91.4%** |
+
+Sits squarely in [Context Signals MCP](./vs-context-signals.md)'s published 79–95% range (Cal.com TRPC, Trigger.dev Core, mixed projects). Same primitive, same magnitude.
+
+### `lat.*` MCP round-trip
+
+```
+lat.search(query="Holtrop")
+  -> 4 code symbols matched: holtrop_mennen_resistance (function, lines 111-150),
+     _holtrop_mennen_resistance (method, lines 274-317), TestHoltropMennen (class) ×2
+
+lat.locate(ref="src/optimization/numba_kernels.py#holtrop_mennen_resistance")
+  -> file: src/optimization/numba_kernels.py
+     symbol: holtrop_mennen_resistance (function, lines 111-150)
+
+lat.section(ref="src/optimization/numba_kernels.py#holtrop_mennen_resistance", budget=2000)
+  -> ```python
+     def holtrop_mennen_resistance(speed_ms, draft, displacement, cb, ...) -> float:
+         """Calm-water resistance via Holtrop-Mennen (simplified for tankers)."""
+         froude = speed_ms / math.sqrt(9.81 * lpp)
+         ...
+     ```
+```
+
+End-to-end: search → locate → fetch source. Each tool emits matching `tool.call` + `tool.result` telemetry per SPEC-mcp.md §9.
+
+### Reproducing
+
+```bash
+git clone --depth 1 https://github.com/windmar-nav/windmar-demo.git
+cd /path/to/agent-skills/context-engineering
+
+python -m scripts.index_workspace /path/to/windmar-demo
+python scripts/pack_context.py "Holtrop-Mennen vessel resistance model" \
+    --budget 8000 --mode keyword
+
+python -m scripts.wiki.code_index /path/to/windmar-demo \
+    --cache cache/windmar-code-index.json
+```
+
 ## How to run on Cal.com TRPC / Trigger.dev / your repo
 
 ```bash
