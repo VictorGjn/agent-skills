@@ -316,6 +316,146 @@ def find_freshness_expired(
     return flags, warnings
 
 
+# Heading regex: matches `^# Title`, `## Title`, etc. Captures the title
+# text without the leading `#`s or trailing whitespace. Used by
+# find_broken_refs to validate `[[slug#Section]]` anchors against the
+# target page's actual headings.
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _extract_headings(body: str) -> set[str]:
+    """Return the set of heading titles (verbatim + lowercased + slug-form)
+    extracted from a markdown body. Used to resolve section anchors.
+
+    Three normalized forms are returned per heading so anchor matching is
+    forgiving:
+        - Verbatim:    ``OAuth Flow``
+        - Lowercased:  ``oauth flow``
+        - Slug-form:   ``oauth-flow`` (lowercase, hyphens for spaces, alnum)
+    """
+    out: set[str] = set()
+    for m in _HEADING_RE.finditer(body):
+        title = m.group(2).strip()
+        if not title:
+            continue
+        out.add(title)
+        out.add(title.lower())
+        # Slug normalization mirrors wiki_init.slugify.
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        if slug:
+            out.add(slug)
+    return out
+
+
+def find_broken_refs(
+    pages: dict[str, dict],
+    *,
+    code_index: dict | None = None,
+) -> list[dict]:
+    """Return broken-reference flags for every wikiref in every page body.
+
+    Three failure modes (PRD AC2):
+
+    - ``page_not_found`` — slug/section ref whose target slug isn't in
+      ``pages`` (also fires for path-targeted section refs, e.g. ``docs/foo.md``).
+    - ``section_not_found`` — section ref whose target page exists but the
+      anchor doesn't match any heading.
+    - ``file_not_found`` — code ref whose target path isn't in
+      ``code_index`` (skipped entirely if ``code_index`` is None — callers
+      with docs-only brains don't need codebase validation).
+    - ``symbol_not_found`` — code ref whose target file is indexed but the
+      symbol doesn't resolve.
+
+    Per ``plan/PRD-latmd-integration.md`` Phase 2 acceptance criteria.
+    """
+    flags: list[dict] = []
+    code_files: dict = (code_index or {}).get("files", {})
+    seen: set[tuple[str, str, str]] = set()  # dedupe (source, target, anchor)
+
+    for src_slug, src in pages.items():
+        body = src["body"]
+        for ref in parse_wikirefs(body):
+            anchor = ref.anchor or ""
+            key = (src_slug, ref.target, anchor)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if ref.kind == "slug":
+                if ref.target not in pages:
+                    flags.append({
+                        "rule": "broken-ref",
+                        "source_slug": src_slug,
+                        "ref": ref.raw,
+                        "kind": ref.kind,
+                        "reason": "page_not_found",
+                        "target": ref.target,
+                        "anchor": None,
+                    })
+
+            elif ref.kind == "section":
+                # Path-targeted section refs (e.g. `docs/auth.md#Foo`) aren't
+                # CE-native pages today; flag as page_not_found. Phase 2.5
+                # may add doc-file resolution.
+                if ref.target not in pages:
+                    flags.append({
+                        "rule": "broken-ref",
+                        "source_slug": src_slug,
+                        "ref": ref.raw,
+                        "kind": ref.kind,
+                        "reason": "page_not_found",
+                        "target": ref.target,
+                        "anchor": ref.anchor,
+                    })
+                else:
+                    target_page = pages[ref.target]
+                    headings = _extract_headings(target_page["body"])
+                    # Match against verbatim, lowercase, or slug-normalized.
+                    candidates = {
+                        ref.anchor or "",
+                        (ref.anchor or "").lower(),
+                        re.sub(r"[^a-z0-9]+", "-", (ref.anchor or "").lower()).strip("-"),
+                    }
+                    if not (candidates & headings):
+                        flags.append({
+                            "rule": "broken-ref",
+                            "source_slug": src_slug,
+                            "ref": ref.raw,
+                            "kind": ref.kind,
+                            "reason": "section_not_found",
+                            "target": ref.target,
+                            "anchor": ref.anchor,
+                        })
+
+            elif ref.kind == "code":
+                if code_index is None:
+                    continue  # Caller didn't supply code_index; nothing to check.
+                file_entry = code_files.get(ref.target)
+                if file_entry is None:
+                    flags.append({
+                        "rule": "broken-ref",
+                        "source_slug": src_slug,
+                        "ref": ref.raw,
+                        "kind": ref.kind,
+                        "reason": "file_not_found",
+                        "target": ref.target,
+                        "anchor": ref.anchor,
+                    })
+                elif ref.anchor:
+                    matches = [s for s in file_entry["symbols"] if s["name"] == ref.anchor]
+                    if not matches:
+                        flags.append({
+                            "rule": "broken-ref",
+                            "source_slug": src_slug,
+                            "ref": ref.raw,
+                            "kind": ref.kind,
+                            "reason": "symbol_not_found",
+                            "target": ref.target,
+                            "anchor": ref.anchor,
+                        })
+    return flags
+
+
 def find_slug_collision_near_misses(wiki_dir: Path) -> list[dict]:
     """Rule 3: read collision footnotes from _index.md and surface them."""
     flags: list[dict] = []
@@ -352,6 +492,7 @@ def render_proposals(
     freshness_expired: list[dict],
     slug_collisions: list[dict],
     warnings: list[str],
+    broken_refs: list[dict] | None = None,
     now_iso: str | None = None,
 ) -> str:
     """Format the audit report as markdown for audit/proposals.md."""
@@ -403,6 +544,25 @@ def render_proposals(
         lines.append("_(none)_")
     lines.append("")
 
+    # Phase 2 (CE x lat.md): broken wikiref / code-symbol / section section.
+    # Always rendered, even when broken_refs is None or empty, so consumers
+    # can pin "Broken refs" as a stable section name in lat_check output.
+    lines.append("## Broken refs")
+    lines.append("")
+    if broken_refs:
+        for f in broken_refs:
+            target = f.get("target", "")
+            anchor_str = f"#{f['anchor']}" if f.get("anchor") else ""
+            reason = f.get("reason", "unknown").replace("_", " ")
+            lines.append(
+                f"- `{f['source_slug']}` -> {f['ref']} "
+                f"(target=`{target}{anchor_str}`, kind={f.get('kind')}, "
+                f"reason: {reason})"
+            )
+    else:
+        lines.append("_(none)_")
+    lines.append("")
+
     lines.append("## Slug collisions (near-misses)")
     lines.append("")
     if slug_collisions:
@@ -419,11 +579,20 @@ def render_proposals(
 
 
 def run_audit(brain_dir: Path, *, now: datetime | None = None,
-              now_iso: str | None = None) -> dict:
-    """Execute the three rules and write audit/proposals.md.
+              now_iso: str | None = None,
+              code_index: dict | None = None) -> dict:
+    """Execute the four rules and write audit/proposals.md.
 
-    Returns a dict {stale_supersessions, freshness_expired, slug_collisions,
-    warnings, proposals_path} for callers (CLI prints; MCP wrapper returns).
+    Args:
+        brain_dir: Brain root with `wiki/`, `audit/` etc.
+        now: For freshness_expired's deterministic-test override.
+        now_iso: Same, for the proposals.md timestamp.
+        code_index: Optional code_index (from `wiki.code_index.load_code_index`).
+            When provided, the broken-ref rule validates `[[src/file#symbol]]`
+            references against the index. When None, only slug/section refs
+            are validated; code refs are skipped.
+
+    Returns a dict with all rule outputs for the CLI / MCP wrapper.
     """
     brain_dir = Path(brain_dir)
     wiki_dir = brain_dir / "wiki"
@@ -435,12 +604,14 @@ def run_audit(brain_dir: Path, *, now: datetime | None = None,
     freshness_expired, freshness_warnings = find_freshness_expired(pages, now=now)
     warnings = warnings + freshness_warnings
     slug_collisions = find_slug_collision_near_misses(wiki_dir)
+    broken_refs = find_broken_refs(pages, code_index=code_index)
 
     proposals = render_proposals(
         stale_supersessions=stale_supersessions,
         freshness_expired=freshness_expired,
         slug_collisions=slug_collisions,
         warnings=warnings,
+        broken_refs=broken_refs,
         now_iso=now_iso,
     )
     proposals_path = brain_dir / _PROPOSALS_RELPATH
@@ -451,6 +622,7 @@ def run_audit(brain_dir: Path, *, now: datetime | None = None,
         "stale_supersessions": stale_supersessions,
         "freshness_expired": freshness_expired,
         "slug_collisions": slug_collisions,
+        "broken_refs": broken_refs,
         "warnings": warnings,
         "proposals_path": proposals_path,
     }
@@ -462,6 +634,17 @@ def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _print_audit_summary(result: dict) -> None:
+    """Shared CLI printer used by audit.main and lat_check.main."""
+    print(
+        f"audit: {len(result['stale_supersessions'])} stale-references, "
+        f"{len(result['freshness_expired'])} freshness-expired, "
+        f"{len(result['slug_collisions'])} slug-collisions, "
+        f"{len(result.get('broken_refs', []))} broken-refs, "
+        f"{len(result['warnings'])} validation-warnings -> {result['proposals_path']}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Auditor v1: scan brain/wiki/, write audit/proposals.md")
     parser.add_argument("--brain", required=True, type=Path, help="Brain root directory")
@@ -471,10 +654,12 @@ def main(argv: list[str] | None = None) -> int:
     n_stale = len(result["stale_supersessions"])
     n_fresh = len(result["freshness_expired"])
     n_coll = len(result["slug_collisions"])
+    n_broken = len(result.get("broken_refs", []))
     n_warn = len(result["warnings"])
     print(
         f"audit: {n_stale} stale-references, {n_fresh} freshness-expired, "
-        f"{n_coll} slug-collisions, {n_warn} validation-warnings -> "
+        f"{n_coll} slug-collisions, {n_broken} broken-refs, "
+        f"{n_warn} validation-warnings -> "
         f"{result['proposals_path']}",
         file=sys.stderr,
     )
