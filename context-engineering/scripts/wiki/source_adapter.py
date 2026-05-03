@@ -24,6 +24,9 @@ the spec and slot into this same ABC when shipped (Wave 1).
 """
 from __future__ import annotations
 
+import os
+import re
+import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -322,3 +325,209 @@ def _first_meaningful_paragraph(text: str) -> str:
 
 # WorkspaceSource and GithubRepoSource land later (per phase-1.md §1.4 +
 # Wave 2 scope). The Source ABC above is what they slot into when shipped.
+
+
+# `// @lat: [[entity-slug]]` (TS/JS/Java/Go/Rust/C/C++/C#/Kotlin/Scala/PHP/Swift)
+# `# @lat: [[entity-slug]]`  (Python/Ruby)
+# Anchored at line start; whitespace tolerant on either side of the colon.
+_AT_LAT_RE = re.compile(
+    r"^[ \t]*(?://|\#)[ \t]*@lat:[ \t]*\[\[\s*(?P<ref>[^\]]+?)\s*\]\][ \t]*$",
+    re.MULTILINE,
+)
+
+
+class SourceCommentBacklinkSource(Source):
+    """Pull-shaped Source: walks a codebase and emits one CE event per
+    ``// @lat:`` (or ``# @lat:``) source-code comment.
+
+    Phase 3 of CE x lat.md interop. Lets developers annotate implementation
+    code with explicit backlinks to wiki entities; the auditor + retrieval
+    surface then know which symbols implement which concept WITHOUT relying
+    on heuristic AST extraction alone.
+
+    Each comment becomes a code-backlink event::
+
+        {
+            'source_type':   'code-backlink',
+            'source_ref':    'src/foo.ts:142',         # path:line
+            'file_id':       'sha256[:12] of file content',
+            'claim':         '<surrounding 5 lines>',
+            'entity_hint':   'auth-middleware',         # parsed from [[ref]]
+            'symbol':        'validateToken',           # AST-resolved
+        }
+
+    The events flow through the existing ``events.append_event`` path; the
+    consolidator already dedupes by ``(source_type, source_ref)``, so each
+    comment lands as ONE source on the target entity's wiki page with zero
+    ``wiki_init`` change. ``symbol`` causes wiki_init to render the source
+    as ``[[src/path#symbol]]`` (Phase 1 forward-looking branch).
+    """
+
+    SOURCE_KIND = "code-backlink"
+
+    # Mirror code_index's vendor-skip + extension config so this Source sees
+    # the same file population the auditor will validate against.
+    SKIP_DIRS: frozenset[str] = frozenset({
+        ".git", "node_modules", "__pycache__", ".cache", "assets",
+        "screenshots", ".next", ".turbo", "dist", "build", "out", "coverage",
+        ".vscode", ".idea", "vendor", "target",
+    })
+    MAX_FILE_SIZE = 200_000
+    SURROUND_LINES = 2  # emit `claim` as 2 lines before + the comment line + 2 after
+
+    def __init__(self, repo_root: Path, events_dir: Path):
+        self.repo_root = Path(repo_root).resolve()
+        self.events_dir = Path(events_dir)
+
+    def list_artifacts(self) -> list[str]:
+        """Enumerate every code file with at least one ``@lat:`` comment.
+
+        Pre-grep so callers (and tests) see only files that produce events.
+        """
+        # Lazy import: ast_extract pulls tree-sitter; only load if walked.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ast_extract import EXT_TO_LANG  # noqa: E402
+        out: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(self.repo_root):
+            dirnames[:] = sorted(d for d in dirnames if d not in self.SKIP_DIRS)
+            for name in filenames:
+                ext = Path(name).suffix.lower()
+                if ext not in EXT_TO_LANG:
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    if p.stat().st_size > self.MAX_FILE_SIZE:
+                        continue
+                    text = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if "@lat:" not in text:
+                    continue
+                out.append(str(p.relative_to(self.repo_root)).replace(os.sep, "/"))
+        out.sort()
+        return out
+
+    def fetch(self, ref: str) -> bytes:
+        path = self.repo_root / ref
+        return path.read_bytes()
+
+    def metadata(self, ref: str) -> dict:
+        path = self.repo_root / ref
+        try:
+            stat = path.stat()
+        except OSError:
+            return {"ref": ref, "exists": False}
+        return {"ref": ref, "mtime": int(stat.st_mtime), "size": stat.st_size, "exists": True}
+
+    def emit_events(self, events: list[dict] | None = None,
+                    *, ref: str | None = None,
+                    content: bytes | None = None) -> int:
+        """Three call shapes (mirrors GraphifyWikiSource):
+
+        - ``emit_events(events=[...])`` -- caller-supplied events; passes
+          through to ``EventStreamSource``.
+        - ``emit_events(ref="src/foo.ts")`` -- parse ONE artifact (auto-fetch
+          unless ``content`` supplied).
+        - ``emit_events()`` -- walk the repo and emit for every comment.
+        """
+        if events is not None:
+            return EventStreamSource(self.events_dir).emit_events(events)
+
+        if ref is not None:
+            payload = content if content is not None else self.fetch(ref)
+            return self._emit_from_artifact(ref, payload)
+
+        appended = 0
+        for art_ref in self.list_artifacts():
+            try:
+                payload = self.fetch(art_ref)
+            except OSError:
+                continue
+            appended += self._emit_from_artifact(art_ref, payload)
+        return appended
+
+    def _emit_from_artifact(self, ref: str, payload: bytes) -> int:
+        """Extract every ``@lat:`` comment in one source file. Returns the
+        count of events appended.
+        """
+        try:
+            text = payload.decode("utf-8", errors="replace")
+        except (UnicodeDecodeError, AttributeError):
+            return 0
+        # Normalize line endings to LF so the `$` anchor in _AT_LAT_RE works
+        # on Windows-authored files (CRLF leaves a `\r` before `\n` which
+        # the regex's `[ \t]*$` rejects). UTF-16 BOMs are decoded by
+        # decode() above.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if "@lat:" not in text:
+            return 0
+
+        # Lazy AST extraction so files without comments don't pay the cost.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ast_extract import extract_symbols, lang_from_path  # noqa: E402
+        from .wikiref import parse_wikiref  # noqa: E402
+
+        lang = lang_from_path(ref)
+        symbols = extract_symbols(lang, text) if lang else []
+
+        # Stable file_id: sha256[:12] of content. Same shape used elsewhere
+        # in CE caches; collision-safe up to ~16M files.
+        import hashlib
+        file_id = "sha256:" + hashlib.sha256(payload).hexdigest()[:12]
+
+        lines = text.splitlines()
+        appended = 0
+        for m in _AT_LAT_RE.finditer(text):
+            line_no = text.count("\n", 0, m.start()) + 1  # 1-based
+            ref_inside = m.group("ref")
+            wikiref = parse_wikiref(ref_inside)
+            if wikiref is None:
+                continue  # Malformed [[...]]; skip silently.
+
+            # Use parse_wikiref's slug property: for slug/section refs,
+            # this is the target verbatim; for code refs, it's the
+            # basename without extension. The latter is unusual inside an
+            # @lat: annotation but harmless.
+            entity_hint = wikiref.slug or wikiref.target
+
+            symbol = self._symbol_at_line(symbols, line_no)
+            claim = self._surrounding_lines(lines, line_no)
+
+            append_event(
+                self.events_dir,
+                source_type=self.SOURCE_KIND,
+                source_ref=f"{ref}:{line_no}",
+                file_id=file_id,
+                claim=claim,
+                entity_hint=entity_hint,
+                symbol=symbol,
+            )
+            appended += 1
+        return appended
+
+    def _symbol_at_line(self, symbols: list[dict], line_no: int) -> str | None:
+        """Return the name of the innermost symbol whose [line, end_line]
+        range contains ``line_no``. Innermost wins -- a method inside a
+        class wins over the class. Returns None when no symbol contains
+        the line (e.g., the comment is at module top-level).
+        """
+        best: dict | None = None
+        best_size = float("inf")
+        for s in symbols:
+            start = s.get("line", 0)
+            end = s.get("end_line", 0)
+            if start <= line_no <= end:
+                size = end - start
+                if size < best_size:
+                    best = s
+                    best_size = size
+        return best["name"] if best else None
+
+    def _surrounding_lines(self, lines: list[str], line_no: int) -> str:
+        lo = max(0, line_no - 1 - self.SURROUND_LINES)
+        hi = min(len(lines), line_no + self.SURROUND_LINES)
+        snippet = "\n".join(lines[lo:hi])
+        # Cap claim at 280 chars so the events log stays scannable.
+        if len(snippet) > 280:
+            snippet = snippet[:277] + "..."
+        return snippet

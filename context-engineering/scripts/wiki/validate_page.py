@@ -37,7 +37,17 @@ from typing import Any
 # documented remedy: validate_page rejects 1.0 pages, operator runs
 # `wiki_init.py --rebuild`, ids regenerate from the (unchanged) events.
 # events.SCHEMA_VERSION stays at 1.0 — events don't carry entity ids.
-SCHEMA_VERSION = "1.1"
+#
+# 1.1 -> 1.2: `code` added to _VALID_KINDS for entities sourced primarily
+# from `// @lat: [[ref]]` comments (Phase 3 of CE x lat.md interop). The
+# kind is informational -- consumers (packer, audit) treat it like
+# `concept` for routing today; the distinction matters when a future
+# phase wants to route code-backlinked entities through a different
+# retrieval path (e.g. always-include in `pack --task fix`).
+# Refusal-and-rebuild path is the documented escape hatch: any pre-1.2
+# brain runs `wiki_init.py --rebuild` to regenerate frontmatter under
+# the new version.
+SCHEMA_VERSION = "1.2"
 
 # Required frontmatter keys per phase-1.md §1.2 (after PR #20 schema additions).
 # `kind: decision` adds three more (supersedes/superseded_by/valid_until); those
@@ -50,6 +60,10 @@ _REQUIRED_KEYS_DECISION = {"supersedes", "superseded_by", "valid_until"}
 
 _VALID_KINDS = {
     "concept", "component", "decision", "actor", "process", "metric",
+    # Phase 3 (CE x lat.md): code-backlinked entities. Emitted by
+    # wiki_init when an entity's only source events are from
+    # SourceCommentBacklinkSource (`source_type: code-backlink`).
+    "code",
 }
 
 # Frontmatter delimiter pattern: lines of three or more dashes. We don't

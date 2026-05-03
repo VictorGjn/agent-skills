@@ -32,7 +32,7 @@ _HEADER = (
     "title: {title}\n"
     "slug: {slug}\n"
     "scope: default\n"
-    "schema_version: \"1.1\"\n"
+    "schema_version: \"1.2\"\n"
     "confidence: 0.80\n"
     "updated: 2026-05-01T00:00:00Z\n"
     "last_verified_at: 2026-05-01T00:00:00Z\n"
