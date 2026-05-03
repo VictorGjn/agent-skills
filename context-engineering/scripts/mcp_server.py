@@ -11,6 +11,7 @@ Run:     uv run fastmcp dev mcp_server.py
 """
 
 import json
+import re
 import sys
 import os
 from pathlib import Path
@@ -645,9 +646,455 @@ def wiki_audit(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Phase 4 (CE x lat.md): five new MCP tools mapping lat.md's verb surface
+# (locate / section / refs / search / expand) onto CE primitives. Each
+# tool is a thin wrapper over wikiref + code_index + existing wiki
+# helpers. Brings MCP surface from 9 -> 14 tools.
+# ──────────────────────────────────────────────────────────────────
+
+
+def _resolve_code_index_path(brain: str | None) -> Path:
+    """Resolve the code_index.json path: <brain>/../cache/code_index.json
+    by default. Callers can override by setting CE_CODE_INDEX in env.
+    """
+    env_idx = os.environ.get("CE_CODE_INDEX")
+    if env_idx:
+        return Path(env_idx).resolve()
+    return _resolve_brain_path(brain).parent / "cache" / "code_index.json"
+
+
+def _slice_heading_section(body: str, anchor: str) -> str | None:
+    """Extract the body slice from heading ``anchor`` to the next heading
+    at the same or higher level. Case-insensitive + slug-normalized match.
+    Returns None when no heading matches.
+    """
+    import re as _re
+    heading_re = _re.compile(r"^(#{1,6})\s+(.+?)\s*$", _re.MULTILINE)
+    matches = list(heading_re.finditer(body))
+    if not matches:
+        return None
+    norm_anchor = anchor.lower().strip()
+    anchor_slug = _re.sub(r"[^a-z0-9]+", "-", norm_anchor).strip("-")
+    found_idx: int | None = None
+    found_level = 0
+    for i, m in enumerate(matches):
+        title = m.group(2).strip()
+        title_slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        if title == anchor or title.lower() == norm_anchor or title_slug == anchor_slug:
+            found_idx = i
+            found_level = len(m.group(1))
+            break
+    if found_idx is None:
+        return None
+    start_pos = matches[found_idx].start()
+    end_pos = len(body)
+    for j in range(found_idx + 1, len(matches)):
+        if len(matches[j].group(1)) <= found_level:
+            end_pos = matches[j].start()
+            break
+    return body[start_pos:end_pos].rstrip() + "\n"
+
+
+def _slice_symbol_range(repo_root: Path, rel_path: str, line: int, end_line: int) -> str | None:
+    """Read the source file and return the [line, end_line] slice, fenced
+    in a code block. Returns None on read failure.
+    """
+    p = repo_root / rel_path
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    lo = max(0, line - 1)
+    hi = min(len(lines), end_line)
+    body = "\n".join(lines[lo:hi])
+    return f"```\n{body}\n```\n"
+
+
+def _parse_ref_argument(ref: str):
+    """Accept either ``[[foo#bar]]`` or ``foo#bar`` and return a ``WikiRef``.
+    """
+    from wiki.wikiref import parse_wikiref  # noqa: E402
+    inside = ref.strip()
+    if inside.startswith("[[") and inside.endswith("]]"):
+        inside = inside[2:-2]
+    return parse_wikiref(inside)
+
+
+@mcp.tool(name="lat.locate")
+def lat_locate(
+    ref: str,
+    brain: str | None = None,
+) -> str:
+    """Resolve a wiki/code ref to its location.
+
+    Phase 4 of CE x lat.md interop. Mirrors lat.md's ``lat locate``.
+
+    Accepts either ``[[slug#section]]`` or the bare ``slug#section`` form
+    (caller may strip the brackets). Returns a one-line markdown record:
+    file path, line range (for code refs), or "not found" with the
+    parsed ref shape for diagnostics.
+    """
+    parsed = _parse_ref_argument(ref)
+    _emit_telemetry("tool.call", tool="lat.locate", ref=ref)
+
+    if parsed is None:
+        _emit_telemetry("tool.result", tool="lat.locate", status="error", reason="malformed_ref")
+        return f"<!-- lat.locate: malformed ref `{ref}` -->"
+
+    brain_dir = _resolve_brain_path(brain)
+
+    if parsed.kind in ("slug", "section"):
+        page = brain_dir / "wiki" / f"{parsed.target}.md"
+        if not page.exists():
+            _emit_telemetry("tool.result", tool="lat.locate", status="ok", found=False, kind=parsed.kind)
+            return f"<!-- lat.locate: page `{parsed.target}` not found in {brain_dir / 'wiki'} -->"
+        loc = f"- **file**: `{page.relative_to(brain_dir.parent) if brain_dir.parent in page.parents else page}`"
+        if parsed.anchor:
+            loc += f"\n- **section**: `{parsed.anchor}`"
+            if parsed.sub_anchor:
+                loc += f" / `{parsed.sub_anchor}`"
+        _emit_telemetry("tool.result", tool="lat.locate", status="ok", found=True, kind=parsed.kind)
+        return loc + "\n"
+
+    # kind == "code"
+    code_index_path = _resolve_code_index_path(brain)
+    try:
+        from wiki.code_index import load_code_index, resolve_symbol
+        idx = load_code_index(code_index_path)
+    except (FileNotFoundError, ValueError) as e:
+        _emit_telemetry("tool.result", tool="lat.locate", status="error", reason="no_code_index")
+        return f"<!-- lat.locate: no code index ({e}) -->"
+    file_entry = idx.get("files", {}).get(parsed.target)
+    if file_entry is None:
+        _emit_telemetry("tool.result", tool="lat.locate", status="ok", found=False, kind="code")
+        return f"<!-- lat.locate: file `{parsed.target}` not in code index -->"
+    if not parsed.anchor:
+        loc = f"- **file**: `{parsed.target}` (no symbol anchor)"
+    else:
+        matches = resolve_symbol(idx, parsed.target, parsed.anchor)
+        if not matches:
+            _emit_telemetry("tool.result", tool="lat.locate", status="ok", found=False, kind="code")
+            return f"<!-- lat.locate: symbol `{parsed.anchor}` not in `{parsed.target}` -->"
+        s = matches[0]
+        loc = f"- **file**: `{parsed.target}`\n- **symbol**: `{parsed.anchor}` ({s['kind']}, lines {s['line']}-{s['end_line']})"
+    _emit_telemetry("tool.result", tool="lat.locate", status="ok", found=True, kind="code")
+    return loc + "\n"
+
+
+@mcp.tool(name="lat.section")
+def lat_section(
+    ref: str,
+    brain: str | None = None,
+    budget: int = 4000,
+) -> str:
+    """Return the body slice for a given ref.
+
+    Phase 4 of CE x lat.md interop. Mirrors lat.md's ``lat section``.
+
+    - Slug ref: returns the entire page body (frontmatter stripped).
+    - Section ref: returns the section under that heading (down to the
+      next same-or-higher heading).
+    - Code ref: returns the symbol's line range as a code block.
+
+    Output is hard-capped at ``budget * 4`` characters (a token-to-char
+    rough conversion) so a 50KB page doesn't tank a small budget.
+    """
+    parsed = _parse_ref_argument(ref)
+    _emit_telemetry("tool.call", tool="lat.section", ref=ref, budget=budget)
+
+    if parsed is None:
+        _emit_telemetry("tool.result", tool="lat.section", status="error", reason="malformed_ref")
+        return f"<!-- lat.section: malformed ref `{ref}` -->"
+
+    brain_dir = _resolve_brain_path(brain)
+    char_cap = budget * 4
+
+    if parsed.kind in ("slug", "section"):
+        page = brain_dir / "wiki" / f"{parsed.target}.md"
+        if not page.exists():
+            _emit_telemetry("tool.result", tool="lat.section", status="ok", found=False)
+            return f"<!-- lat.section: page `{parsed.target}` not found -->"
+        text = page.read_text(encoding="utf-8")
+        body_match = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL).match(text)
+        body = text[body_match.end():] if body_match else text
+        if parsed.kind == "section" and parsed.anchor:
+            slice_ = _slice_heading_section(body, parsed.anchor)
+            if slice_ is None:
+                _emit_telemetry("tool.result", tool="lat.section", status="ok", found=False)
+                return f"<!-- lat.section: heading `{parsed.anchor}` not found in `{parsed.target}` -->"
+            body = slice_
+        if len(body) > char_cap:
+            body = body[:char_cap] + f"\n<!-- truncated at budget*4={char_cap} chars -->"
+        _emit_telemetry("tool.result", tool="lat.section", status="ok", found=True, kind=parsed.kind)
+        return body
+
+    # kind == "code"
+    code_index_path = _resolve_code_index_path(brain)
+    try:
+        from wiki.code_index import load_code_index, resolve_symbol
+        idx = load_code_index(code_index_path)
+    except (FileNotFoundError, ValueError) as e:
+        _emit_telemetry("tool.result", tool="lat.section", status="error", reason="no_code_index")
+        return f"<!-- lat.section: no code index ({e}) -->"
+    file_entry = idx.get("files", {}).get(parsed.target)
+    if file_entry is None:
+        _emit_telemetry("tool.result", tool="lat.section", status="ok", found=False)
+        return f"<!-- lat.section: file `{parsed.target}` not in code index -->"
+    matches = resolve_symbol(idx, parsed.target, parsed.anchor) if parsed.anchor else []
+    if not matches:
+        _emit_telemetry("tool.result", tool="lat.section", status="ok", found=False)
+        return f"<!-- lat.section: symbol `{parsed.anchor}` not in `{parsed.target}` -->"
+    s = matches[0]
+    repo_root = Path(idx.get("root", ".")).resolve()
+    snippet = _slice_symbol_range(repo_root, parsed.target, s["line"], s["end_line"])
+    if snippet is None:
+        return f"<!-- lat.section: could not read `{parsed.target}` -->"
+    if len(snippet) > char_cap:
+        snippet = snippet[:char_cap] + f"\n<!-- truncated at budget*4={char_cap} chars -->"
+    _emit_telemetry("tool.result", tool="lat.section", status="ok", found=True, kind="code")
+    return snippet
+
+
+@mcp.tool(name="lat.refs")
+def lat_refs(
+    target: str,
+    brain: str | None = None,
+) -> str:
+    """List every wiki page that references ``target``.
+
+    Phase 4 of CE x lat.md interop. Mirrors lat.md's ``lat refs``.
+
+    Walks ``brain/wiki/*.md``, parses every wikiref in each page body,
+    and returns one bullet per (source_page, ref) pair where the ref's
+    target equals the requested target (or matches as a code-ref slug).
+    """
+    # Codex P1 (PR #32): docs claim bracketed and bare refs both work for
+    # the lat.* tools, but lat.refs only stripped whitespace. Strip the
+    # `[[...]]` envelope here so `lat.refs("[[token-store]]")` matches the
+    # same inbound refs as `lat.refs("token-store")`.
+    target = target.strip()
+    if target.startswith("[[") and target.endswith("]]"):
+        target = target[2:-2].strip()
+    _emit_telemetry("tool.call", tool="lat.refs", target=target)
+
+    brain_dir = _resolve_brain_path(brain)
+    wiki_dir = brain_dir / "wiki"
+    if not wiki_dir.exists():
+        _emit_telemetry("tool.result", tool="lat.refs", status="ok", found=0)
+        return f"<!-- lat.refs: no wiki/ at {brain_dir} -->"
+
+    from wiki.wikiref import parse_wikirefs
+    seen: set[tuple[str, str]] = set()
+    hits: list[tuple[str, str, str]] = []
+    for page in sorted(wiki_dir.glob("*.md")):
+        if page.name.startswith("_"):
+            continue
+        try:
+            text = page.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for r in parse_wikirefs(text):
+            if r.target == target or r.slug == target:
+                key = (page.stem, r.raw)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append((page.stem, r.kind, r.raw))
+
+    _emit_telemetry("tool.result", tool="lat.refs", status="ok", found=len(hits))
+    if not hits:
+        return f"<!-- lat.refs: no inbound refs to `{target}` -->"
+    lines = [f"# Inbound refs to `{target}` ({len(hits)} found)", ""]
+    for src, kind, raw in hits:
+        lines.append(f"- `{src}` -> {raw} (kind={kind})")
+    lines.append("")
+    return "\n".join(lines)
+
+
+@mcp.tool(name="lat.search")
+def lat_search(
+    query: str,
+    brain: str | None = None,
+    budget: int = 4000,
+) -> str:
+    """Substring search across wiki page bodies AND code-index symbols.
+
+    Phase 4 of CE x lat.md interop. Mirrors lat.md's ``lat search``.
+
+    Case-insensitive substring match. Returns a single markdown blob
+    with two sections: matching wiki pages (one bullet per page) and
+    matching code symbols (one bullet per symbol). Caps total output
+    at ``budget * 4`` characters.
+    """
+    query = query.strip()
+    _emit_telemetry("tool.call", tool="lat.search", query=query)
+    if not query:
+        # Codex P2 (PR #32): every `tool.call` must have a matching
+        # `tool.result` per SPEC-mcp.md §9. Empty-query early return
+        # previously left a dangling invocation in telemetry pipelines.
+        _emit_telemetry("tool.result", tool="lat.search", status="error",
+                        reason="empty_query")
+        return "<!-- lat.search: empty query -->"
+
+    brain_dir = _resolve_brain_path(brain)
+    char_cap = budget * 4
+    needle = query.lower()
+
+    wiki_hits: list[tuple[str, str]] = []
+    wiki_dir = brain_dir / "wiki"
+    if wiki_dir.exists():
+        for page in sorted(wiki_dir.glob("*.md")):
+            if page.name.startswith("_"):
+                continue
+            try:
+                text = page.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if needle in text.lower():
+                # Use the first matching line as the snippet preview.
+                for line in text.splitlines():
+                    if needle in line.lower():
+                        wiki_hits.append((page.stem, line.strip()[:120]))
+                        break
+
+    symbol_hits: list[tuple[str, dict]] = []
+    code_index_path = _resolve_code_index_path(brain)
+    try:
+        from wiki.code_index import load_code_index
+        idx = load_code_index(code_index_path)
+        for path, entry in idx.get("files", {}).items():
+            for s in entry["symbols"]:
+                if needle in s["name"].lower():
+                    symbol_hits.append((path, s))
+    except (FileNotFoundError, ValueError):
+        pass  # No code_index = wiki-only search.
+
+    out: list[str] = [f"# Search results for `{query}`", ""]
+    out.append(f"## Wiki pages ({len(wiki_hits)})")
+    out.append("")
+    for slug, preview in wiki_hits[:50]:
+        out.append(f"- `{slug}`: {preview}")
+    if not wiki_hits:
+        out.append("_(none)_")
+    out.append("")
+    out.append(f"## Code symbols ({len(symbol_hits)})")
+    out.append("")
+    for path, s in symbol_hits[:50]:
+        ex = "*" if s.get("exported") else " "
+        out.append(f"- {ex}`{path}#{s['name']}` ({s['kind']}, lines {s['line']}-{s['end_line']})")
+    if not symbol_hits:
+        out.append("_(none)_")
+    out.append("")
+    body = "\n".join(out)
+    if len(body) > char_cap:
+        body = body[:char_cap] + f"\n<!-- truncated at budget*4={char_cap} chars -->"
+    _emit_telemetry("tool.result", tool="lat.search", status="ok",
+                    wiki_hits=len(wiki_hits), symbol_hits=len(symbol_hits))
+    return body
+
+
+@mcp.tool(name="lat.expand")
+def lat_expand(
+    ref: str,
+    brain: str | None = None,
+    depth: int = 1,
+    budget: int = 8000,
+) -> str:
+    """Recursive expansion: fetch ``ref`` plus everything it links to (up to ``depth`` hops).
+
+    Phase 4 of CE x lat.md interop. Mirrors lat.md's ``lat expand``.
+
+    BFS over wikirefs. Each node's content (via ``lat.section`` semantics)
+    is concatenated into the output. Visited refs are deduplicated.
+    Hard-capped at ``budget * 4`` characters; further refs are noted but
+    not expanded once the cap is hit.
+    """
+    parsed = _parse_ref_argument(ref)
+    _emit_telemetry("tool.call", tool="lat.expand", ref=ref, depth=depth, budget=budget)
+    if parsed is None:
+        return f"<!-- lat.expand: malformed ref `{ref}` -->"
+
+    char_cap = budget * 4
+
+    # Helper: fetch one section by ref, reusing lat.section logic. Returning
+    # raw markdown without the headers we add below.
+    def _fetch(ref_str: str) -> str:
+        return lat_section(ref=ref_str, brain=brain, budget=budget)
+
+    from wiki.wikiref import parse_wikirefs
+    visited: set[str] = set()
+    out_parts: list[str] = []
+    queue: list[tuple[int, str]] = [(0, parsed.raw or f"[[{ref.strip()}]]")]
+
+    while queue:
+        d, ref_raw = queue.pop(0)
+        if ref_raw in visited:
+            continue
+        visited.add(ref_raw)
+        section = _fetch(ref_raw)
+        out_parts.append(f"### {ref_raw} (depth={d})\n\n{section}\n")
+        # Stop expansion once budget exhausted.
+        if sum(len(p) for p in out_parts) >= char_cap:
+            out_parts.append(f"<!-- lat.expand: char cap {char_cap} reached at depth {d} -->")
+            break
+        if d >= depth:
+            continue
+        for inner_ref in parse_wikirefs(section):
+            if inner_ref.raw not in visited:
+                queue.append((d + 1, inner_ref.raw))
+
+    body = "\n".join(out_parts)
+    if len(body) > char_cap:
+        body = body[:char_cap] + f"\n<!-- truncated at budget*4={char_cap} chars -->"
+    _emit_telemetry("tool.result", tool="lat.expand", status="ok",
+                    refs_visited=len(visited))
+    return body
+
+
+# ──────────────────────────────────────────────────────────────────
+
+
+def _list_tools() -> list[str]:
+    """Return the registered MCP tool names. Used by --list-tools below.
+
+    The fastmcp framework keeps its registry private; we scan the source
+    file for the two decorator shapes used in this module:
+
+    - explicit name form: at-mcp dot tool with a name= keyword argument
+    - default-name form:  at-mcp dot tool with no arguments, name = def
+
+    The placeholder above intentionally avoids the literal regex pattern
+    so this docstring isn't matched by the scanner itself.
+
+    Filters out the ellipsis token that might appear when the decorator
+    pattern shows up inside a docstring example -- ``...`` is never a
+    valid MCP tool name.
+    """
+    import re as _re
+    src_path = Path(__file__)
+    src = src_path.read_text(encoding="utf-8")
+    explicit = _re.findall(r'@mcp\.tool\(name="([^"]+)"\)', src)
+    default_names = _re.findall(
+        r'@mcp\.tool\(\)\s*\n\s*def\s+(\w+)',
+        src,
+    )
+    names = set(explicit) | set(default_names)
+    # Defensive filter: a docstring example accidentally matching the
+    # decorator regex would surface as `...` or other non-identifier text;
+    # MCP tool names must be `<segment>(.<segment>)*` of word chars.
+    valid = _re.compile(r'^\w+(?:\.\w+)*$')
+    return sorted(n for n in names if valid.match(n))
 
 
 if __name__ == "__main__":
+    if "--list-tools" in sys.argv:
+        # Phase 4 (CE x lat.md PRD AC4): a simple inventory call so CI /
+        # operators can verify the surface count without spinning up the
+        # full MCP transport. Stdout one tool per line.
+        for name in _list_tools():
+            print(name)
+        sys.exit(0)
     if "--http" in sys.argv:
         idx = sys.argv.index("--http")
         port = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 8000
