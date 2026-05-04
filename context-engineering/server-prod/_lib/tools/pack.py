@@ -16,6 +16,8 @@ Multi-corpus contract per § 3.1 invariants:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Any
 
@@ -40,6 +42,23 @@ MAX_CORPUS_IDS = 10  # § 3.1 multi-corpus cap
 # falls back to keyword scoring with a trace note. Phase 4+ will wire the
 # real semantic + graph paths.
 _KEYWORD_MODES = {"auto", "keyword", "deep", "wide"}
+
+
+def _compute_etag(canonical_inputs: dict, commit_key: str) -> str:
+    """SPEC § 3.1: ETag = sha256(commit_key || canonical(inputs)).
+
+    canonical_inputs are JSON-canonicalized (RFC 8785) — sort_keys + no whitespace.
+    commit_key is corpus_commit_sha (single) or sorted '<corpus_id>:<sha>' join (multi).
+    """
+    body = commit_key + "|" + json.dumps(canonical_inputs, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+
+
+def _cache_control_for(classifications: list[str]) -> str:
+    """§ 3.1: confidential/restricted → no-store; lower → private, max-age=60."""
+    if any(c in ("confidential", "restricted") for c in classifications):
+        return "no-store"
+    return "private, max-age=60"
 
 
 def _scale_budget(budget: int | None, model_context: int | None) -> int:
@@ -266,19 +285,24 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     cids = args.get("corpus_ids")
     multi = bool(cids)
 
+    # Canonical inputs for ETag (excluding `why` since it's purely a debug toggle).
+    canonical = {k: v for k, v in args.items() if k != "why" and v is not None}
+
     # ── Single-corpus path ──
     if cid:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
         packed = _pack_single(loaded, query, budget, prefix=None)
-        # Truncate to budget — _pack_single uses the engine's pack which already targets budget
         trace = _build_trace(why, mode, task, query, [loaded], budget) if why else None
-        return _build_output(
+        out = _build_output(
             packed, budget, response_format, query, mode, multi=False,
             single_sha=loaded.meta.commit_sha or None, multi_shas=None,
             trace=trace, took_ms=int((time.time() - start) * 1000),
         )
+        out["_x_etag"] = _compute_etag(canonical, loaded.meta.commit_sha or "nosha")
+        out["_x_cache_control"] = _cache_control_for([loaded.meta.data_classification])
+        return out
 
     # ── Multi-corpus path ──
     loaded_list, err = corpus_access.aggregate_load(cids, token.data_classification_max)
@@ -324,11 +348,17 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     multi_shas = dict(sorted(multi_shas.items()))
 
     trace = _build_trace(why, mode, task, query, loaded_list, budget) if why else None
-    return _build_output(
+    out = _build_output(
         packed, budget, response_format, query, mode, multi=True,
         single_sha=None, multi_shas=multi_shas,
         trace=trace, took_ms=int((time.time() - start) * 1000),
     )
+    # § 3.1: multi-corpus ETag uses the lex-sorted '<corpus_id>:<sha>' concatenation.
+    commit_key = "|".join(f"{cid}:{sha}" for cid, sha in multi_shas.items())
+    out["_x_etag"] = _compute_etag(canonical, commit_key)
+    classifications = [c.meta.data_classification for c in loaded_list]
+    out["_x_cache_control"] = _cache_control_for(classifications)
+    return out
 
 
 def _build_trace(why: bool, mode: str, task: str | None, query: str,

@@ -1,74 +1,141 @@
-# CE MCP — production server (replaces YC-demo stub)
+# CE MCP — production server
 
 Conformant Model Context Protocol server implementing `SPEC-mcp.md` v1.0.0-rc4.
 
-**Status (Phase 2)**: scaffold + `ce_get_health` only. Other 6 tools are registered in `tools/list` but return `NOT_IMPLEMENTED` until Phase 3 (read tools) and Phase 4 (write tools) land.
+**Status (Phase 5)**: all 7 spec tools wired. Read tools (pack/find/list_corpora) and write tools (upload/index/job_status) ship in v1; `ce_index_github_repo` with `async=true` returns `NOT_IMPLEMENTED` until v1.1 lands the Cron + queue worker.
 
 | | This server (production) | YC-demo stub at `server-stub/` |
 |---|---|---|
-| Tools (callable) | 1 working + 6 NOT_IMPLEMENTED | 3 working (pack_context, list_corpora, health) |
+| Tools | 7 working (1 has `async=true` deferred) | 3 working (pack/list/health) |
 | Transport | MCP Streamable HTTP + JSON-RPC | Plain HTTP/JSON |
 | Tool naming | `ce_*` canonical per § 3.0.2 | bare names (legacy) |
 | Annotations | per § 3.0.3 | none |
 | Auth | Bearer + (v1.1) OAuth 2.1 | Bearer |
 | Error envelope | split tool/protocol per § 7 | flat HTTP |
-| Multi-corpus | scaffolded for Phase 3 | none |
+| Multi-corpus | yes (`corpus_ids[]`, parity, prefix collision) | no |
+| ETag + Cache-Control | yes (304 conditional, classification-aware no-store) | no |
 
 ## Layout
 
 ```
 api/
-  mcp.py        — POST/GET /api/mcp — Streamable HTTP transport (JSON-RPC dispatcher)
-  health.py     — GET /api/health — HTTP-direct liveness (parallel to MCP-mode ce_get_health)
+  mcp.py        — POST/GET /api/mcp — Streamable HTTP transport
+  health.py     — GET /api/health — HTTP-direct liveness
 
 _lib/
   auth.py       — Bearer token middleware + role lookup
-  errors.py     — § 7.1 tool errors / § 7.2 protocol errors / HTTP-direct shape
+  errors.py     — § 7.1 / § 7.2 / HTTP-direct shapes
   annotations.py — § 3.0.3 tool annotation table
-  version.py    — package version + git sha
-  tools/        — one file per ce_* tool
-    health.py   — ce_get_health (Phase 2 only working tool)
-    pack.py     — ce_pack_context (Phase 3)
-    find.py     — ce_find_relevant_files (Phase 3)
-    list_corpora.py  — ce_list_corpora (Phase 3)
-    upload.py   — ce_upload_corpus (Phase 4)
-    index_repo.py — ce_index_github_repo (Phase 4)
-    job_status.py — ce_get_job_status (Phase 4)
+  corpus_store.py — filesystem corpus index reader
+  corpus_access.py — shared load/parity/collision helpers
+  engine.py     — bridge to vendored pack_context_lib
+  job_store.py  — in-memory job registry (v1.1: Vercel KV)
+  vendor/
+    pack_context_lib.py — VENDORED COPY of scripts/pack_context_lib.py
+                          (Vercel can't reach parent dirs; sync via test)
+  tools/
+    health.py
+    pack.py        — ce_pack_context (§ 3.1)
+    find.py        — ce_find_relevant_files (§ 3.2)
+    list_corpora.py — ce_list_corpora (§ 3.5)
+    upload_corpus.py — ce_upload_corpus (§ 3.3)
+    index_github_repo.py — ce_index_github_repo (§ 3.4)
+    get_job_status.py — ce_get_job_status (§ 3.7)
+  transport.py  — JSON-RPC dispatcher
 
-pyproject.toml — context_engineering_mcp package metadata
+vercel.json     — runtime config (cdg1, 60s, 1024MB)
 requirements.txt — runtime deps
-vercel.json    — Vercel Functions config
+pyproject.toml  — package metadata
+tests/          — Phase 2/3/4/5 test suites (94 tests, 100% green)
 ```
 
 ## Local dev
 
 ```bash
-cd server-prod
+cd context-engineering/server-prod
 pip install -r requirements.txt
-vercel dev    # Vercel CLI; or `python3 -m server-prod.api.mcp` for stdio mode
+export CE_MCP_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)
+vercel dev
 ```
 
-Once running, smoke-test:
+Smoke:
 
 ```bash
-curl https://localhost:3000/api/health
+curl http://localhost:3000/api/health
 # {"ok": true, "version": "1.0.0", ...}
 
-# MCP initialize handshake
-curl -X POST https://localhost:3000/api/mcp \
+curl -X POST http://localhost:3000/api/mcp \
   -H "Authorization: Bearer $CE_MCP_BOOTSTRAP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"smoke","version":"0"}}}'
+
+curl -X POST http://localhost:3000/api/mcp \
+  -H "Authorization: Bearer $CE_MCP_BOOTSTRAP_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
 
 ## Auth
 
-Set `CE_MCP_BOOTSTRAP_TOKEN` env. Server hashes it on startup, never stores plaintext. v1.1 adds the hashed-token-map KV per § 6.1.
+`CE_MCP_BOOTSTRAP_TOKEN` env. Server hashes it on startup, never stores plaintext. The bootstrap token has `admin` role + `restricted` data classification cap. v1.1 adds the hashed-token-map KV per § 6.1.
 
-## Embedding provider
+## Embedding provider (read tools)
 
-Set exactly one of `MISTRAL_API_KEY` (default), `VOYAGE_API_KEY`, `OPENAI_API_KEY`. BGE-local is **disabled** in MCP server mode (sentence-transformers can't run in Vercel functions).
+The v1 keyword pipeline doesn't need embeddings. For semantic mode (Phase 6+), set exactly one of:
+- `MISTRAL_API_KEY` (default; codestral-embed, 1536d)
+- `VOYAGE_API_KEY`
+- `OPENAI_API_KEY`
 
-## Deployment
+BGE-local is **disabled** in MCP server mode (sentence-transformers can't run in Vercel functions).
 
-Phase 5 ships this to Vercel. Until then, this directory is buildable but not deployed.
+## Deployment to Vercel
+
+```bash
+cd context-engineering/server-prod
+vercel link                    # one-time: creates .vercel/project.json
+vercel env add CE_MCP_BOOTSTRAP_TOKEN production
+vercel env add MISTRAL_API_KEY production   # optional, semantic mode only
+vercel --prod                  # deploy
+```
+
+Region: `cdg1` (Paris) for proximity to Syroco infra.
+
+After deploy:
+
+```bash
+DEPLOY_URL=$(vercel ls --prod --json | jq -r '.[0].url')
+curl https://$DEPLOY_URL/api/health
+# Expect: {"ok": true, "version": "1.0.0", ...}
+```
+
+## Caching headers
+
+Per SPEC § 3.1:
+- `ce_pack_context` / `ce_find_relevant_files` responses include `ETag` + `Cache-Control`
+- Classification-aware: `private, max-age=60` for public/internal; `no-store` for confidential/restricted (or any multi-corpus mix containing one)
+- `If-None-Match` returns `304 Not Modified` with the cached `ETag` echoed
+
+ETag is a sha256(commit_key || RFC8785-canonical-inputs)[:24]. Multi-corpus uses lex-sorted `<corpus_id>:<sha>` joined with `|` as the commit_key.
+
+## Vendor sync
+
+`_lib/vendor/pack_context_lib.py` is a byte-identical copy of `../scripts/pack_context_lib.py`. Vercel function bundles can't reach parent directories. The sync test (`tests/test_phase5.py::test_vendor_pack_context_lib_in_sync_with_canonical`) sha-checks both files and fails on drift.
+
+Refresh on canonical changes:
+
+```bash
+cp ../scripts/pack_context_lib.py _lib/vendor/pack_context_lib.py
+python -m pytest tests/test_phase5.py::test_vendor_pack_context_lib_in_sync_with_canonical
+```
+
+## Test suite
+
+```bash
+CE_MCP_BOOTSTRAP_TOKEN=test-token python -m pytest -v tests/
+```
+
+- `test_phase2.py` — server foundation (initialize, tools/list, auth, alias, errors)
+- `test_phase3.py` — read tools (pack/find/list_corpora, multi-corpus, classification, lifecycle)
+- `test_phase4.py` — write tools (upload/index/job_status, idempotency, locks, role gating)
+- `test_phase5.py` — deploy hardening (vendor sync, ETag, Cache-Control, 304)
+
+94 tests. All green.
