@@ -73,11 +73,29 @@ sed "s|{{CE_MCP_URL}}|$CE_MCP_URL|; s|{{CE_MCP_TOKEN}}|$CE_MCP_TOKEN|" \
 | H4 | C4 vs C0 reward delta on smoke | ≥+0.05 absolute | Cut depth packer |
 | H7 | MMR lift shrinks as budget grows | hold | λ should auto-scale with budget |
 
+## IR-only bench (Phase 2 of the bench plan, no Haiku)
+
+`run_ir_bench.py` drives a config (C1–C4) over a directory of CSB-format tasks
+and scores against `ground_truth.json`. Pure IR — no LLM inference, costs only
+codestral embeds (~$3 total for 151 single-repo SDLC tasks).
+
+```bash
+python eval/csb/run_ir_bench.py \
+    --tasks-dir ./csb/tasks/single-repo-sdlc \
+    --mcp-url $CE_MCP_URL --token $CE_MCP_TOKEN \
+    --config ce-keyword \
+    --top-k 5 \
+    --output runs/ir-keyword.jsonl
+```
+
+Available configs: `ce-keyword` (C1), `ce-codestral` (C2), `ce-codestral-mmr` (C3), `ce-shipping` (C4 = `mode=auto`, server picks).
+
+Output JSONL has one record per task (retrieved paths, ground truth, recall/P@K/F1@K) plus a `_summary` record at the end. `ir_metrics.aggregate()` computes the means.
+
 ## What's not here
 
 - The actual CSB harness (clone it from sourcegraph/codescalebench, then point its `BASELINE_MCP_TYPE` switch at this dir)
-- Phase 7 bench run — needs Victor's go-ahead on ~$21 Haiku budget
-- IR-only metrics computation (Phase 2 of the bench plan; runs on `ground_truth.json` from CSB tasks)
+- Phase 7 Haiku bench run (Phase 1 of the plan: 20 SDLC tasks × {C0, C4, C5} × 100K = ~$18) — needs Victor's go-ahead
 
 ## Testing
 
