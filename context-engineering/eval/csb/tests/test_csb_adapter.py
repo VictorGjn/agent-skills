@@ -103,6 +103,40 @@ def test_setup_corpus_emits_parsable_export_format():
     assert 'print(f"CE_CORPUS_ID={cid}")' in src or 'print("CE_CORPUS_ID=' in src
 
 
+def test_upload_via_local_index_does_not_subprocess(tmp_path, monkeypatch):
+    """Codex P1: prior version subprocessed `index_workspace.py --output`, but
+    that flag doesn't exist — every --upload call FileNotFound'd before any MCP
+    call. Verify the new in-process path actually returns a corpus_id."""
+    sys.path.insert(0, str(CSB))
+    from setup_corpus import upload_via_local_index  # type: ignore
+
+    # Stub the HTTP POST so we don't need a real MCP. Verify it's reached.
+    import setup_corpus as _sc
+
+    captured: dict = {}
+    def fake_post(url, token, payload, timeout=60):
+        captured["payload"] = payload
+        return {"jsonrpc": "2.0", "id": 1,
+                "result": {"structuredContent": {"corpus_id": "local-test", "commit_sha": "x", "version": 1,
+                                                  "stats": {"file_count": 1, "embedded_count": 0, "size_bytes": 0}}}}
+    monkeypatch.setattr(_sc, "_post", fake_post)
+
+    # Build a 1-file workspace
+    (tmp_path / "a.md").write_text("# Hello\n\nWorld.\n", encoding="utf-8")
+
+    cid = upload_via_local_index("http://x", "tok", str(tmp_path), "local-test", "internal")
+    assert cid == "local-test"
+    # Make sure we actually invoked ce_upload_corpus with the right shape
+    assert captured["payload"]["params"]["name"] == "ce_upload_corpus"
+    args = captured["payload"]["params"]["arguments"]
+    assert args["corpus_id"] == "local-test"
+    assert args["data_classification"] == "internal"
+    assert isinstance(args["files"], list) and len(args["files"]) >= 1
+    # contentHash normalization happened (scripts/* emit `hash`)
+    for f in args["files"]:
+        assert "contentHash" in f
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-xvs"]))

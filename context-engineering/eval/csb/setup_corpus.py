@@ -79,26 +79,24 @@ def index_via_server(mcp_url: str, token: str, repo: str, branch: str,
 
 def upload_via_local_index(mcp_url: str, token: str, workspace: str,
                            corpus_id: str, classification: str) -> str:
-    """Index a local workspace via scripts/index_workspace.py, then ce_upload_corpus."""
-    import subprocess
+    """Index a local workspace via scripts/index_workspace.scan_directory, then ce_upload_corpus.
+
+    In-process import is cleaner than subprocess: index_workspace.py's main
+    block writes to a hardcoded `cache/workspace-index.json` path with no
+    --output flag, so the prior subprocess approach failed (Codex P1). The
+    underlying scan_directory function returns the index dict directly.
+    """
     from pathlib import Path
 
     here = Path(__file__).resolve()
     scripts = here.parent.parent.parent / "scripts"
-    index_workspace = scripts / "index_workspace.py"
-    out_path = Path("/tmp") / f"{corpus_id}.index.json"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import index_workspace as _iw  # type: ignore
 
-    rc = subprocess.run(
-        [sys.executable, str(index_workspace), workspace, "--output", str(out_path)],
-        capture_output=True, text=True, timeout=300,
-    )
-    if rc.returncode != 0:
-        raise RuntimeError(f"index_workspace failed: {rc.stderr[:500]}")
-
-    with open(out_path, encoding="utf-8") as f:
-        idx = json.load(f)
+    idx = _iw.scan_directory(workspace)
     files = idx.get("files", [])
-    # Normalize legacy `hash` field
+    # Normalize legacy `hash` field — scripts/* emit `hash`, server reads `contentHash`.
     for f in files:
         if "contentHash" not in f and "hash" in f:
             f["contentHash"] = f["hash"]
