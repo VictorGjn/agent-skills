@@ -1,0 +1,13 @@
+{
+  "_comment": "Template for CSB harness to point at the CE production MCP server. Replace {{...}} placeholders before dropping into $CLAUDE_CONFIG_DIR/.mcp.json inside the sandbox.",
+  "mcpServers": {
+    "context-engineering": {
+      "_comment": "Streamable HTTP transport per SPEC-mcp.md § 3.0. v1.0 protocolVersion = 2025-06-18.",
+      "type": "http",
+      "url": "{{CE_MCP_URL}}",
+      "headers": {
+        "Authorization": "Bearer {{CE_MCP_TOKEN}}"
+      }
+    }
+  }
+}
