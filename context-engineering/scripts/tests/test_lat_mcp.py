@@ -95,21 +95,21 @@ def _seed_codebase_and_index(repo: Path, brain: Path) -> None:
 
 
 class ListToolsCLITests(unittest.TestCase):
-    """PRD AC4: `python mcp_server.py --list-tools` returns 14 names."""
+    """`python mcp_server.py --list-tools` returns the expected catalog."""
 
-    def test_list_tools_returns_14(self):
+    def test_list_tools_returns_15(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPTS / "mcp_server.py"), "--list-tools"],
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0)
         names = [line for line in result.stdout.splitlines() if line.strip()]
-        # 9 existing + 5 new lat.* tools.
-        self.assertEqual(len(names), 14, f"got: {names}")
+        # 9 base + 5 lat.* + 1 wiki.impact_of = 15.
+        self.assertEqual(len(names), 15, f"got: {names}")
         for expected in (
             "pack", "index_workspace", "index_github_repo",
             "build_embeddings", "resolve", "stats",
-            "wiki.ask", "wiki.add", "wiki.audit",
+            "wiki.ask", "wiki.add", "wiki.audit", "wiki.impact_of",
             "lat.locate", "lat.section", "lat.refs", "lat.search", "lat.expand",
         ):
             self.assertIn(expected, names)
