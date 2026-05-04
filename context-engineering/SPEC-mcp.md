@@ -1,9 +1,22 @@
 # Context Engineering MCP — Specification
 
-**Version**: 1.0.0-rc3 (post-mcp-builder audit)
-**Status**: Release candidate. 13 prior audit themes + 9 mcp-builder findings applied. Final v1.0 freeze on YC outcome.
+**Version**: 1.0.0-rc4 (post-plan-corpus review)
+**Status**: Release candidate. rc3 + 14 plan-corpus findings applied (multi-corpus contract, wiki contract, freshness, errors, telemetry, positioning). Final v1.0 freeze on production MCP ship.
 **Editor**: Victor Grosjean
-**Last updated**: 2026-05-04
+**Last updated**: 2026-05-05
+
+**Changelog vs rc3** (review of all `plan/` content vs rc3, 2026-05-04):
+- Multi-corpus contract: `corpus_ids[]` array on `ce_pack_context` + `ce_find_relevant_files`; `corpus_commit_shas` object output; `<corpus>:<path>` prefix in `files[].path` (§ 3.1, § 3.2)
+- New error codes: `EMBEDDING_PROVIDER_MISMATCH` (multi-corpus dim drift), `CORPUS_PREFIX_COLLISION` (shared root basename) (§ 7.1)
+- `ce_wiki_*` contract sketch: `scope?` parameter on `ce_wiki_ask`, decision-continuity fields (`supersedes`/`superseded_by`/`valid_until`), async-write invariant (§ 10.1, with cross-ref from § 4.2)
+- Freshness policy contract: stored `last_verified_at`, computed `freshness_score`, per-source half-life table (§ 4.4 new)
+- Schema evolution policy split: `wiki/` refusal-and-rebuild vs `events/` forward-migrate (§ 4.2)
+- `wiki.*` / `lat.*` MUST return `corpus_commit_sha` for cache idempotency (§ 10b)
+- `lat.*` normative bits: `lat.locate` upstream conformance, `lat_check` exit-code contract (§ 10b)
+- Telemetry: `audit.flagged`, `freshness.expired`, `audit.broken_refs`, `corpus.consolidation_triggered` (§ 9)
+- `next_tool_suggestions` semantic-routing rule for `ce_wiki_impact_of` (§ 3.0.1)
+- `ce_wiki_impact_of` `relation_kinds` defaults per corpus type (§ 10.1)
+- § 1.5.1 left-flank competitive table: codebase-memory-mcp / mache / GitNexus / Graphify
 
 **Changelog vs rc2** (audit doc: `plan/audits/spec-mcp-vs-mcp-builder-2026-05-04.md`):
 - `ce_*` service prefix on all 7 tools, with v1.0 aliases (§ 3.0.2)
@@ -59,6 +72,19 @@ A YC reviewer (or anyone reading) will ask: why not Sourcegraph Cody Context API
 **LlamaIndex** — Python framework for building RAG apps. CE is a *deployed service* with a stable wire contract; LlamaIndex is a library you embed. CE could be implemented atop LlamaIndex internally; the spec is provider-agnostic.
 
 **The honest answer to "why build?"**: the depth-aware token-budget-fused packing primitive (Full / Detail / Summary / Structure / Mention bands within a budget) is novel and not exposed cleanly by any of the above. Combined with git-as-storage versioning (every refresh is a commit, `git log -p` is the temporal log) and the Anabasis Skill ABC contract, CE is the *agent-native, version-controlled, source-agnostic retrieval primitive* nothing else fills. If that thesis breaks, the fallback is wrapping Cody behind the same wire contract — the spec is shaped to allow that swap without client rewrites.
+
+### 1.5.1 Adjacent open-source MCP-shaped peers
+
+The right-flank framing above (Cody/Cursor/Glean/LlamaIndex) addresses commercial code-retrieval and enterprise search. The left flank is open-source MCP-shaped peers that contest individual CE pillars:
+
+| Tool | Contests | Differentiator CE keeps |
+|---|---|---|
+| `codebase-memory-mcp` | Freshness invalidation and decision-layer (`manage_adr`) — the only peer hitting two pillars at once | Depth-aware packing + multi-corpus + agent-native composition. No `manage_adr` analog yet — closing this gap is § 10.1's `ce_wiki_*` family and decision-continuity fields. |
+| `mache` | Corpus-agnostic on the code side (28-language tree-sitter graph + Louvain clustering) | Multi-corpus (code + docs + transcripts + Notion + Gmail) under one packer; cross-corpus `corpus_ids[]`. mache is code-only. |
+| `GitNexus` | Cross-repo "contracts" (decision-layer for code) | Source-agnostic decision-layer (wiki schema is corpus-shaped, not code-shaped); freshness contract per source type. |
+| `Graphify` | Multi-modal corpus building | Already integrated as an indexer; CE consumes Graphify's `graph.json` if present. Complementary, not competitive. |
+
+CE's union: depth-aware packing, multi-corpus, decision-continuity, freshness — all source-agnostic, all version-controlled via git. Each listed peer covers one or two of those four pillars. Anabasis Skill ABC interop, the deployed Vercel host, and `next_tool_suggestions` routing are CE's secondary differentiators.
 
 ---
 
@@ -120,6 +146,8 @@ Every tool response MAY include an optional `next_tool_suggestions` array nudgin
 - `ce_find_relevant_files` → `ce_pack_context` (pack the top hits)
 - `ce_index_github_repo(async=true)` → `ce_get_job_status` (poll for completion)
 - `ce_list_corpora` → `ce_pack_context` (chosen `corpus_id`)
+- `ce_upload_corpus` (or v2 `ce_wiki_add`) → `ce_get_job_status` — consolidation is async per the wiki async-write invariant (§ 10); read-after-write within ~60s may not reflect the write.
+- Query smells like an entity-impact question (matches `impact of`, `what does X touch`, `consequences of`, `who depends on`) → suggest `ce_wiki_impact_of` (v2) instead of `ce_pack_context`. The wiki tool is sharper for these queries; routing avoids the "agent over-calls the catch-all" failure mode named in the abandoned job-shaped-MCP-surface RFC.
 
 Maximum 2 suggestions per response. Suggestions are heuristic; the server is not required to provide them.
 
@@ -186,9 +214,11 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `query` | string | yes | — | Natural-language query OR symbol name OR multi-word phrase. Max 4096 chars. |
-| `corpus_id` | string | yes | — | Target corpus. See §4.1 for format. |
+| `corpus_id` | string | one of | — | Single target corpus. See § 4.1 for format. Mutually exclusive with `corpus_ids`. |
+| `corpus_ids` | string[] | one of | — | Multiple target corpora (multi-corpus pack). Min 1, max 10. Mutually exclusive with `corpus_id`. Output paths get a `<corpus_id>:<path>` prefix to disambiguate. |
+| `corpus_quota` | boolean | no | `true` (when `corpus_ids.length ≥ 2`) | Per-corpus quota allocation: round-robin top-K then global rerank. When false, fat-corpus may dominate. |
 | `budget` | integer | no | 32000 | Token budget for packed output. Min 1000, max 200000. |
-| `mode` | enum | no | `auto` | `auto`, `keyword`, `semantic`, `graph`, `deep`, `wide`. |
+| `mode` | enum | no | `auto` | `auto`, `keyword`, `semantic`, `graph`, `deep`, `wide`. Note: in multi-corpus mode (`corpus_ids`), `semantic` requires all corpora share the same embedding `(provider, model, dims)` — otherwise returns `EMBEDDING_PROVIDER_MISMATCH`. |
 | `task` | enum \| null | no | `null` | `fix`, `review`, `explain`, `build`, `document`, `research`, or `null` for auto-detect. |
 | `model_context` | integer | no | `null` | Hint: caller's model context window (e.g. `1000000`). When set with no explicit `budget`, server scales budget to ~12% of `model_context`, clamped to [4000, 64000]. |
 | `why` | boolean | no | `false` | If true, include a trace of mode/task selection + entry points + budget rationale before the packed markdown. |
@@ -202,10 +232,11 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
   "tokens_used": "integer (actual)",
   "tokens_budget": "integer (the budget used)",
   "files": [
-    { "path": "string", "depth": "Full|Detail|Summary|Structure|Mention", "tokens": "integer", "relevance": "number 0..1" }
+    { "path": "string (with `<corpus_id>:` prefix in multi-corpus mode)", "depth": "Full|Detail|Summary|Structure|Mention", "tokens": "integer", "relevance": "number 0..1", "corpus_id": "string (only in multi-corpus mode)" }
   ],
   "trace": "string | null (present if why=true)",
-  "corpus_commit_sha": "string (the brain-repo sha this answer was built from)",
+  "corpus_commit_sha": "string (single-corpus mode) | null (multi-corpus — see corpus_commit_shas)",
+  "corpus_commit_shas": "object { [corpus_id]: sha } (multi-corpus mode) | null (single-corpus)",
   "took_ms": "integer"
 }
 ```
@@ -216,35 +247,45 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
 {
   "files": [
     {
-      "path": "string",
+      "path": "string (with `<corpus_id>:` prefix in multi-corpus mode)",
       "depth": "Full|Detail|Summary|Structure|Mention",
       "tokens": "integer",
       "relevance": "number 0..1",
-      "content": "string (the rendered content at the assigned depth)"
+      "content": "string (the rendered content at the assigned depth)",
+      "corpus_id": "string (only in multi-corpus mode)"
     }
   ],
   "tokens_used": "integer",
   "tokens_budget": "integer",
   "trace": "string | null",
-  "corpus_commit_sha": "string",
+  "corpus_commit_sha": "string | null",
+  "corpus_commit_shas": "object | null",
   "took_ms": "integer"
 }
 ```
 
 `response_format: "both"` returns the union of both shapes from a single computation (servers MAY serve `markdown` from `files[].content` rather than rendering twice). ETag canonicalization includes `response_format`, so each shape caches independently.
 
+**Multi-corpus invariants**:
+- Exactly one of `corpus_id` / `corpus_ids` MUST be set (else `INVALID_ARGUMENT`).
+- In multi-corpus mode, `corpus_commit_sha` is `null`; `corpus_commit_shas` is the authoritative reproducibility key. ETag derives from `(lexicographic sort of "<corpus_id>:<sha>" pairs over corpus_ids, sha256(canonical_inputs))`.
+- All corpora MUST be readable by the caller's role / `data_classification_max`; if any one fails, the whole call returns `PERMISSION_DENIED` (no partial results).
+- Path-prefix collisions (two corpora share the same root basename in `<corpus_id>:<path>`) trigger `CORPUS_PREFIX_COLLISION` with `details.colliding_corpora`.
+
 **Errors**:
 
 | Code | Meaning |
 |---|---|
-| `INVALID_ARGUMENT` | `query` empty, `budget` out of range, `mode`/`task` unknown |
-| `CORPUS_NOT_FOUND` | `corpus_id` not in brain repo |
+| `INVALID_ARGUMENT` | `query` empty, `budget` out of range, `mode`/`task` unknown, both/neither of `corpus_id`/`corpus_ids` set |
+| `CORPUS_NOT_FOUND` | `corpus_id` (or any of `corpus_ids`) not in brain repo. `details.missing_corpora` lists the unknowns. |
 | `CORPUS_ARCHIVED` | corpus is `archived` or `frozen` and serving disabled (rare; usually still served — see §4.3) |
 | `CORPUS_LOCKED` | corpus is mid-refresh; retryable after `Retry-After` seconds |
 | `RATE_LIMITED` | per-token call rate exceeded |
 | `BUDGET_TOO_SMALL` | `budget` < min file's structural overhead (~500 tokens). Distinct from INVALID_ARGUMENT for clarity. |
+| `EMBEDDING_PROVIDER_MISMATCH` | multi-corpus `mode: semantic` but corpora have different `(provider, model, dims)`. `details.providers` lists per-corpus tuples. Distinct from `EMBEDDING_MISMATCH` (shape error within one corpus). |
+| `CORPUS_PREFIX_COLLISION` | multi-corpus paths would collide under the `<corpus_id>:<path>` convention. `details.colliding_corpora` lists the offenders. Caller can disambiguate by passing `corpus_ids` in a different order or renaming a corpus. |
 
-**Idempotency**: idempotent given `(corpus_commit_sha, all input fields including `response_format`)`. Two calls with identical inputs against an unchanged corpus return byte-identical `markdown` (or `files[].content` strings, for `structured`).
+**Idempotency**: idempotent given `(corpus_commit_sha | sorted(corpus_commit_shas), all input fields including `response_format`)`. Two calls with identical inputs against unchanged corpora return byte-identical `markdown` (or `files[].content` strings, for `structured`). In multi-corpus mode, the equality predicate uses the lexicographic-sorted concatenation of `corpus_id:sha` pairs.
 
 **Cacheability**: `Cache-Control: private, max-age=60` plus an `ETag` derived from `(corpus_commit_sha + sha256(canonical_inputs))`. **NEVER `public`** — packed responses include source content from corpora that may be `confidential` or `restricted`; CDN/intermediary caching of these would leak content. Servers MUST additionally emit `Cache-Control: no-store` when the responding corpus's `data_classification` is `confidential` or `restricted`. Conditional `If-None-Match` returns 304.
 
@@ -259,9 +300,10 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `query` | string | yes | — | Same as `pack_context`. |
-| `corpus_id` | string | yes | — | |
+| `corpus_id` | string | one of | — | Single target corpus. Mutually exclusive with `corpus_ids`. |
+| `corpus_ids` | string[] | one of | — | Multi-corpus mode. Min 1, max 10. Mutually exclusive with `corpus_id`. |
 | `top_k` | integer | no | 20 | Min 1, max 200. |
-| `mode` | enum | no | `auto` | Same set as `pack_context`. |
+| `mode` | enum | no | `auto` | Same set as `pack_context`. Same multi-corpus `EMBEDDING_PROVIDER_MISMATCH` rule for `semantic`. |
 | `task` | enum \| null | no | `null` | Same. |
 
 **Output**:
@@ -270,22 +312,24 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 {
   "files": [
     {
-      "path": "string",
+      "path": "string (with `<corpus_id>:` prefix in multi-corpus mode)",
       "relevance": "number 0..1",
       "keyword_score": "number (0 if mode skipped keyword)",
       "semantic_score": "number (0 if mode skipped semantic)",
       "graph_score": "number (0 if mode skipped graph)",
-      "reason": "string (human-readable: 'matched X via semantic similarity, confirmed via graph hop from Y')"
+      "reason": "string (human-readable: 'matched X via semantic similarity, confirmed via graph hop from Y')",
+      "corpus_id": "string (only in multi-corpus mode)"
     }
   ],
-  "corpus_commit_sha": "string",
+  "corpus_commit_sha": "string | null",
+  "corpus_commit_shas": "object | null",
   "took_ms": "integer"
 }
 ```
 
-**Errors**: `INVALID_ARGUMENT`, `CORPUS_NOT_FOUND`, `CORPUS_LOCKED`, `RATE_LIMITED`.
+**Errors**: `INVALID_ARGUMENT`, `CORPUS_NOT_FOUND`, `CORPUS_LOCKED`, `RATE_LIMITED`, `EMBEDDING_PROVIDER_MISMATCH`, `CORPUS_PREFIX_COLLISION`.
 
-**Idempotency**: same as `pack_context`.
+**Idempotency**: same as `pack_context`, including the multi-corpus rule (sorted concatenation of `corpus_id:sha` pairs).
 
 ### 3.3 `ce_upload_corpus` (aliases: `upload_indexed_corpus`, `register_corpus`)
 
@@ -531,6 +575,15 @@ Manifest fields are normative; server implementations MUST NOT extend the
 schema without bumping `schema_version`. Forward compatibility: clients
 ignore unknown manifest fields.
 
+**Schema evolution policy (split by storage tier)**:
+
+- `wiki/<slug>.md` pages: **refusal-and-rebuild** while corpus has < 10k entities. A `schema_version` bump triggers full regeneration via `wiki_init.py --rebuild` from the canonical `events/` log. Old wiki pages are archived to `wiki-archive/<schema_version>/` for diff/rollback. Above the 10k threshold, switch to forward-migrators (deferred to v2).
+- `events/<YYYY-MM-DD>.jsonl`: **forward-migrate from day one**. Each line carries its own `schema_version`. Migrators are pure functions chained `v0 → v1 → v2 → ...` and applied at read time; events are never rewritten in place. Events are the primary truth; wiki is a materializable view.
+
+Rationale: events are append-only and small per-line, so per-record migration scales. Wiki pages are larger, denormalized, and cheap to regenerate from events while the corpus is small — refusing-and-rebuilding is simpler than per-page migrators until the rebuild cost crosses ~minutes.
+
+**Decision-continuity fields**: wiki entity pages with `kind: decision` carry the decision-continuity fields `supersedes`, `superseded_by`, `valid_until` defined in § 10.1. These fields are part of the wiki page schema and bump `schema_version` if changed.
+
 ### 4.3 Lifecycle
 
 States: `active`, `idle`, `archived`, `frozen`. Transitions and serving
@@ -543,6 +596,32 @@ Default serving policy:
 - `archived` corpora return tombstone metadata in `ce_list_corpora` and `CORPUS_ARCHIVED` from read tools, with `archive_location` in the error details.
 
 A successful refresh resets `lifecycle_state` to `active`.
+
+### 4.4 Freshness contract (entity pages)
+
+Wiki entity pages carry a freshness signal that read tools surface to consumers. **Stored vs computed split**:
+
+- **Stored**: `last_verified_at: <ISO 8601 timestamp>` per entity page (set by writer). Optionally `sources: [{type, ref, last_seen_at}, …]` listing source references with their own last-seen timestamps.
+- **Computed-on-read**: `freshness_score: number 0..1`. Server computes at read time using a per-source-type half-life table, never stores it.
+
+**Half-life table** (default; servers MAY tune via configuration):
+
+| Source type | Half-life |
+|---|---|
+| `code` | 90 days |
+| `web` | 30 days |
+| `transcript` | 60 days |
+| `email` | 21 days |
+| `notion` | 60 days |
+| `rfc` | 180 days |
+| `department-spec` | 180 days |
+| `default` (unknown source type) | 60 days |
+
+**Decay formula**: `freshness_score = max(0, 1 - elapsed_seconds / (2 * half_life_seconds))` — linear, hits 0.5 at half-life and 0 at twice-half-life. Multi-source entities (`sources[]`) use the **shortest** half-life among the listed types (the most-stale-source rule prevents masking decay with one fresh signal).
+
+**Read-tool surfacing**: `ce_pack_context` and `ce_find_relevant_files` MAY include `freshness_score` per file in their structured output (mode-dependent). `freshness_score < 0.3` triggers the `freshness.expired` telemetry event (§ 9). v2 may add `freshness_floor` filter inputs to read tools.
+
+This is a **wire-contract decision**: clients see the computed score, never the stored field directly. Implementers may rebuild the half-life table or formula in v2 (MAJOR bump per § 8); v1 must conform to the table above.
 
 ---
 
@@ -704,6 +783,8 @@ Tool error codes:
 | `SOURCE_MISMATCH` | `corpus_id` collides with different source.branch | 409 | no — pass `corpus_id` explicitly |
 | `WRITE_CONFLICT` | git push 409 after 3 retries | 409 | yes |
 | `BRAIN_RATE_LIMITED` | GitHub secondary rate limit; back off, don't page | 503 | yes |
+| `EMBEDDING_PROVIDER_MISMATCH` | multi-corpus `mode: semantic` but corpora differ on `(provider, model, dims)` | 400 | no |
+| `CORPUS_PREFIX_COLLISION` | multi-corpus paths collide under `<corpus_id>:<path>` convention | 400 | no |
 | `PAYLOAD_TOO_LARGE` | inline request body > 32 MB; use `format: "presigned"` | 413 | no |
 | `RATE_LIMITED` | per-token call rate exceeded | 429 | yes |
 
@@ -800,6 +881,11 @@ Required events:
 | `embed_provider.call` | every upstream embedding API call | `provider, model, batch_size, took_ms, success, error_code?` — distinguishes provider-side outage from server-side bug |
 | `github_app.token_age` | every Octokit auth refresh | `installation_id, token_age_seconds` — App tokens expire in 1h; without this, rotation breakage falls off a cliff silently |
 | `auth.token_used` | derived from `tool.call` (sampled 1:1) | `token_id, role, ip_prefix, ua_hash` — leaked-token detection |
+| `audit.flagged` | Auditor surfaces a proposal | `corpus_id, rule (stale-supersession \| freshness-expired \| slug-collision \| contradiction), entity_id, reason` |
+| `audit.broken_refs` | `lat_check` finds broken refs (CI integration) | `corpus_id, ref_count_total, ref_count_broken, exit_strict (boolean)` |
+| `freshness.expired` | computed `freshness_score < 0.3` AND `last_verified_at` older than half-life | `corpus_id, entity_id, source_type, half_life_days, elapsed_days, freshness_score` |
+| `corpus.consolidation_triggered` | semantic-shift detector triggers async consolidation after `ce_upload_corpus` / `wiki.add` events | `corpus_id, trigger (cosine_drift \| event_count_threshold \| manual), affected_entities, took_ms` |
+| `multi_corpus.pack` | `ce_pack_context` or `ce_find_relevant_files` called with `corpus_ids[]` | `corpus_count, corpora (sorted list), corpus_quota (boolean), prefix_collisions (count)` — sized for capacity planning |
 
 Event schemas freeze at the same MAJOR version as the tool API. Event sink is JSON-line stdout in v1 (caller pipes to OTel collector / Vercel Logs / wherever). v1.1 will commit to OpenTelemetry semantic conventions.
 
@@ -810,18 +896,69 @@ schemas freeze at the same MAJOR version as the tool API.
 
 ## 10. Future tools (v2 contract preview, non-normative)
 
-Reserved names — implementations MUST NOT use these for unrelated tools. v2 will adopt the `ce_` prefix per § 3.0.2 (e.g. `ce_find_related_symbols`, `ce_delete_corpus`); the bare names below are reserved in both forms.
+Reserved names — implementations MUST NOT use these for unrelated tools. v2 will adopt the `ce_` prefix per § 3.0.2; the bare names listed below are reserved in both forms.
+
+### 10.1 `ce_wiki_*` family (v2 deployed promotion)
+
+The `wiki.*` family is shipped on the local stdio MCP today (`wiki.{ask,add,audit,impact_of}`). v2 promotes them to the deployed MCP under the `ce_wiki_*` canonical prefix per § 3.0.2. Sketches below pin v1.0 spec-grade decisions so callers can rely on them once promoted.
+
+#### `ce_wiki_ask(query, corpus_id?, scope?, freshness_floor?, max_entities?)`
+
+Entity-aware semantic ask over the wiki layer; returns markdown with cited entity pages.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `query` | string | — | Required. |
+| `corpus_id` | string | — | Target corpus (selects which corpus to query). Orthogonal to `scope` (which filters entities *within* the corpus by their frontmatter `scope:` field). |
+| `scope` | string | `default` | Filters to entities whose frontmatter `scope:` matches. **Absent `scope` parameter MUST default to `scope: "default"` only** — entities tagged with other scopes (e.g. `competitive-intel`, `code-context`, `leads`) MUST NOT leak in. Pass `scope: "*"` to match all scopes within `corpus_id`. This is the entity-isolation contract that makes the source-agnostic positioning enforceable. |
+| `freshness_floor` | number 0..1 | `0.0` | Filter out entities with computed `freshness_score < floor` per § 4.4. |
+| `max_entities` | integer | 20 | Min 1, max 100. |
+
+#### `ce_wiki_add(corpus_id, entity_id, body, sources, scope?, supersedes?)`
+
+Append an entity event. **Async-write invariant**: the call is append-to-events; consolidation into `wiki/<slug>.md` is async via the semantic-shift detector. Read-after-write of `ce_wiki_ask` within ~60s (or the configured `corpus.consolidation_triggered` debounce) MAY not reflect the write. Servers MUST emit a `next_tool_suggestions` entry pointing to `ce_get_job_status` (or, in v1.0, document the timeout).
+
+#### `ce_wiki_audit(corpus_id, rules?)`
+
+Run Auditor rules. Returns proposals (splits / merges / contradictions / dead links / stale supersession / freshness expiry). Each proposal triggers `audit.flagged` telemetry per § 9.
+
+#### `ce_wiki_impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)`
+
+Entity-rooted impact closure with risk-score per affected entity. Local stdio name: `wiki.impact_of` (shipped via PR #37 in `scripts/mcp_server.py` + `scripts/wiki/impact_of.py`); deployed-v2 canonical name follows § 3.0.2's `ce_*` prefix.
+
+**`relation_kinds` defaults**: `null` = "use the per-corpus-type default below" — narrows automatically. Pass an explicit array to override.
+
+| Corpus type | Default `relation_kinds` |
+|---|---|
+| Code corpus (source type `gh` or `local` with code language detected) | `["imports", "calls", "extends", "implements", "uses_type", "tested_by", "references"]` |
+| Wiki corpus (entity-page corpus) | `["mentions", "supersedes", "decided_by", "applies_to", "links_to"]` |
+| Mixed / unknown | All edge kinds (no narrowing) |
+
+This pins the design from the abandoned "job-shaped MCP surface" RFC; future drift requires a MAJOR bump per § 8.
+
+#### Decision-continuity fields (entity-page schema)
+
+Wiki entity pages with `kind: decision` carry three normative fields used by `ce_wiki_ask`, `ce_wiki_audit`, and `ce_wiki_impact_of`:
+
+- `supersedes: <entity_id>` — this decision replaces the listed predecessor. The Auditor flags a successor that contradicts a still-valid predecessor (`stale-supersession` rule).
+- `superseded_by: <entity_id>` — the inverse pointer (computed-or-stored, server's choice; if stored, MUST be kept consistent with `supersedes` chains).
+- `valid_until: <ISO 8601 timestamp | null>` — explicit expiry. Server emits `freshness.expired` (§ 9) when crossed even if `last_verified_at` is recent.
+
+These fields are CE's answer to `codebase-memory-mcp`'s `manage_adr` (see § 1.5.1).
+
+### 10.2 Other reserved names
+
+Reserved tool names — implementations MUST NOT use these for unrelated tools. v2 will adopt the `ce_` prefix per § 3.0.2 (e.g. `ce_find_related_symbols`, `ce_delete_corpus`); the bare names below are reserved in both forms.
 
 - `find_related_symbols(symbol, corpus_id, hops?, relations?)` — graph traversal. Blocked on persistent `graph.jsonl`.
 - `list_concept_clusters(corpus_id)` — birds-eye LLM-labelled clusters (PR #8).
 - `detect_concept_drift(corpus_id, since)` — diff between commits (PR #10).
-- `refresh_corpus(corpus_id)` — explicit refresh trigger (currently inferred from re-running `index_github_repo` with same id).
+- `refresh_corpus(corpus_id)` — explicit refresh trigger.
 - `delete_corpus(corpus_id)` — admin-only.
 - `verify_corpus(corpus_id)` — schema + integrity check.
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
-- `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
-- `ce_wiki_impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)` — entity-rooted impact closure with risk-score per affected entity. Local stdio name: `wiki.impact_of` (shipped via PR #37 in `scripts/mcp_server.py` + `scripts/wiki/impact_of.py`); deployed-v2 canonical name follows § 3.0.2's `ce_*` prefix. Reserved here for v2 promotion to the deployed MCP if customer demand surfaces. Naming note: only surviving primitive from the "job-shaped MCP surface" RFC (rename premise abandoned 2026-05-04). When `wiki.*` family promotes to the deployed MCP in v2, all members adopt the `ce_wiki_*` snake_case form: `ce_wiki_ask`, `ce_wiki_add`, `ce_wiki_audit`, `ce_wiki_impact_of`. Local stdio retains the `wiki.*` dot-notation as namespace shorthand (see § 10b).
+- `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff.
 
 ---
 
@@ -835,7 +972,15 @@ Five thin wrappers exposing lat.md's verb surface (`locate / section / refs / se
 - `lat.search(query, brain?, budget?)` — case-insensitive substring search across wiki page bodies AND `cache/code_index.json` symbol names. Returns a markdown blob with two sections (wiki pages, code symbols). Capped at `budget * 4` chars; first 50 results per section.
 - `lat.expand(ref, brain?, depth?, budget?)` — BFS recursive expansion. Fetches `lat.section(ref)`, parses every wikiref it contains, follows up to `depth` hops, dedupes visited refs, concatenates into one markdown blob. Stops once `budget * 4` chars reached.
 
-The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAuth Flow`, `src/foo.ts#bar`) or fully-bracketed refs (`[[auth-middleware]]`). Brackets are optional but recommended for parity with lat.md's CLI.
+The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAuth Flow`, `src/foo.ts#bar`) or fully-bracketed refs (`[[auth-middleware]]`). Servers MUST normalize bare refs to bracketed form internally (single canonical wikiref kind); both inputs MUST yield byte-identical outputs.
+
+**Normative invariants** (lifted from `PRD-latmd-integration.md` for spec-grade enforcement):
+
+- **`lat.locate` upstream conformance**: when invoked against the `1st1/lat.md` upstream corpus, output MUST match `lat locate` output byte-for-byte (modulo line-ending normalization). This is the conformance test for any future `ce_lat_locate` v2 promotion.
+- **Ambiguous symbol resolution**: when a bare symbol resolves to multiple definitions, `lat.locate` MUST return a list and prefer **exported / public** symbols; ties broken by file-path lexicographic order. Callers MAY disambiguate via dotted path `[[src/foo.ts#Class.method]]`.
+- **`corpus_commit_sha` in every return**: all `lat.*` (and `wiki.*`) responses MUST include `corpus_commit_sha` (single-corpus mode) or `corpus_commit_shas` (multi-corpus, when v2 promotion adds multi-corpus support) for cache idempotency. Same shape and ETag rules as § 3.1.
+- **`lat_check` exit-code contract** (CI integration): the auxiliary `lat_check.py` CLI exits `0` when no broken refs, `1` when broken refs found and `--strict` was passed, `0` (with stderr warning) when broken refs found and `--strict` was not passed. Servers MUST NOT change this without a MAJOR bump per § 8 — third-party CI integrations depend on it.
+- **`audit.broken_refs` telemetry**: every `lat_check` run emits the event in § 9 with `ref_count_total`, `ref_count_broken`, and `exit_strict (boolean)`.
 
 Naming convention: `lat.*` and `wiki.*` dot-notation is **local-stdio-only** namespace shorthand. The deployed MCP uses the `ce_*` snake_case prefix per § 3.0.2; when these families promote to deployed (v2 candidates), they adopt `ce_lat_*` and `ce_wiki_*`. The `lat.*` divergence is preserved on the local stdio for parity with lat.md upstream verb names; `wiki.*` is purely a CE-native namespace convenience. New `lat.*` tools require a backing CE primitive.
 
