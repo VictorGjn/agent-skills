@@ -51,8 +51,27 @@ def _resolve_provider() -> dict:
             provider = 'mistral'
         elif os.environ.get('VOYAGE_API_KEY'):
             provider = 'voyage'
-        else:
+        elif os.environ.get('OPENAI_API_KEY'):
             provider = 'openai'
+        else:
+            # No API key — try local BGE if sentence-transformers is installed.
+            try:
+                import sentence_transformers  # noqa: F401
+                provider = 'bge'
+            except ImportError:
+                provider = 'openai'  # caller will hit the API-key-missing error
+
+    if provider == 'bge':
+        # Local in-process embeddings via BAAI/bge-small-en-v1.5 (384 dims, no API key).
+        return {
+            'name': 'bge',
+            'base_url': '',
+            'key_env': '',
+            'model': os.environ.get('EMBED_MODEL', 'BAAI/bge-small-en-v1.5'),
+            'dims': int(os.environ.get('EMBED_DIMS', '384')),
+            'send_dims': False,
+            'dims_param': '',
+        }
 
     if provider == 'external':
         # File-based handoff: vectors supplied by an orchestrator (e.g. agent calling MCP).
@@ -172,12 +191,34 @@ def _collect_headings(tree: dict, max_depth: int = 3, current_depth: int = 0) ->
 
 # ── Embedding API ──
 
+_BGE_MODEL = None
+
+
+def _embed_bge_local(texts: list) -> list:
+    """Embed via local BAAI/bge-small-en-v1.5. Lazy-loaded; cached after first call."""
+    global _BGE_MODEL
+    if _BGE_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        print(f"  Loading {EMBED_MODEL} (first call only)...", file=sys.stderr)
+        _BGE_MODEL = SentenceTransformer(EMBED_MODEL)
+    vecs = _BGE_MODEL.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    return [v.tolist() for v in vecs]
+
+
 def embed_texts(texts: list, api_key: str = None) -> list:
     """
-    Embed a list of texts via the configured provider (OpenAI / Mistral / Voyage / OpenAI-compatible).
+    Embed a list of texts via the configured provider (BGE / OpenAI / Mistral / Voyage / external).
     Returns list of embedding vectors.
     """
     import requests
+
+    if PROVIDER['name'] == 'bge':
+        all_embeddings = []
+        for i in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = texts[i:i + EMBED_BATCH_SIZE]
+            all_embeddings.extend(_embed_bge_local(batch))
+            print(f"  Embedded batch {i//EMBED_BATCH_SIZE + 1}: {len(batch)} files (local BGE)", file=sys.stderr)
+        return all_embeddings
 
     if PROVIDER['name'] == 'external':
         print("Error: provider=external — use 'dump-pending' + agent-driven MCP embedding + 'apply-results' instead of direct embed.", file=sys.stderr)
@@ -224,6 +265,8 @@ def embed_texts(texts: list, api_key: str = None) -> list:
 
 def embed_single(text: str, api_key: str = None) -> list:
     """Embed a single text. Returns one vector."""
+    if PROVIDER['name'] == 'bge':
+        return _embed_bge_local([text])[0]
     if PROVIDER['name'] == 'external':
         # Query-time handoff: read precomputed query vector written by the agent.
         # Override path with EMBED_QUERY_FILE. Returns None if absent (callers fall back).

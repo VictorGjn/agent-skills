@@ -11,3 +11,17 @@ tree-sitter-languages==1.10.2
 
 # MCP server (stdio + HTTP)
 mcp[cli]>=1.0,<2
+
+# ── DO NOT add sentence-transformers / torch / transformers here ──
+# BGE local embeddings are a LOCAL-DEV-ONLY feature. Adding them to this
+# file ships ~700MB of torch+transformers into hosted deploys (Vercel
+# serverless caps at 250MB unzipped → deploy fails; even on Fluid the
+# cold-start cost is ~3000× a hosted embedding API).
+#
+# To use BGE locally, install opt-in:
+#   pip install -e .[bge]              # via pyproject.toml extra
+#   pip install sentence-transformers  # or directly
+#
+# In MCP server mode, BGE is hard-blocked at startup (mcp_server.py
+# _lock_embedding_provider) — set MISTRAL_API_KEY / OPENAI_API_KEY /
+# VOYAGE_API_KEY in the deploy env instead.

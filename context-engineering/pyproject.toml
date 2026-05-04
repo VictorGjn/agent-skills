@@ -19,6 +19,16 @@ ast = [
 mcp = [
   "mcp[cli]>=1.0,<2",
 ]
+# Local-only BGE embeddings. NEVER include this extra in a hosted deploy
+# (Vercel serverless / Fluid): pulls torch+transformers (~700MB), blows
+# past 250MB function size limit, and the MCP server hard-blocks BGE at
+# startup anyway (mcp_server.py _lock_embedding_provider). For hosted
+# deploys, set MISTRAL_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY instead.
+bge = [
+  "sentence-transformers>=2.7,<5",
+]
+# Note: 'all' intentionally does NOT include 'bge' — keeps the default
+# install path safe for hosted deploys. Opt in with `pip install -e .[bge]`.
 all = [
   "tree-sitter==0.21.3",
   "tree-sitter-languages==1.10.2",
