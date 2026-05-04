@@ -93,11 +93,14 @@ def test_ce_get_health_works():
     assert "bearer" in structured["auth_methods_supported"]
 
 
-def test_phase2_placeholder_for_unimplemented_tools():
-    """Phase 3 lands the read tools; Phase 4 write tools still return NOT_IMPLEMENTED."""
+def test_phase2_placeholder_async_index_returns_not_implemented():
+    """Phase 4 lands write tools, but async=true is still NOT_IMPLEMENTED in v1
+    (Vercel Cron + queue is v1.1)."""
     payload = {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-        "params": {"name": "ce_upload_corpus", "arguments": {}},
+        "params": {"name": "ce_index_github_repo", "arguments": {
+            "repo": "x/y", "data_classification": "public", "async": True,
+        }},
     }
     response, status = dispatch(payload, _admin_token())
     # § 7.1 tool errors return via result.isError, with HTTP 501

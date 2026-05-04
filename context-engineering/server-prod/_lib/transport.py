@@ -140,6 +140,65 @@ _INPUT_SCHEMAS: dict[str, dict] = {
         },
         "additionalProperties": False,
     },
+    "ce_upload_corpus": {
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "object",
+                "description": "Manifest source field. Required keys: type, uri.",
+                "properties": {
+                    "type": {"type": "string", "enum": ["github_repo", "local_workspace", "granola", "notion", "unknown"]},
+                    "uri": {"type": "string"},
+                    "branch": {"type": ["string", "null"]},
+                },
+                "required": ["type"],
+            },
+            "corpus_id": {"type": "string"},
+            "data_classification": {"type": "string", "enum": ["public", "internal", "confidential", "restricted"]},
+            "embedding": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                    "dims": {"type": "integer", "minimum": 0},
+                },
+                "required": ["provider", "model", "dims"],
+            },
+            "files": {"type": "array", "items": {"type": "object"}},
+            "embeddings": {
+                "type": "object",
+                "properties": {
+                    "format": {"type": "string", "enum": ["json", "presigned"], "default": "json"},
+                    "vectors": {"type": "array"},
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                    "hashes": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "graph_edges": {"type": "array"},
+            "concept_clusters": {"type": "object"},
+        },
+        "required": ["source", "data_classification", "embedding", "files", "embeddings"],
+    },
+    "ce_index_github_repo": {
+        "type": "object",
+        "properties": {
+            "repo": {"type": "string", "description": "owner/name"},
+            "branch": {"type": ["string", "null"]},
+            "corpus_id": {"type": "string"},
+            "data_classification": {"type": "string", "enum": ["public", "internal", "confidential", "restricted"]},
+            "indexed_paths": {"type": "array", "items": {"type": "string"}, "default": []},
+            "async": {"type": "boolean", "default": False},
+        },
+        "required": ["repo", "data_classification"],
+    },
+    "ce_get_job_status": {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string"},
+        },
+        "required": ["job_id"],
+        "additionalProperties": False,
+    },
 }
 
 
