@@ -17,7 +17,8 @@
 - `response_format` on `ce_pack_context`: `markdown` / `structured` / `both` (§ 3.1)
 - Package naming convention noted (§ 12)
 - `lat.*` divergence rationale tightened (§ 10b)
-- v2-reserved `wiki.closure` renamed to `wiki.impact_of` matching PR #37 implementation (§ 10)
+- v2-reserved `wiki.closure` renamed to `ce_wiki_impact_of` (canonical, § 10) matching PR #37 implementation; local stdio keeps `wiki.impact_of` dot-notation per § 10b
+- § 10b: clarified that `wiki.*` and `lat.*` dot-notation is local-stdio-only; deployed-v2 promotions adopt `ce_*` prefix
 
 This document is the contract between the CE MCP server and its consumers
 (Claude Code, Anabasis agents, cloud routines, n8n, future internal tools).
@@ -820,7 +821,7 @@ Reserved names — implementations MUST NOT use these for unrelated tools. v2 wi
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
 - `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
-- `wiki.impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)` — entity-rooted impact closure with risk-score per affected entity. Shipped on the local stdio MCP (`scripts/mcp_server.py` + `scripts/wiki/impact_of.py`, PR #37); reserved here for v2 promotion to the deployed MCP if customer demand surfaces. Naming note: this is the only surviving primitive from the "job-shaped MCP surface" RFC (rename premise abandoned 2026-05-04). (Dot-notation matches the local-MCP wiki tool family; deployed-MCP non-wiki tools use the `ce_*` snake_case prefix per § 3.0.2 — convention reconciliation deferred to v2.)
+- `ce_wiki_impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)` — entity-rooted impact closure with risk-score per affected entity. Local stdio name: `wiki.impact_of` (shipped via PR #37 in `scripts/mcp_server.py` + `scripts/wiki/impact_of.py`); deployed-v2 canonical name follows § 3.0.2's `ce_*` prefix. Reserved here for v2 promotion to the deployed MCP if customer demand surfaces. Naming note: only surviving primitive from the "job-shaped MCP surface" RFC (rename premise abandoned 2026-05-04). When `wiki.*` family promotes to the deployed MCP in v2, all members adopt the `ce_wiki_*` snake_case form: `ce_wiki_ask`, `ce_wiki_add`, `ce_wiki_audit`, `ce_wiki_impact_of`. Local stdio retains the `wiki.*` dot-notation as namespace shorthand (see § 10b).
 
 ---
 
@@ -836,7 +837,7 @@ Five thin wrappers exposing lat.md's verb surface (`locate / section / refs / se
 
 The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAuth Flow`, `src/foo.ts#bar`) or fully-bracketed refs (`[[auth-middleware]]`). Brackets are optional but recommended for parity with lat.md's CLI.
 
-Naming convention: `lat.*` is an intentional divergence from § 3.0.2's `ce_*` prefix, preserving parity with lat.md upstream verb names; `wiki.*` is reserved for CE-native primitives. v2 may add `ce_lat_*` aliases if cross-MCP collisions appear. New `lat.*` tools require a backing CE primitive.
+Naming convention: `lat.*` and `wiki.*` dot-notation is **local-stdio-only** namespace shorthand. The deployed MCP uses the `ce_*` snake_case prefix per § 3.0.2; when these families promote to deployed (v2 candidates), they adopt `ce_lat_*` and `ce_wiki_*`. The `lat.*` divergence is preserved on the local stdio for parity with lat.md upstream verb names; `wiki.*` is purely a CE-native namespace convenience. New `lat.*` tools require a backing CE primitive.
 
 ---
 
