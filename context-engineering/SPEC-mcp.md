@@ -1,9 +1,24 @@
 # Context Engineering MCP — Specification
 
-**Version**: 1.0.0-rc2 (post-audit, 13 themes applied)
-**Status**: Release candidate. All 13 audit themes addressed. Final v1.0 freeze on YC outcome.
+**Version**: 1.0.0-rc3 (post-mcp-builder audit)
+**Status**: Release candidate. 13 prior audit themes + 9 mcp-builder findings applied. Final v1.0 freeze on YC outcome.
 **Editor**: Victor Grosjean
-**Last updated**: 2026-05-01
+**Last updated**: 2026-05-04
+
+**Changelog vs rc2** (audit doc: `plan/audits/spec-mcp-vs-mcp-builder-2026-05-04.md`):
+- `ce_*` service prefix on all 7 tools, with v1.0 aliases (§ 3.0.2)
+- Per-tool annotations added (§ 3.0.3)
+- Current deployment status table merged in from PR #36 (§ 3.0.4, informative)
+- Transport renamed to "Streamable HTTP" (drops "+SSE", § 3.0)
+- Error model split: tool errors in `result.isError` (§ 7.1), protocol errors as JSON-RPC (§ 7.2)
+- OAuth 2.1 promoted to v1.0 optional with metadata path specified (§ 6.1)
+- Local HTTP hardening: loopback bind, Origin validation (§ 6.4)
+- `ce_list_corpora` pagination via `limit`/`offset` + `brain_head_sha` echo (§ 3.5)
+- `response_format` on `ce_pack_context`: `markdown` / `structured` / `both` (§ 3.1)
+- Package naming convention noted (§ 12)
+- `lat.*` divergence rationale tightened (§ 10b)
+- v2-reserved `wiki.closure` renamed to `ce_wiki_impact_of` (canonical, § 10) matching PR #37 implementation; local stdio keeps `wiki.impact_of` dot-notation per § 10b
+- § 10b: clarified that `wiki.*` and `lat.*` dot-notation is local-stdio-only; deployed-v2 promotions adopt `ce_*` prefix
 
 This document is the contract between the CE MCP server and its consumers
 (Claude Code, Anabasis agents, cloud routines, n8n, future internal tools).
@@ -51,14 +66,14 @@ A YC reviewer (or anyone reading) will ask: why not Sourcegraph Cody Context API
 
 A consumer is **CE-1.0-compliant** if it:
 
-1. Authenticates with a Bearer token in the `Authorization` header.
-2. Calls tools by exact name from §3 (no aliases).
+1. Authenticates with a Bearer token in the `Authorization` header (or OAuth 2.1 if the server advertises it; see § 6.1).
+2. Calls tools by canonical name from § 3 (aliases per § 3.0.2 accepted but emit `X-CE-Deprecated` warnings).
 3. Treats unknown response fields as forward-compatible (ignore-extra).
-4. Honors `data_classification` gates (§6.3).
+4. Honors `data_classification` gates (§ 6.3).
 
 A server implementation is **CE-1.0-compliant** if it:
 
-1. Implements all 6 v1 tools from §3 with the exact schemas given.
+1. Implements all 7 v1 tools from § 3 with the exact schemas given, accepting aliases per § 3.0.2.
 2. Persists state in a GitHub-repo-shaped backend matching `schemas/` in the
    brain repo.
 3. Returns errors using the codes in §7.
@@ -69,13 +84,13 @@ A server implementation is **CE-1.0-compliant** if it:
 
 ## 3. Tool catalog (v1)
 
-**Seven tools** + standard MCP `initialize` handshake. All tools accept a JSON object request body, return a JSON object response. Errors follow §7 (mapped to JSON-RPC numeric codes per MCP spec). Tool names are lowercase verb_object; no aliases.
+**Seven tools** + standard MCP `initialize` handshake. Canonical tool names use the `ce_` service prefix (§ 3.0.2); v1.0 aliases without the prefix are accepted for migration. All tools accept a JSON object request body, return a JSON object response. Errors follow § 7 — tool errors return in `result.isError` (§ 7.1), protocol errors as JSON-RPC (§ 7.2).
 
 ### 3.0 MCP basics
 
 This server is a Model Context Protocol server per [modelcontextprotocol.io/specification](https://modelcontextprotocol.io/specification). Conformance:
 
-- **Transports**: `stdio` (Claude Code local) and `streamable-HTTP+SSE` (Anabasis remote, cloud routines, n8n). At least one MUST be supported; v1 reference implementation supports both.
+- **Transports**: `stdio` (Claude Code local) and **Streamable HTTP** (Anabasis remote, cloud routines, n8n) — Streamable HTTP supersedes the older "HTTP+SSE" name; same wire transport. At least one MUST be supported; v1 reference implementation supports both.
 - **Capabilities**: server returns the following capability descriptor in its `initialize` response:
   ```json
   { "tools": { "listChanged": false },
@@ -102,9 +117,9 @@ Every tool response MAY include an optional `next_tool_suggestions` array nudgin
 ```
 
 **Server-side**: include this field when the just-completed tool call has an obvious next step. Typical pairs:
-- `find_relevant_files` → `pack_context` (pack the top hits)
-- `index_github_repo(async=true)` → `get_job_status` (poll for completion)
-- `list_corpora` → `pack_context` (chosen `corpus_id`)
+- `ce_find_relevant_files` → `ce_pack_context` (pack the top hits)
+- `ce_index_github_repo(async=true)` → `ce_get_job_status` (poll for completion)
+- `ce_list_corpora` → `ce_pack_context` (chosen `corpus_id`)
 
 Maximum 2 suggestions per response. Suggestions are heuristic; the server is not required to provide them.
 
@@ -112,7 +127,57 @@ Maximum 2 suggestions per response. Suggestions are heuristic; the server is not
 
 This is a forward-compatible **MINOR** addition (§ 8 versioning) — clients that ignore the field continue to work unchanged.
 
-### 3.1 `pack_context`
+### 3.0.2 Naming & v1.0 aliases
+
+Tools use the `ce_*` snake_case prefix per the [MCP best-practices convention](https://modelcontextprotocol.io/specification) for disambiguation alongside other MCP servers. Bare names from earlier drafts are preserved as **v1.0 aliases**; aliases are removed in v2 with a 90-day deprecation window per § 8.
+
+| Canonical (v1.0+) | v1.0 alias (deprecated v2) | Legacy pre-v1.0 alias |
+|---|---|---|
+| `ce_pack_context` | `pack_context` | `pack` |
+| `ce_find_relevant_files` | `find_relevant_files` | `resolve` |
+| `ce_upload_corpus` | `upload_indexed_corpus`, `register_corpus` | — |
+| `ce_index_github_repo` | `index_github_repo` | `index_workspace` |
+| `ce_list_corpora` | `list_corpora` | — |
+| `ce_get_health` | `get_health` | `health` |
+| `ce_get_job_status` | `get_job_status` | — |
+
+Legacy stdio-MCP tool names that do **not** map 1:1 to a v1.0 canonical (`build_embeddings`, `stats`) are not aliased; clients calling those receive `INVALID_ARGUMENT` with a `details.canonical_replacement` hint pointing to the closest v1.0 tool.
+
+Servers MUST emit `X-CE-Deprecated: <canonical-name>` on alias calls. Clients SHOULD pin to canonical names; alias support is for migration only.
+
+### 3.0.3 Tool annotations
+
+Per MCP 2025-06-18 spec, every tool declares behavioral hints clients use for parallelization decisions, safety prompts, and read-only-mode filtering:
+
+| Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|:---:|:---:|:---:|:---:|
+| `ce_pack_context` | true | false | true | false |
+| `ce_find_relevant_files` | true | false | true | false |
+| `ce_upload_corpus` | false | false | true | true |
+| `ce_index_github_repo` | false | false | true | true |
+| `ce_list_corpora` | true | false | true | false |
+| `ce_get_health` | true | false | true | false |
+| `ce_get_job_status` | true | false | true | false |
+
+`idempotentHint: true` reflects same-input behavior; the equality predicate is per-tool (e.g. `ce_pack_context` keys on `(corpus_commit_sha, all input fields)`; `ce_upload_corpus` on `(corpus_id, files[].contentHash)` — see each tool's "Idempotency" subsection). `destructiveHint` is **false** for the write tools because their per-tool contracts make re-calls with identical inputs a no-op; the v2 `delete_corpus` will be the first tool to set this true.
+
+Clients MUST NOT make security-critical decisions based on annotations — they are hints, not guarantees.
+
+### 3.0.4 Current deployment status (informative)
+
+The §3 catalog describes the **production v1 target** for the deployed MCP. Three surfaces exist today, at three completion stages — clients should pick the one that matches their need:
+
+| Surface | Where | Tools live today | Notes |
+|---|---|---|---|
+| **Deployed MCP stub** | `https://ce-mcp-stub.vercel.app` (Vercel project `ce-mcp-stub`, region `cdg1`) | `pack_context`, `list_corpora`, `health` (3/7 specced) | YC-demo deployment shipped 2026-05-02 (PR #14). Wire-shape pinned to §3.1 / §3.5 / §3.6 — a v1 client can hit this URL and the request/response shapes match the spec. Single hard-coded corpus (this repo, indexed via `server-stub/build_demo_index.py`); keyword scoring only; 3 depth bands; no embeddings; no brain-repo writes. |
+| **Local stdio MCP** | `scripts/mcp_server.py` (run via `mcp.run()` over stdio) | 15: `pack`, `resolve`, `index_workspace`, `index_github_repo`, `build_embeddings`, `stats`, `wiki.{ask,add,audit,impact_of}`, `lat.{locate,section,refs,search,expand}` | The full local surface. Naming convention per §10b — dotted namespaces (`wiki.*`, `lat.*`) for sub-corpus families; bare snake_case for top-level. Names intentionally diverge from the deployed-MCP target: `pack` (local) ↔ `ce_pack_context` (deployed); `resolve` (local) ↔ `ce_find_relevant_files` (deployed). The deployed target uses verbose snake_case for tool-list browsability; the local stdio uses shorter names because consumers already know the namespace. |
+| **Production v1** | future Vercel deploy, replaces stub | 7 (the full §3 catalog) | Gap = `ce_find_relevant_files`, `ce_upload_corpus`, `ce_index_github_repo`, `ce_get_job_status`. Blocked on brain-repo writes (§5.1 lock-in-manifest), embedding-provider abstraction in MCP-server-mode (PR #35 landed BGE/codestral 2026-05-04), and §6 auth surface (hashed token map + `data_classification` gates + optional OAuth 2.1). |
+
+**For agent authors**: bind to the deployed stub URL when YC-style demos suffice; bind to the local stdio MCP when you need the full surface (wiki, lat.md interop, write paths). The two surfaces coexist — same project, different deployments, intentionally different tool names per §10b.
+
+**For SPEC readers**: §3.1–§3.7 describe the production v1 target. The stub implements §3.1 / §3.5 / §3.6 only. The local stdio MCP implements a parallel surface (different names, larger scope) called out in §10b.
+
+### 3.1 `ce_pack_context` (alias: `pack_context`)
 
 **Purpose**: Given a query and a corpus, return a depth-packed markdown bundle of relevant files sized to a token budget. The headline tool — 90% of consumer calls go here.
 
@@ -127,8 +192,9 @@ This is a forward-compatible **MINOR** addition (§ 8 versioning) — clients th
 | `task` | enum \| null | no | `null` | `fix`, `review`, `explain`, `build`, `document`, `research`, or `null` for auto-detect. |
 | `model_context` | integer | no | `null` | Hint: caller's model context window (e.g. `1000000`). When set with no explicit `budget`, server scales budget to ~12% of `model_context`, clamped to [4000, 64000]. |
 | `why` | boolean | no | `false` | If true, include a trace of mode/task selection + entry points + budget rationale before the packed markdown. |
+| `response_format` | enum | no | `markdown` | `markdown` (single packed-markdown blob), `structured` (per-file content objects, no markdown blob), or `both`. Programmatic consumers SHOULD use `structured` to avoid markdown re-parsing. |
 
-**Output**:
+**Output** (`response_format: "markdown"`, default):
 
 ```json
 {
@@ -144,6 +210,29 @@ This is a forward-compatible **MINOR** addition (§ 8 versioning) — clients th
 }
 ```
 
+**Output** (`response_format: "structured"`):
+
+```json
+{
+  "files": [
+    {
+      "path": "string",
+      "depth": "Full|Detail|Summary|Structure|Mention",
+      "tokens": "integer",
+      "relevance": "number 0..1",
+      "content": "string (the rendered content at the assigned depth)"
+    }
+  ],
+  "tokens_used": "integer",
+  "tokens_budget": "integer",
+  "trace": "string | null",
+  "corpus_commit_sha": "string",
+  "took_ms": "integer"
+}
+```
+
+`response_format: "both"` returns the union of both shapes from a single computation (servers MAY serve `markdown` from `files[].content` rather than rendering twice). ETag canonicalization includes `response_format`, so each shape caches independently.
+
 **Errors**:
 
 | Code | Meaning |
@@ -155,13 +244,13 @@ This is a forward-compatible **MINOR** addition (§ 8 versioning) — clients th
 | `RATE_LIMITED` | per-token call rate exceeded |
 | `BUDGET_TOO_SMALL` | `budget` < min file's structural overhead (~500 tokens). Distinct from INVALID_ARGUMENT for clarity. |
 
-**Idempotency**: idempotent given `(corpus_commit_sha, all input fields)`. Two calls with identical inputs against an unchanged corpus return the same `markdown` byte-for-byte.
+**Idempotency**: idempotent given `(corpus_commit_sha, all input fields including `response_format`)`. Two calls with identical inputs against an unchanged corpus return byte-identical `markdown` (or `files[].content` strings, for `structured`).
 
 **Cacheability**: `Cache-Control: private, max-age=60` plus an `ETag` derived from `(corpus_commit_sha + sha256(canonical_inputs))`. **NEVER `public`** — packed responses include source content from corpora that may be `confidential` or `restricted`; CDN/intermediary caching of these would leak content. Servers MUST additionally emit `Cache-Control: no-store` when the responding corpus's `data_classification` is `confidential` or `restricted`. Conditional `If-None-Match` returns 304.
 
 ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalization Scheme) before hashing. Two clients sending fields in different orders produce identical ETags.
 
-### 3.2 `find_relevant_files`
+### 3.2 `ce_find_relevant_files` (alias: `find_relevant_files`)
 
 **Purpose**: Like `pack_context` but returns ranked paths only — no content. For consumers doing their own assembly (e.g. a tool that wants to pass paths to a different reader, or compose its own context format).
 
@@ -198,9 +287,7 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 
 **Idempotency**: same as `pack_context`.
 
-### 3.3 `upload_indexed_corpus` (a.k.a. `register_corpus`)
-
-> **Naming note**: tool name is `upload_indexed_corpus` for explicitness — sibling write tool `index_github_repo` makes the contrast obvious to an LLM scanning the catalog ("server fetches & indexes" vs "client supplies the index"). Legacy alias `register_corpus` remains for v1.0 → v1.1 migration only and is removed in v2.
+### 3.3 `ce_upload_corpus` (aliases: `upload_indexed_corpus`, `register_corpus`)
 
 **Use when**: you've already indexed a corpus locally (or via a custom adapter the server can't reach) and want to make it queryable through the MCP. Typical: local repos, private repos the server's GitHub App can't read, Granola transcripts processed by an adapter, etc.
 
@@ -223,7 +310,7 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
 
 The `embeddings` object is one of:
 - `{ "format": "json", "vectors": [[float, ...], ...], "paths": [string], "hashes": [string] }` — N×dims `number[][]`. Tool-using LLMs can emit this reliably. **Default.**
-- `{ "format": "presigned", "vectors_url": "https://...", "paths_url": "...", "hashes_url": "...", "byte_format": "float32-le-row-major" }` — for payloads >8 MB. Client first calls `upload_indexed_corpus_init` (returns presigned URLs), uploads each blob, then calls `upload_indexed_corpus` with the URLs. Server validates byte length matches `N × dims × 4`.
+- `{ "format": "presigned", "vectors_url": "https://...", "paths_url": "...", "hashes_url": "...", "byte_format": "float32-le-row-major" }` — for payloads >8 MB. Client first calls `ce_upload_corpus_init` (returns presigned URLs), uploads each blob, then calls `ce_upload_corpus` with the URLs. Server validates byte length matches `N × dims × 4`.
 
 `paths.length === hashes.length === N` regardless of format. Server validates.
 
@@ -248,14 +335,14 @@ The `embeddings` object is one of:
 |---|---|
 | `INVALID_ARGUMENT` | manifest validation failed (see §7 for details payload) |
 | `CORPUS_LOCKED` | another writer holds the lock; retryable |
-| `PAYLOAD_TOO_LARGE` | request body > 8 MB |
+| `PAYLOAD_TOO_LARGE` | inline request body > 32 MB; use `format: "presigned"` per § 3.3 |
 | `EMBEDDING_MISMATCH` | `paths.length !== hashes.length`, or `vectors` shape doesn't match `(N, dims)` |
 | `WRITE_CONFLICT` | git push 409 after 3 retries |
 | `BRAIN_UNAVAILABLE` | GitHub API down/throttled beyond retry budget |
 
 **Idempotency**: idempotent on `(corpus_id, files[].contentHash for all files)`. A second call with identical content is a no-op (returns the existing `commit_sha` without writing).
 
-### 3.4 `index_github_repo`
+### 3.4 `ce_index_github_repo` (alias: `index_github_repo`)
 
 **Purpose**: Server-side indexing — clones a GitHub repo, runs the indexer, computes embeddings via the configured provider, commits the result to the brain. For repos the server's GitHub App can read.
 
@@ -299,7 +386,7 @@ Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_c
 | Code | Meaning |
 |---|---|
 | `INVALID_ARGUMENT` | malformed `repo`, unknown branch |
-| `SOURCE_FORBIDDEN` | server's GitHub App can't read `repo`. Caller should use `register_corpus` instead. |
+| `SOURCE_FORBIDDEN` | server's GitHub App can't read `repo`. Caller should use `ce_upload_corpus` instead. |
 | `SOURCE_NOT_FOUND` | repo doesn't exist |
 | `CORPUS_LOCKED` | retryable |
 | `BUDGET_EXCEEDED` | sync indexing would exceed function timeout (~50s). Caller should retry with `async=true`. |
@@ -308,7 +395,7 @@ Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_c
 
 **Idempotency**: idempotent on `(repo, branch, commit_sha)`. Re-indexing the same source commit is a no-op modulo embedding-provider drift (different model versions yield different vectors).
 
-### 3.5 `list_corpora`
+### 3.5 `ce_list_corpora` (alias: `list_corpora`)
 
 **Purpose**: Discoverability. Returns all corpora visible to the caller, with metadata.
 
@@ -319,6 +406,8 @@ Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_c
 | `lifecycle_state` | enum[] | no | `["active", "idle"]` | Filter. Pass `["archived", "frozen"]` to include those. |
 | `data_classification_max` | enum | no | `internal` | Maximum classification visible to caller. Default `internal`; explicit pass needed for higher. |
 | `source_type` | enum | no | `null` | Filter by source type. |
+| `limit` | integer | no | 50 | Max corpora per response. Min 1, max 200. |
+| `offset` | integer | no | 0 | Pagination offset. |
 
 **Output**:
 
@@ -336,17 +425,21 @@ Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_c
       "last_refresh_completed_at": "string|null",
       "archive_location": "string|null"
     }
-  ]
+  ],
+  "total_count": "integer (matching corpora after data_classification_max + lifecycle_state + source_type filtering, before pagination)",
+  "has_more": "boolean (true if total_count > offset + corpora.length)",
+  "next_offset": "integer | null (offset for next page, or null if has_more is false)",
+  "brain_head_sha": "string (the brain-repo sha this page was computed from)"
 }
 ```
+
+Pagination is best-effort against live data: each call recomputes against the current `brain_head_sha`, which the response echoes. Clients SHOULD compare `brain_head_sha` across pages and re-page from offset 0 if it changes.
 
 **Errors**: `RATE_LIMITED` only.
 
 **Idempotency**: trivially idempotent (read-only).
 
-### 3.6 `get_health`
-
-> **Naming note**: was `health` in v1.0-rc1. Renamed to `get_health` for verb_object consistency. Legacy `health` accepted as alias in v1.0 only.
+### 3.6 `ce_get_health` (aliases: `get_health`, `health`)
 
 **Use when**: ops monitoring, smoke tests, version-pinning checks.
 
@@ -365,13 +458,14 @@ Clients query progress via `get_job_status(job_id)` (§3.7). Do NOT poll `list_c
   "commit_sha": "string (server git sha)",
   "brain_head_sha": "string (latest brain repo sha known to server)",
   "providers_available": ["openai", "mistral", "voyage"],
+  "auth_methods_supported": ["bearer"],
   "took_ms": "integer"
 }
 ```
 
 **Errors**: never errors when reachable. If unreachable, no response.
 
-### 3.7 `get_job_status`
+### 3.7 `ce_get_job_status` (alias: `get_job_status`)
 
 **Use when**: checking on an async refresh started via `index_github_repo(async=true)`.
 
@@ -445,8 +539,8 @@ behavior defined in
 
 Default serving policy:
 
-- `active`, `idle`, `frozen` corpora are served by all read tools (`pack_context`, `find_relevant_files`, `list_corpora`).
-- `archived` corpora return tombstone metadata in `list_corpora` and `CORPUS_ARCHIVED` from read tools, with `archive_location` in the error details.
+- `active`, `idle`, `frozen` corpora are served by all read tools (`ce_pack_context`, `ce_find_relevant_files`, `ce_list_corpora`).
+- `archived` corpora return tombstone metadata in `ce_list_corpora` and `CORPUS_ARCHIVED` from read tools, with `archive_location` in the error details.
 
 A successful refresh resets `lifecycle_state` to `active`.
 
@@ -457,8 +551,8 @@ A successful refresh resets `lifecycle_state` to `active`.
 ### 5.1 Refresh & locking
 
 A refresh is one of:
-- `index_github_repo` (server-side full re-index)
-- `upload_indexed_corpus` (client-supplied re-upload)
+- `ce_index_github_repo` (server-side full re-index)
+- `ce_upload_corpus` (client-supplied re-upload)
 
 Refresh writes acquire a corpus-scoped lock by writing `manifest.lock = {holder, acquired_at, expires_at, intent}` *first*, then performing data writes, **then committing the data + lock-clear in a SINGLE tree-then-commit API call** (no separate "release commit" — that race window leaks locks). The single commit bumps `version` + `last_refresh_completed_at` + `last_refresh_commit_sha` AND sets `lock: null` atomically.
 
@@ -470,7 +564,7 @@ Stale locks (`expires_at < now`) MAY be taken over by another writer. Takeover e
 
 ### 5.2 Async operations
 
-Tools accepting `async: true` (currently `index_github_repo` and reserved
+Tools accepting `async: true` (currently `ce_index_github_repo` and reserved
 slots in v2) MUST:
 
 1. Validate inputs synchronously and return `{job_id, status: "queued"}` within 1s.
@@ -505,11 +599,13 @@ Authorization: Bearer <token>
 
 Tokens are issued out-of-band. The server reads a hashed token map from Vercel KV (`tokens:` namespace), NOT a raw JSON env var. Each entry: `{token_id: string, sha256(token): string, role: enum, created_at: timestamp, last_used_at: timestamp | null}`. Token revocation = delete KV row; takes effect on next request (no redeploy). Telemetry logs `token_id` (not the token) on every `tool.call` event for auditability.
 
-A bootstrap token for the first deploy can come from `CE_MCP_BOOTSTRAP_TOKEN` env (writes one row to KV at startup if KV is empty). v2 spec moves to OAuth 2.1 per Anthropic's MCP guidance.
+A bootstrap token for the first deploy can come from `CE_MCP_BOOTSTRAP_TOKEN` env (writes one row to KV at startup if KV is empty).
+
+**OAuth 2.1 (optional in v1.0, default in v2)**: Per [Anthropic's MCP auth guidance](https://modelcontextprotocol.io/specification), CE MAY expose OAuth 2.1 alongside Bearer. Bearer is the single-tenant default; OAuth 2.1 is required for multi-tenant or partner deployments. When enabled, servers MUST expose RFC 8414 metadata at `/.well-known/oauth-authorization-server` and add an `auth_methods_supported: ["bearer", "oauth2.1"]` field to `ce_get_health` output (this is distinct from the embeddings-provider list in `providers_available`). Token format and grant types are deferred to v2; v1.0 implementers SHOULD align with the MCP spec's published OAuth profile when it stabilizes. v2 makes OAuth 2.1 the default and deprecates raw Bearer for new deployments.
 
 Roles in v1:
 - `reader` — may call all read tools. Implicit `data_classification_max: internal`.
-- `writer` — `reader` + `register_corpus`, `index_github_repo`. Implicit `data_classification_max: confidential`.
+- `writer` — `reader` + `ce_upload_corpus`, `ce_index_github_repo`. Implicit `data_classification_max: confidential`.
 - `admin` — all of the above + `data_classification_max: restricted`. Reserved for human ops.
 
 A v2 spec will replace this with per-corpus ACL.
@@ -520,7 +616,7 @@ Server-side state mutations use a GitHub App installation token, NOT a PAT.
 The App is scoped to:
 - `Contents: Read & Write` on `syrocolab/company-brain`
 - `Contents: Read & Write` on `syrocolab/company-brain-archive` (archive sibling)
-- `Contents: Read` on Syroco source repos (for `index_github_repo`)
+- `Contents: Read` on Syroco source repos (for `ce_index_github_repo`)
 - `Metadata: Read`
 
 Source-repo reads outside the Syroco org use a separate read-only GitHub
@@ -533,7 +629,7 @@ App credentials live in Vercel encrypted env. Rotation cadence: 90 days.
 
 Every corpus carries `data_classification ∈ {public, internal, confidential, restricted}`.
 
-Read tools (`pack_context`, `find_relevant_files`) MUST refuse to return
+Read tools (`ce_pack_context`, `ce_find_relevant_files`) MUST refuse to return
 content from a corpus whose `data_classification` exceeds the caller's
 `data_classification_max`. Default cap by role:
 
@@ -549,23 +645,81 @@ cap to further narrow.
 Returns `INVALID_ARGUMENT` with details `{exceeded_classification: "..."}`
 if exceeded.
 
+### 6.4 Local HTTP server hardening
+
+When CE runs as a Streamable HTTP server on a developer machine (rather than the canonical Vercel deploy):
+
+- The server MUST **bind to `127.0.0.1` by default**, not `0.0.0.0`. Opt-in to `0.0.0.0` only via `CE_MCP_BIND_PUBLIC=1`, with a startup warning.
+- When bound to loopback, the server MUST **reject requests whose `Origin` resolves to a non-loopback host** (`400 INVALID_ARGUMENT`) — this blocks DNS rebinding from malicious browser tabs. `Origin: null` (file://, sandboxed iframes) MUST also be rejected unless `CE_MCP_ALLOW_NULL_ORIGIN=1`. Servers MAY accept additional origins via `CE_MCP_ALLOWED_ORIGINS` (CSV).
+- The server MUST **disable `CE_MCP_BOOTSTRAP_TOKEN`** when bound to a non-loopback address.
+
+The Vercel deploy (fixed origin, managed TLS) is not subject to these rules; they apply to local-HTTP-mode only. stdio mode has no transport-layer attack surface.
+
 ---
 
 ## 7. Error model
 
-CE servers expose errors via two channels — **MCP JSON-RPC** for `stdio` and `streamable-HTTP+SSE` transports (the canonical channel), and **HTTP-level errors** for non-MCP HTTP clients calling the same Vercel functions directly.
+CE distinguishes **tool errors** (returned in the tool's result so the agent can self-correct) from **protocol errors** (JSON-RPC errors that abort the call). HTTP-direct clients get a parallel HTTP shape carrying the same information. All three layers agree on the canonical string code.
 
-**MCP / JSON-RPC** (numeric codes per JSON-RPC 2.0 + MCP):
+**Boundary rule for implementers**: `auth + transport failures → § 7.2; everything else → § 7.1`. Concretely, only `UNAUTHENTICATED`, `PERMISSION_DENIED`, `WEBHOOK_SECRET_MISMATCH`, `BRAIN_UNAVAILABLE`, and `INTERNAL` are protocol errors. Request-validation, rate-limiting, payload-size, and upstream-provider failures are tool errors — the agent has the context to self-correct or retry.
+
+### 7.1 Tool errors (`result.isError: true`)
+
+Per MCP 2025-06-18 spec, errors that arise from a *valid* tool call — bad inputs, missing corpora, retryable conflicts — return as `result.isError: true` with a structured content block. The agent sees this as a normal tool response and can adjust its next call without thinking the protocol broke.
+
+```json
+{
+  "isError": true,
+  "content": [
+    {
+      "type": "text",
+      "text": "INVALID_ARGUMENT: budget 500 below min 1000. Try budget=4000 or higher."
+    }
+  ],
+  "structuredContent": {
+    "code": "INVALID_ARGUMENT",
+    "details": { "field": "budget", "min": 1000 },
+    "retryable": false,
+    "retry_after_seconds": null
+  }
+}
+```
+
+Tool error codes:
+
+| Code | When | HTTP-direct | Retryable |
+|---|---|---|---|
+| `INVALID_ARGUMENT` | request shape / value violation (budget out of range, mode unknown, corpus_id malformed, etc.) | 400 | no |
+| `BUDGET_TOO_SMALL` | `budget` < min file overhead (~500 tok) | 400 | no |
+| `EMBEDDING_MISMATCH` | `paths.length !== hashes.length`, or vectors shape ≠ (N, dims) | 400 | no |
+| `CORPUS_NOT_FOUND` | `corpus_id` not in brain repo | 404 | no |
+| `CORPUS_ARCHIVED` | corpus archived; `archive_location` in details | 410 | no |
+| `CORPUS_LOCKED` | another writer holds the lock | 409 | yes |
+| `JOB_NOT_FOUND` | unknown `job_id` (or expired after 7 days) | 404 | no |
+| `BUDGET_EXCEEDED` | sync indexing would breach Vercel timeout — retry with `async=true` | 408 | no — use async |
+| `EMBEDDING_PROVIDER_ERROR` | upstream embedding API failed beyond retry budget | 502 | yes |
+| `EMBEDDING_PROVIDER_PARTIAL` | partial success; `details.success_count` populated | 502 | yes |
+| `SOURCE_FORBIDDEN` | server's GitHub App can't read repo — use `ce_upload_corpus` | 403 | no |
+| `SOURCE_NOT_FOUND` | repo doesn't exist | 404 | no |
+| `SOURCE_MISMATCH` | `corpus_id` collides with different source.branch | 409 | no — pass `corpus_id` explicitly |
+| `WRITE_CONFLICT` | git push 409 after 3 retries | 409 | yes |
+| `BRAIN_RATE_LIMITED` | GitHub secondary rate limit; back off, don't page | 503 | yes |
+| `PAYLOAD_TOO_LARGE` | inline request body > 32 MB; use `format: "presigned"` | 413 | no |
+| `RATE_LIMITED` | per-token call rate exceeded | 429 | yes |
+
+### 7.2 Protocol errors (JSON-RPC)
+
+Errors that prevent the tool from running at all — auth, oversized payloads, server bugs, infrastructure outages — surface as JSON-RPC `error` per MCP spec:
 
 ```json
 {
   "jsonrpc": "2.0",
   "id": "<request id>",
   "error": {
-    "code": -32602,
+    "code": -32001,
     "message": "human-readable",
     "data": {
-      "code_name": "INVALID_ARGUMENT",
+      "code_name": "UNAUTHENTICATED",
       "details": { "...": "..." },
       "retryable": false,
       "retry_after_seconds": null
@@ -574,7 +728,19 @@ CE servers expose errors via two channels — **MCP JSON-RPC** for `stdio` and `
 }
 ```
 
-**HTTP-direct** (legacy / non-MCP callers):
+Protocol error codes:
+
+| Code | JSON-RPC | HTTP-direct | Retryable | Meaning |
+|---|--:|---|---|---|
+| `UNAUTHENTICATED` | -32001 | 401 | no | missing/invalid bearer token |
+| `PERMISSION_DENIED` | -32002 | 403 | no | token role insufficient for this tool / data classification |
+| `BRAIN_UNAVAILABLE` | -32009 | 503 | yes | GitHub upstream down |
+| `WEBHOOK_SECRET_MISMATCH` | -32011 | 500 | no — operator action |
+| `INTERNAL` | -32603 | 500 | yes | server bug; reported to telemetry |
+
+### 7.3 HTTP-direct shape
+
+Non-MCP HTTP clients calling the same Vercel functions directly receive a flat error envelope (regardless of layer):
 
 ```json
 {
@@ -588,49 +754,9 @@ CE servers expose errors via two channels — **MCP JSON-RPC** for `stdio` and `
 }
 ```
 
-Both convey identical information in different shapes. HTTP responses MUST also emit the `Retry-After` header (in seconds) when `retryable: true` and `retry_after_seconds` is known. This duplication is intentional — both header and body fields agree, so clients can use either.
+HTTP responses MUST also emit the `Retry-After` header (in seconds) when `retryable: true` and `retry_after_seconds` is known. Header and body agree; clients may use either.
 
-**JSON-RPC ↔ string code map**:
-
-| String code | JSON-RPC code | HTTP | Retryable |
-|---|--:|---|---|
-| `INVALID_ARGUMENT` | -32602 | 400 | no |
-| `UNAUTHENTICATED` | -32001 | 401 | no |
-| `PERMISSION_DENIED` | -32002 | 403 | no |
-| `CORPUS_NOT_FOUND` | -32004 | 404 | no |
-| `JOB_NOT_FOUND` | -32004 | 404 | no |
-| `CORPUS_LOCKED` | -32005 | 409 | yes |
-| `WRITE_CONFLICT` | -32005 | 409 | yes |
-| `EMBEDDING_MISMATCH` | -32602 | 400 | no |
-| `PAYLOAD_TOO_LARGE` | -32602 | 413 | no |
-| `RATE_LIMITED` | -32006 | 429 | yes |
-| `BUDGET_EXCEEDED` | -32007 | 408 | no — use async |
-| `EMBEDDING_PROVIDER_ERROR` | -32008 | 502 | yes |
-| `EMBEDDING_PROVIDER_PARTIAL` | -32008 | 502 | yes (with details.success_count) |
-| `BRAIN_UNAVAILABLE` | -32009 | 503 | yes |
-| `BRAIN_RATE_LIMITED` | -32010 | 503 | yes (different from BRAIN_UNAVAILABLE: GitHub secondary rate limit; back off, don't page) |
-| `WEBHOOK_SECRET_MISMATCH` | -32011 | 500 | no — operator action: reconfigure webhook |
-| `SOURCE_FORBIDDEN` | -32012 | 403 | no |
-| `SOURCE_NOT_FOUND` | -32013 | 404 | no |
-| `SOURCE_MISMATCH` | -32014 | 409 | no — corpus_id collides with different source.branch; specify `corpus_id` explicitly |
-| `INTERNAL` | -32603 | 500 | yes |
-
-Standard codes (in addition to per-tool codes above):
-
-| Code | HTTP | Retryable | Meaning |
-|---|---|---|---|
-| `UNAUTHENTICATED` | 401 | no | missing/invalid bearer token |
-| `PERMISSION_DENIED` | 403 | no | token role insufficient |
-| `INVALID_ARGUMENT` | 400 | no | request shape violation |
-| `RATE_LIMITED` | 429 | yes | per-token rate exceeded |
-| `INTERNAL` | 500 | yes | server bug; reported to telemetry |
-| `BRAIN_UNAVAILABLE` | 503 | yes | GitHub upstream down |
-| `EMBEDDING_PROVIDER_ERROR` | 502 | yes | upstream embedding API |
-| `BUDGET_EXCEEDED` | 408 | use async | sync timeout would breach |
-
-`retryable: true` errors include `retry_after_seconds` when the server can
-estimate a useful backoff (e.g. from upstream rate-limit headers). Clients
-SHOULD honor it.
+`retryable: true` errors include `retry_after_seconds` when the server can estimate a useful backoff (from upstream rate-limit headers). Clients SHOULD honor it.
 
 ---
 
@@ -644,7 +770,7 @@ Spec semver: `MAJOR.MINOR.PATCH`.
   fields, new error codes that map to existing categories).
 - `PATCH` bump: clarifications, doc fixes, no behavior change.
 
-`health` returns the active spec version. Clients SHOULD log it on startup.
+`ce_get_health` returns the active spec version. Clients SHOULD log it on startup.
 
 Breaking changes require:
 1. New tool name (`pack_context_v2`) OR new server endpoint version (`/v2/...`)
@@ -684,7 +810,7 @@ schemas freeze at the same MAJOR version as the tool API.
 
 ## 10. Future tools (v2 contract preview, non-normative)
 
-Reserved names — implementations MUST NOT use these for unrelated tools:
+Reserved names — implementations MUST NOT use these for unrelated tools. v2 will adopt the `ce_` prefix per § 3.0.2 (e.g. `ce_find_related_symbols`, `ce_delete_corpus`); the bare names below are reserved in both forms.
 
 - `find_related_symbols(symbol, corpus_id, hops?, relations?)` — graph traversal. Blocked on persistent `graph.jsonl`.
 - `list_concept_clusters(corpus_id)` — birds-eye LLM-labelled clusters (PR #8).
@@ -695,7 +821,7 @@ Reserved names — implementations MUST NOT use these for unrelated tools:
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
 - `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
-- `wiki.closure(entity_id, max_hops?, relation_kinds?, min_weight?, budget?)` — entity-rooted blast-radius closure with risk-score per affected entity. Currently only on the local stdio MCP (`scripts/mcp_server.py`) per Phase 2.4; reserved here for v2 promotion to the deployed MCP if customer demand surfaces. (Dot-notation matches the local-MCP wiki tool family; deployed-MCP non-wiki tools use snake_case — convention reconciliation deferred to v2.)
+- `ce_wiki_impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)` — entity-rooted impact closure with risk-score per affected entity. Local stdio name: `wiki.impact_of` (shipped via PR #37 in `scripts/mcp_server.py` + `scripts/wiki/impact_of.py`); deployed-v2 canonical name follows § 3.0.2's `ce_*` prefix. Reserved here for v2 promotion to the deployed MCP if customer demand surfaces. Naming note: only surviving primitive from the "job-shaped MCP surface" RFC (rename premise abandoned 2026-05-04). When `wiki.*` family promotes to the deployed MCP in v2, all members adopt the `ce_wiki_*` snake_case form: `ce_wiki_ask`, `ce_wiki_add`, `ce_wiki_audit`, `ce_wiki_impact_of`. Local stdio retains the `wiki.*` dot-notation as namespace shorthand (see § 10b).
 
 ---
 
@@ -711,7 +837,7 @@ Five thin wrappers exposing lat.md's verb surface (`locate / section / refs / se
 
 The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAuth Flow`, `src/foo.ts#bar`) or fully-bracketed refs (`[[auth-middleware]]`). Brackets are optional but recommended for parity with lat.md's CLI.
 
-Naming convention: `lat.*` for lat.md interop; `wiki.*` for CE-native; deployed-MCP non-wiki tools stay snake_case. Forward compatibility — when lat.md adds new verbs, add them under `lat.*` only if CE has a meaningful primitive to back them.
+Naming convention: `lat.*` and `wiki.*` dot-notation is **local-stdio-only** namespace shorthand. The deployed MCP uses the `ce_*` snake_case prefix per § 3.0.2; when these families promote to deployed (v2 candidates), they adopt `ce_lat_*` and `ce_wiki_*`. The `lat.*` divergence is preserved on the local stdio for parity with lat.md upstream verb names; `wiki.*` is purely a CE-native namespace convenience. New `lat.*` tools require a backing CE primitive.
 
 ---
 
@@ -720,10 +846,10 @@ Naming convention: `lat.*` for lat.md interop; `wiki.*` for CE-native; deployed-
 The existing `context-engineering` skill at `agent-skills/context-engineering/` is CLI-first. After v1 deploy, it becomes a thin MCP client. Migration semantics:
 
 - **Trigger**: skill checks `CONTEXT_ENG_MCP_URL` env at startup. If set, it proxies tool calls to the MCP. If unset, it falls back to local CLI execution. **Local-only mode is preserved as a first-class path** — tests, dev loops, and air-gapped use rely on it.
-- **Tool name aliasing during transition**: the skill's `mcp_tools` frontmatter pins the v1 names (`pack_context`, `find_relevant_files`, `upload_indexed_corpus`, `index_github_repo`, `list_corpora`, `get_health`, `get_job_status`). v1.0 server SHOULD accept legacy aliases (`pack`, `index_workspace`, `build_embeddings`, `resolve`, `stats`, `register_corpus`, `health`) and emit `X-CE-Deprecated` warnings. Aliases are removed in v2.
+- **Tool name aliasing during transition**: the skill's `mcp_tools` frontmatter SHOULD pin to canonical `ce_*` names per § 3.0.2. v1.0 server MUST accept every alias listed in § 3.0.2 and emit `X-CE-Deprecated: <canonical-name>` warnings on each. All aliases are removed in v2.
 - **Failure UX**: when `CONTEXT_ENG_MCP_URL` is set but the MCP is unreachable, the skill MUST surface a `BRAIN_UNAVAILABLE`-shaped error to its caller. Skills MAY implement automatic local fallback; default behavior is to fail-closed so callers know they're getting stale data.
 - **Test fixtures**: the reference implementation at `agent-skills/context-engineering/tests/fixtures/mock_mcp_server.py` provides deterministic responses for each tool. Skill authors building wrapper skills test against the mock first, then against staging deploy.
-- **`upload_indexed_corpus` UX in the skill**: when the skill's CLI produces a fresh local index, it MAY auto-upload to the configured MCP via `upload_indexed_corpus`. This is opt-in via `--mcp-publish` flag; default is local-only.
+- **`ce_upload_corpus` UX in the skill**: when the skill's CLI produces a fresh local index, it MAY auto-upload to the configured MCP via `ce_upload_corpus`. This is opt-in via `--mcp-publish` flag; default is local-only.
 
 A wrapper skill (e.g. "weekly architectural brief") can be built atop these tools without touching the MCP server — the catalog is stable across minor versions per §8.
 
@@ -731,13 +857,14 @@ A wrapper skill (e.g. "weekly architectural brief") can be built atop these tool
 
 These are not part of the contract; they describe the v1 implementation.
 
+- **Package naming**: npm `context-engineering-mcp-server` (TS/Node), PyPI `context_engineering_mcp` (Python). Repo path stays `agent-skills/context-engineering/`.
 - **Hosting**: Vercel Functions (Node.js for the MCP server, Python scripts as build-time artifacts).
 - **State**: `syrocolab/company-brain` GitHub repo. Per-corpus folder layout per `LIFECYCLE.md` and the schemas.
 - **Read cache**: in-memory module-level cache (warm function reuse) → Vercel KV (corpus_id → commit_sha pointers, NOT content) → lazy per-corpus tarball fetch via GitHub archive API.
 - **Write path**: Octokit, GitHub App installation token, single tree-then-commit per refresh, parallel blob creation capped at concurrency 10.
-- **Locking**: lock-in-manifest, 120s TTL, stale takeover on `expires_at < now`.
+- **Locking**: lock-in-manifest, TTLs per § 5.1 (300s sync / 20 min async with 60s heartbeat), stale takeover on `expires_at < now`.
 - **Embeddings format on disk**: NumPy `.npy` (vectors) + `paths.json` + `hashes.json` per corpus.
-- **Long ops**: `index_github_repo` >50s → punted to Vercel Cron via `async=true`.
+- **Long ops**: `ce_index_github_repo` >50s → punted to Vercel Cron via `async=true`.
 
 Full rationale + alternatives considered in
 `~/.claude/handoffs/context_engineering_mcp_plan.md` (v0.3) and the
@@ -760,32 +887,35 @@ Full rationale + alternatives considered in
 
 ## Appendix A — Tool quick reference (for AI agents reading the catalog)
 
+Canonical names; v1.0 aliases per § 3.0.2.
+
 | Tool | Use when |
 |---|---|
-| `pack_context` | You want a markdown bundle of relevant files for a query, ready to feed an LLM. |
-| `find_relevant_files` | You want ranked file paths only (you'll fetch content yourself). |
-| `register_corpus` | You've indexed something locally (or via a custom adapter) and want to make it queryable. |
-| `index_github_repo` | You want the server to clone + index a GitHub repo it can reach. |
-| `list_corpora` | You want to know what's available. |
-| `health` | You want to confirm the server is reachable and on a known version. |
+| `ce_pack_context` | You want a markdown (or structured JSON) bundle of relevant files for a query, ready to feed an LLM. |
+| `ce_find_relevant_files` | You want ranked file paths only (you'll fetch content yourself). |
+| `ce_upload_corpus` | You've indexed something locally (or via a custom adapter) and want to make it queryable. |
+| `ce_index_github_repo` | You want the server to clone + index a GitHub repo it can reach. |
+| `ce_list_corpora` | You want to know what's available. Supports `limit`/`offset` pagination. |
+| `ce_get_health` | You want to confirm the server is reachable and on a known version. |
+| `ce_get_job_status` | You're polling an async job started via `ce_index_github_repo(async=true)`. |
 
 ## Appendix B — Common consumer flows
 
 ### Flow 1: First-time setup of a new code corpus
 
 ```
-1. index_github_repo(repo="owner/foo", branch="main", data_classification="internal")
+1. ce_index_github_repo(repo="owner/foo", branch="main", data_classification="internal")
    → returns corpus_id, commit_sha
-2. pack_context(query="...", corpus_id=...)
+2. ce_pack_context(query="...", corpus_id=...)
    → returns markdown
 ```
 
 ### Flow 2: Daily query against an existing corpus
 
 ```
-1. list_corpora({lifecycle_state: ["active"]})
+1. ce_list_corpora({lifecycle_state: ["active"]})
    → choose corpus_id
-2. pack_context(query="...", corpus_id=..., budget=32000)
+2. ce_pack_context(query="...", corpus_id=..., budget=32000)
    → markdown
 ```
 
@@ -793,9 +923,9 @@ Full rationale + alternatives considered in
 
 ```
 [Monday 08:00 cron]
-  → index_github_repo(repo="syrocolab/efficientship-backend", branch="develop", async=false)
-  → list_corpora({source_type: "github_repo"}) — find corpus_id
-  → pack_context(query="recent architectural changes", corpus_id, budget=32000)
+  → ce_index_github_repo(repo="syrocolab/efficientship-backend", branch="develop", async=false)
+  → ce_list_corpora({source_type: "github_repo"}) — find corpus_id
+  → ce_pack_context(query="recent architectural changes", corpus_id, budget=32000)
   → (different MCP) anthropic.summarize(packed_markdown)
   → (different MCP) slack.post(channel="#eng-weekly", content=summary)
 ```
@@ -804,16 +934,16 @@ Full rationale + alternatives considered in
 
 ```
 1. (locally) run a custom adapter producing universal-format file entries + embeddings
-2. register_corpus(source={...}, files=[...], embeddings=[...], data_classification="internal")
+2. ce_upload_corpus(source={...}, files=[...], embeddings=[...], data_classification="internal")
    → returns corpus_id
-3. pack_context(...) as usual
+3. ce_pack_context(...) as usual
 ```
 
 ---
 
 ## Appendix C — Open questions deferred to v1.1
 
-- Multi-part upload for `register_corpus` payloads >8MB (presigned URL flow).
+- Multi-part upload for `ce_upload_corpus` payloads >32MB (presigned URL flow already speced in § 3.3; v1.1 adds resume/abort semantics).
 - Per-corpus ACL (replacing role-based default caps).
 - Webhook-driven realtime client invalidation push (vs polling).
 - Cost attribution: which tokens (embedding API + LLM context) belong to which caller? Telemetry covers it; billing is out of scope for v1.
@@ -825,9 +955,9 @@ Full rationale + alternatives considered in
 
 For agents composing CE tools across a single user task (one Claude Code turn, one cron-routine iteration, one Anabasis Skill invocation):
 
-- **Tool calls per task**: aim for **≤5**. Most tasks resolve in 2–3 (`list_corpora` → `pack_context`, or `find_relevant_files` → `pack_context`).
-- **Total CE-served tokens per task**: keep the cumulative cost in line with one `pack_context` call's `budget` (default 32k per §3.1) — avoid stacking multiple full-budget packs in a row. Code corpora typically settle below the default; doc corpora may legitimately need larger budgets for narrative continuity (raise `budget` rather than chain calls). Calibrate per corpus from telemetry once Appendix C cost-attribution lands.
-- **First-call discipline**: prefer `list_corpora` (small, cheap) over `pack_context` with a guessed `corpus_id`. A `CORPUS_NOT_FOUND` error wastes a full RTT.
+- **Tool calls per task**: aim for **≤5**. Most tasks resolve in 2–3 (`ce_list_corpora` → `ce_pack_context`, or `ce_find_relevant_files` → `ce_pack_context`).
+- **Total CE-served tokens per task**: keep the cumulative cost in line with one `ce_pack_context` call's `budget` (default 32k per § 3.1) — avoid stacking multiple full-budget packs in a row. Code corpora typically settle below the default; doc corpora may legitimately need larger budgets for narrative continuity (raise `budget` rather than chain calls). Calibrate per corpus from telemetry once Appendix C cost-attribution lands.
+- **First-call discipline**: prefer `ce_list_corpora` (small, cheap) over `ce_pack_context` with a guessed `corpus_id`. A `CORPUS_NOT_FOUND` error wastes a full RTT.
 - **Suggestion-following**: when a response includes `next_tool_suggestions` (§3.0.1), the suggested tool is usually the right next call. Agents that follow suggestions should resolve common workflows in ≤2 calls.
 
 These are guidelines for agent and skill authors, not enforced limits. The numeric budgets land once telemetry surfaces real per-corpus distributions; until then, treat the per-call `budget` as the unit of accounting and don't stack.
