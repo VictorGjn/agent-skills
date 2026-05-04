@@ -8,6 +8,7 @@
 **Changelog vs rc2** (audit doc: `plan/audits/spec-mcp-vs-mcp-builder-2026-05-04.md`):
 - `ce_*` service prefix on all 7 tools, with v1.0 aliases (§ 3.0.2)
 - Per-tool annotations added (§ 3.0.3)
+- Current deployment status table merged in from PR #36 (§ 3.0.4, informative)
 - Transport renamed to "Streamable HTTP" (drops "+SSE", § 3.0)
 - Error model split: tool errors in `result.isError` (§ 7.1), protocol errors as JSON-RPC (§ 7.2)
 - OAuth 2.1 promoted to v1.0 optional with metadata path specified (§ 6.1)
@@ -16,6 +17,7 @@
 - `response_format` on `ce_pack_context`: `markdown` / `structured` / `both` (§ 3.1)
 - Package naming convention noted (§ 12)
 - `lat.*` divergence rationale tightened (§ 10b)
+- v2-reserved `wiki.closure` renamed to `wiki.impact_of` matching PR #37 implementation (§ 10)
 
 This document is the contract between the CE MCP server and its consumers
 (Claude Code, Anabasis agents, cloud routines, n8n, future internal tools).
@@ -159,6 +161,20 @@ Per MCP 2025-06-18 spec, every tool declares behavioral hints clients use for pa
 `idempotentHint: true` reflects same-input behavior; the equality predicate is per-tool (e.g. `ce_pack_context` keys on `(corpus_commit_sha, all input fields)`; `ce_upload_corpus` on `(corpus_id, files[].contentHash)` — see each tool's "Idempotency" subsection). `destructiveHint` is **false** for the write tools because their per-tool contracts make re-calls with identical inputs a no-op; the v2 `delete_corpus` will be the first tool to set this true.
 
 Clients MUST NOT make security-critical decisions based on annotations — they are hints, not guarantees.
+
+### 3.0.4 Current deployment status (informative)
+
+The §3 catalog describes the **production v1 target** for the deployed MCP. Three surfaces exist today, at three completion stages — clients should pick the one that matches their need:
+
+| Surface | Where | Tools live today | Notes |
+|---|---|---|---|
+| **Deployed MCP stub** | `https://ce-mcp-stub.vercel.app` (Vercel project `ce-mcp-stub`, region `cdg1`) | `pack_context`, `list_corpora`, `health` (3/7 specced) | YC-demo deployment shipped 2026-05-02 (PR #14). Wire-shape pinned to §3.1 / §3.5 / §3.6 — a v1 client can hit this URL and the request/response shapes match the spec. Single hard-coded corpus (this repo, indexed via `server-stub/build_demo_index.py`); keyword scoring only; 3 depth bands; no embeddings; no brain-repo writes. |
+| **Local stdio MCP** | `scripts/mcp_server.py` (run via `mcp.run()` over stdio) | 15: `pack`, `resolve`, `index_workspace`, `index_github_repo`, `build_embeddings`, `stats`, `wiki.{ask,add,audit,impact_of}`, `lat.{locate,section,refs,search,expand}` | The full local surface. Naming convention per §10b — dotted namespaces (`wiki.*`, `lat.*`) for sub-corpus families; bare snake_case for top-level. Names intentionally diverge from the deployed-MCP target: `pack` (local) ↔ `ce_pack_context` (deployed); `resolve` (local) ↔ `ce_find_relevant_files` (deployed). The deployed target uses verbose snake_case for tool-list browsability; the local stdio uses shorter names because consumers already know the namespace. |
+| **Production v1** | future Vercel deploy, replaces stub | 7 (the full §3 catalog) | Gap = `ce_find_relevant_files`, `ce_upload_corpus`, `ce_index_github_repo`, `ce_get_job_status`. Blocked on brain-repo writes (§5.1 lock-in-manifest), embedding-provider abstraction in MCP-server-mode (PR #35 landed BGE/codestral 2026-05-04), and §6 auth surface (hashed token map + `data_classification` gates + optional OAuth 2.1). |
+
+**For agent authors**: bind to the deployed stub URL when YC-style demos suffice; bind to the local stdio MCP when you need the full surface (wiki, lat.md interop, write paths). The two surfaces coexist — same project, different deployments, intentionally different tool names per §10b.
+
+**For SPEC readers**: §3.1–§3.7 describe the production v1 target. The stub implements §3.1 / §3.5 / §3.6 only. The local stdio MCP implements a parallel surface (different names, larger scope) called out in §10b.
 
 ### 3.1 `ce_pack_context` (alias: `pack_context`)
 
@@ -804,7 +820,7 @@ Reserved names — implementations MUST NOT use these for unrelated tools. v2 wi
 - `get_corpus_stats(corpus_id?)` — aggregate stats.
 - `compute_embeddings(corpus_id, provider?, model?)` — re-embed without re-indexing.
 - `get_pending_embeddings(corpus_id)` / `submit_embeddings(corpus_id, vectors)` — external handoff (currently a CLI feature in `embed_resolve.py`).
-- `wiki.closure(entity_id, max_hops?, relation_kinds?, min_weight?, budget?)` — entity-rooted blast-radius closure with risk-score per affected entity. Currently only on the local stdio MCP (`scripts/mcp_server.py`) per Phase 2.4; reserved here for v2 promotion to the deployed MCP if customer demand surfaces. (Dot-notation matches the local-MCP wiki tool family; deployed-MCP non-wiki tools use snake_case — convention reconciliation deferred to v2.)
+- `wiki.impact_of(entity, max_hops?, relation_kinds?, min_weight?, budget?, include_hubs?)` — entity-rooted impact closure with risk-score per affected entity. Shipped on the local stdio MCP (`scripts/mcp_server.py` + `scripts/wiki/impact_of.py`, PR #37); reserved here for v2 promotion to the deployed MCP if customer demand surfaces. Naming note: this is the only surviving primitive from the "job-shaped MCP surface" RFC (rename premise abandoned 2026-05-04). (Dot-notation matches the local-MCP wiki tool family; deployed-MCP non-wiki tools use the `ce_*` snake_case prefix per § 3.0.2 — convention reconciliation deferred to v2.)
 
 ---
 
