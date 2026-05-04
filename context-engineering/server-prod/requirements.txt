@@ -1,0 +1,3 @@
+# Runtime deps for Vercel Functions deployment.
+# Phase 2 baseline — kept minimal until tools wire up real CE engine.
+requests>=2.31
