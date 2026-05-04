@@ -11,6 +11,7 @@ mcp_tools:
   - context-engineering.wiki_ask
   - context-engineering.wiki_add
   - context-engineering.wiki_audit
+  - context-engineering.wiki_impact_of
   - context-engineering.lat_locate
   - context-engineering.lat_section
   - context-engineering.lat_refs
@@ -37,7 +38,7 @@ Five tightly-coupled capabilities ship as one skill:
 4. **Synthesizer + Auditor** — GAM-grade semantic-shift detector (consolidate only on cosine drift, never on every event); `wiki_init.py` one-shot seeder; Auditor proposes splits / merges / contradictions / dead links.
 5. **Retrieval surface** — depth-aware packer (5 levels, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion + authority signals + anti-hallucination filters + knowledge-type priority.
 
-Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, `wiki.{ask,add,audit}`, and `lat.{locate,section,refs,search,expand}` — 14 tools total).
+Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, `wiki.{ask,add,audit,impact_of}`, and `lat.{locate,section,refs,search,expand}` — 15 tools total).
 
 ## Comparison vs adjacent tools
 
