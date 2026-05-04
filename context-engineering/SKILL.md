@@ -8,6 +8,9 @@ mcp_tools:
   - context-engineering.index_github_repo
   - context-engineering.build_embeddings
   - context-engineering.resolve
+  - context-engineering.wiki_ask
+  - context-engineering.wiki_add
+  - context-engineering.wiki_audit
   - context-engineering.lat_locate
   - context-engineering.lat_section
   - context-engineering.lat_refs
