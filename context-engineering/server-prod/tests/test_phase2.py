@@ -94,10 +94,10 @@ def test_ce_get_health_works():
 
 
 def test_phase2_placeholder_for_unimplemented_tools():
-    """Phase 2 ships ce_get_health only; other tools return NOT_IMPLEMENTED."""
+    """Phase 3 lands the read tools; Phase 4 write tools still return NOT_IMPLEMENTED."""
     payload = {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-        "params": {"name": "ce_pack_context", "arguments": {"query": "x", "corpus_id": "y"}},
+        "params": {"name": "ce_upload_corpus", "arguments": {}},
     }
     response, status = dispatch(payload, _admin_token())
     # § 7.1 tool errors return via result.isError, with HTTP 501

@@ -77,6 +77,69 @@ _DESCRIPTIONS: dict[str, str] = {
 
 _INPUT_SCHEMAS: dict[str, dict] = {
     "ce_get_health": {"type": "object", "properties": {}, "additionalProperties": False},
+    "ce_pack_context": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 4096,
+                      "description": "Natural-language query, symbol, or phrase."},
+            "corpus_id": {"type": "string",
+                          "description": "Single target corpus. Mutually exclusive with corpus_ids."},
+            "corpus_ids": {
+                "type": "array", "minItems": 1, "maxItems": 10,
+                "items": {"type": "string"},
+                "description": "Multiple target corpora. Mutually exclusive with corpus_id.",
+            },
+            "corpus_quota": {"type": "boolean",
+                             "description": "Per-corpus quota allocation in multi-corpus mode. Default true."},
+            "budget": {"type": "integer", "minimum": 1000, "maximum": 200000, "default": 32000},
+            "mode": {"type": "string", "enum": ["auto", "keyword", "semantic", "graph", "deep", "wide"], "default": "auto"},
+            "task": {"type": ["string", "null"],
+                     "enum": ["fix", "review", "explain", "build", "document", "research", None],
+                     "default": None},
+            "model_context": {"type": ["integer", "null"], "minimum": 1, "default": None},
+            "why": {"type": "boolean", "default": False},
+            "response_format": {"type": "string", "enum": ["markdown", "structured", "both"], "default": "markdown"},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "ce_find_relevant_files": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "corpus_id": {"type": "string"},
+            "corpus_ids": {
+                "type": "array", "minItems": 1, "maxItems": 10,
+                "items": {"type": "string"},
+            },
+            "top_k": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+            "mode": {"type": "string", "enum": ["auto", "keyword", "semantic", "graph", "deep", "wide"], "default": "auto"},
+            "task": {"type": ["string", "null"],
+                     "enum": ["fix", "review", "explain", "build", "document", "research", None],
+                     "default": None},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "ce_list_corpora": {
+        "type": "object",
+        "properties": {
+            "lifecycle_state": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["active", "idle", "archived", "frozen"]},
+                "default": ["active", "idle"],
+            },
+            "data_classification_max": {
+                "type": "string",
+                "enum": ["public", "internal", "confidential", "restricted"],
+                "default": "internal",
+            },
+            "source_type": {"type": ["string", "null"], "default": None},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+        },
+        "additionalProperties": False,
+    },
 }
 
 
