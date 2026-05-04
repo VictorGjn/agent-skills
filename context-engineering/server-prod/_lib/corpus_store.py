@@ -135,7 +135,14 @@ def load_corpus(corpus_id: str) -> LoadedCorpus | None:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    meta = _coerce_meta(raw.get("_meta", {}), p.stat().st_size)
+    # Filename is authoritative (matches list_metas behavior). Hand-built or
+    # partially migrated indices may have missing/stale `_meta.corpus_id`;
+    # without this fallback, multi-corpus path prefixes and corpus_commit_shas
+    # keys would render with "" and break addressing.
+    meta_raw = raw.get("_meta", {})
+    if not meta_raw.get("corpus_id"):
+        meta_raw = {**meta_raw, "corpus_id": corpus_id}
+    meta = _coerce_meta(meta_raw, p.stat().st_size)
     files = raw.get("files") or []
     if isinstance(files, dict):
         files = list(files.values())

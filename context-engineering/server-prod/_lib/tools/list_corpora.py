@@ -103,11 +103,19 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     all_metas = corpus_store.list_metas()
 
-    # Filter
-    filtered = [
+    # Visibility scope: corpora the caller's role + classification cap permits to see.
+    # Independent of the user-supplied filters (lifecycle/source_type) because those
+    # are query-level slices, not auth gates. Codex P2 fix: scoping the head_sha
+    # to this set prevents leaking hidden-corpus churn through hash changes.
+    visible_metas = [
         m for m in all_metas
+        if _CLASS_RANK.get(m.data_classification, 99) <= _CLASS_RANK[cmax]
+    ]
+
+    # Filter (visible ∩ user filters)
+    filtered = [
+        m for m in visible_metas
         if m.lifecycle_state in lifecycle
-        and _CLASS_RANK.get(m.data_classification, 99) <= _CLASS_RANK[cmax]
         and (source_type is None or m.source.get("type") == source_type)
     ]
     # Stable sort for pagination determinism (corpus_id ascending).
@@ -118,9 +126,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     has_more = offset + len(page) < total
     next_offset = offset + len(page) if has_more else None
 
-    # Compute brain_head_sha over the FULL (unfiltered) visible set so pagination
-    # comparisons across calls are stable when filters change but data hasn't.
-    head_sha = _brain_head_sha(all_metas)
+    # Compute brain_head_sha over the visible set (no user filters) so pagination
+    # comparisons across calls are stable when filters change but data hasn't,
+    # AND so hidden-corpus churn doesn't leak through hash drift.
+    head_sha = _brain_head_sha(visible_metas)
 
     return {
         "corpora": [m.to_list_entry() for m in page],

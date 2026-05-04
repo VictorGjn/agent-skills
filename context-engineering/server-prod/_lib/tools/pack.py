@@ -162,7 +162,14 @@ def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
 
 
 def _merge_with_quota(per_corpus: list[list[dict]], total_budget: int) -> list[dict]:
-    """Round-robin per-corpus picks until budget exhausted, then global rerank by relevance."""
+    """Round-robin per-corpus picks until budget exhausted, then global rerank by relevance.
+
+    On each round, take from each queue the first item that fits the remaining
+    budget. An oversized head must NOT block smaller trailing items in the
+    same queue (Codex P2 fix): we scan past the head and pop the first fitter,
+    leaving any oversized items in place for the rare case the budget grows
+    later (it doesn't here, but the ordering is preserved for relevance).
+    """
     queues = [list(items) for items in per_corpus]
     merged: list[dict] = []
     used = 0
@@ -172,10 +179,15 @@ def _merge_with_quota(per_corpus: list[list[dict]], total_budget: int) -> list[d
         for q in queues:
             if not q:
                 continue
-            item = q[0]
-            if used + item["tokens"] > total_budget:
-                continue  # skip this one for this corpus, try next
-            q.pop(0)
+            # Find the first item in this queue that fits the remaining budget.
+            fit_idx = None
+            for idx, item in enumerate(q):
+                if used + item["tokens"] <= total_budget:
+                    fit_idx = idx
+                    break
+            if fit_idx is None:
+                continue  # nothing in this queue fits the remaining budget
+            item = q.pop(fit_idx)
             merged.append(item)
             used += item["tokens"]
             progress = True

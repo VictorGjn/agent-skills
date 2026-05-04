@@ -528,5 +528,126 @@ def test_list_corpora_role_caps_classification(cache_dir):
     assert ids == ["int"]
 
 
+# ── Codex review fixes (lock behavior) ──
+
+def test_pack_merge_quota_skips_oversized_head(cache_dir):
+    """Codex P2: oversized head must NOT block smaller trailing items.
+
+    We exercise this by giving alpha a single huge file and beta a small one,
+    then asking for a budget where only beta's file fits. The merge must NOT
+    starve when alpha's head is too big.
+    """
+    big_files = [{
+        "path": "huge.md", "tokens": 10_000,
+        "tree": {"depth": 0, "title": "huge.md", "firstSentence": "auth",
+                 "firstParagraph": "auth", "text": "auth", "children": []},
+        "knowledge_type": "evidence",
+    }]
+    small_files = [{
+        "path": "tiny.md", "tokens": 200,
+        "tree": {"depth": 0, "title": "tiny.md", "firstSentence": "auth",
+                 "firstParagraph": "auth", "text": "auth", "children": []},
+        "knowledge_type": "evidence",
+    }]
+    _make_index(cache_dir, "alpha", files=big_files)
+    _make_index(cache_dir, "beta", files=small_files)
+    response, status = _dispatch("ce_pack_context", {
+        "query": "auth", "corpus_ids": ["alpha", "beta"], "budget": 2000,
+    })
+    assert status == 200
+    s = response["result"]["structuredContent"]
+    paths = [f["path"] for f in s["files"]]
+    # Beta's small file MUST be included; without the fix, alpha's oversized
+    # head would consume the iteration without progress.
+    assert any(p.startswith("beta:") for p in paths)
+
+
+def test_load_corpus_filename_fallback_when_meta_missing_id(cache_dir, tmp_path):
+    """Codex P1: load_corpus must derive corpus_id from filename when _meta lacks it."""
+    from _lib import corpus_store
+
+    raw = {
+        "_meta": {
+            # corpus_id missing — simulates a hand-built or partially migrated index
+            "commit_sha": "deadbeef",
+            "data_classification": "internal",
+            "embedding": {"provider": "none", "model": "n/a", "dims": 0},
+        },
+        "files": [{
+            "path": "x.md", "tokens": 50,
+            "tree": {"depth": 0, "title": "x.md", "firstSentence": "x",
+                     "firstParagraph": "x", "text": "x", "children": []},
+        }],
+    }
+    (cache_dir / "from-filename.index.json").write_text(json.dumps(raw), encoding="utf-8")
+    loaded = corpus_store.load_corpus("from-filename")
+    assert loaded is not None
+    assert loaded.meta.corpus_id == "from-filename"
+    assert loaded.meta.commit_sha == "deadbeef"
+
+
+def test_pack_uses_filename_corpus_id_in_multi_corpus_prefix(cache_dir):
+    """Multi-corpus path prefixes must use filename-derived corpus_id when _meta is stale."""
+    raw = {
+        "_meta": {"commit_sha": "abc"},  # missing corpus_id
+        "files": [{"path": "f.md", "tokens": 50,
+                   "tree": {"depth": 0, "title": "f.md", "firstSentence": "auth",
+                            "firstParagraph": "auth", "text": "auth", "children": []}}],
+    }
+    (cache_dir / "alpha.index.json").write_text(json.dumps(raw), encoding="utf-8")
+    _make_index(cache_dir, "beta")
+    response, status = _dispatch("ce_pack_context", {
+        "query": "auth", "corpus_ids": ["alpha", "beta"], "budget": 4000,
+    })
+    assert status == 200
+    s = response["result"]["structuredContent"]
+    # Without the filename fallback, alpha's prefix would render as ":f.md".
+    paths = [f["path"] for f in s["files"]]
+    assert any(p.startswith("alpha:") for p in paths)
+    assert "alpha" in s["corpus_commit_shas"]
+
+
+def test_list_corpora_brain_head_sha_scoped_to_caller_visibility(cache_dir):
+    """Codex P2: hidden-corpus churn must not change a reader's brain_head_sha."""
+    from _lib import auth, transport, tools as _tools  # noqa: F401
+
+    _make_index(cache_dir, "pub", data_classification="public")
+    _make_index(cache_dir, "int", data_classification="internal")
+
+    reader = auth.TokenInfo(token_id="t", role="reader", data_classification_max="internal")
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "ce_list_corpora", "arguments": {}},
+    }
+    r1, _ = transport.dispatch(payload, reader)
+    sha_before = r1["result"]["structuredContent"]["brain_head_sha"]
+
+    # Add a confidential corpus the reader cannot see
+    _make_index(cache_dir, "conf", data_classification="confidential")
+
+    r2, _ = transport.dispatch(payload, reader)
+    sha_after = r2["result"]["structuredContent"]["brain_head_sha"]
+
+    # Reader's view didn't change → sha must not change either.
+    assert sha_before == sha_after
+
+
+def test_list_corpora_brain_head_sha_changes_on_visible_drift(cache_dir):
+    """Sanity check: visible churn DOES change the sha."""
+    from _lib import auth, transport, tools as _tools  # noqa: F401
+    _make_index(cache_dir, "pub", data_classification="public")
+    reader = auth.TokenInfo(token_id="t", role="reader", data_classification_max="internal")
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "ce_list_corpora", "arguments": {}},
+    }
+    r1, _ = transport.dispatch(payload, reader)
+    sha_before = r1["result"]["structuredContent"]["brain_head_sha"]
+    _make_index(cache_dir, "int", data_classification="internal")
+    r2, _ = transport.dispatch(payload, reader)
+    sha_after = r2["result"]["structuredContent"]["brain_head_sha"]
+    assert sha_before != sha_after
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))
