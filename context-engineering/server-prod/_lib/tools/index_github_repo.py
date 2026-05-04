@@ -29,6 +29,7 @@ from typing import Any
 
 from .. import corpus_store, errors, job_store
 from ..auth import TokenInfo
+from . import upload_corpus  # reuse _acquire_lock / _release_lock
 
 
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
@@ -148,6 +149,13 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
                     details={"elapsed_s": elapsed, "timeout_s": SYNC_TIMEOUT_S})
 
     files = index.get("files") or []
+    # Normalize: existing scripts/index_github_repo.py + scripts/index_workspace.py
+    # emit `hash`; the corpus_store / pack pipeline reads `contentHash`.
+    # Without this normalization, commit_sha derivation only saw paths, not
+    # content, so re-indexing modified files looked like a no-op (Codex P1).
+    for f in files:
+        if "contentHash" not in f and "hash" in f:
+            f["contentHash"] = f["hash"]
     file_count = len(files)
 
     # Compute commit_sha over the indexed content
@@ -174,45 +182,57 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     cache_dir = corpus_store.cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = corpus_store.index_path_for(corpus_id)
+    lock = target.with_suffix(".lock")
 
-    embedding = {"provider": "none", "model": "n/a", "dims": 0}
-    index_obj = {
-        "_meta": {
+    # Acquire the same lock ce_upload_corpus uses — without this, an upload
+    # racing against an index for the same corpus_id could trample each other
+    # (Codex P1). § 3.4 contract: CORPUS_LOCKED is retryable.
+    if not upload_corpus._acquire_lock(lock):
+        return _err("CORPUS_LOCKED",
+                    f"corpus {corpus_id!r} is being written by another caller; retry",
+                    details={"corpus_id": corpus_id})
+
+    try:
+        embedding = {"provider": "none", "model": "n/a", "dims": 0}
+        index_obj = {
+            "_meta": {
+                "corpus_id": corpus_id,
+                "source": {"type": "github_repo",
+                           "uri": f"https://github.com/{repo}",
+                           "branch": branch,
+                           "indexed_paths": indexed_paths},
+                "data_classification": classification,
+                "embedding": embedding,
+                "file_count": file_count,
+                "embedded_count": 0,
+                "version": version,
+                "last_refresh_completed_at": datetime.now(timezone.utc).isoformat(),
+                "commit_sha": commit_sha,
+                "lifecycle_state": "active",
+            },
+            "files": files,
+        }
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(target)
+
+        job_store.register_complete(
+            corpus_id, commit_sha,
+            files_indexed=file_count, files_total=file_count,
+        )
+
+        return {
             "corpus_id": corpus_id,
-            "source": {"type": "github_repo",
-                       "uri": f"https://github.com/{repo}",
-                       "branch": branch,
-                       "indexed_paths": indexed_paths},
-            "data_classification": classification,
-            "embedding": embedding,
-            "file_count": file_count,
-            "embedded_count": 0,
-            "version": version,
-            "last_refresh_completed_at": datetime.now(timezone.utc).isoformat(),
             "commit_sha": commit_sha,
-            "lifecycle_state": "active",
-        },
-        "files": files,
-    }
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(target)
-
-    job_store.register_complete(
-        corpus_id, commit_sha,
-        files_indexed=file_count, files_total=file_count,
-    )
-
-    return {
-        "corpus_id": corpus_id,
-        "commit_sha": commit_sha,
-        "version": version,
-        "stats": {
-            "file_count": file_count,
-            "embedded_count": 0,
-            "took_ms": int((time.time() - start) * 1000),
-        },
-    }
+            "version": version,
+            "stats": {
+                "file_count": file_count,
+                "embedded_count": 0,
+                "took_ms": int((time.time() - start) * 1000),
+            },
+        }
+    finally:
+        upload_corpus._release_lock(lock)
 
 
 def _resolve_github_token() -> str | None:

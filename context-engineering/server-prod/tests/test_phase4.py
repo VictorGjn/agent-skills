@@ -466,5 +466,73 @@ def test_index_github_repo_indexed_paths_filter(cache_dir, monkeypatch):
     assert s["stats"]["file_count"] == 1
 
 
+# ── Codex review fixes (lock behavior) ──
+
+def test_index_normalizes_legacy_hash_field(cache_dir, monkeypatch):
+    """Codex P1: scripts/index_*.py emit `hash`, not `contentHash`. Without
+    normalization, commit_sha would never reflect content changes."""
+    from _lib.tools import index_github_repo as tool
+
+    def fake_run(owner, name, branch, token):
+        # Indexer emits `hash` (legacy field name)
+        return {"files": [
+            {"path": "a.md", "hash": "h1", "tokens": 50,
+             "tree": {"depth": 0, "title": "a", "firstSentence": "x",
+                      "firstParagraph": "x", "text": "x", "children": []}},
+        ]}
+    monkeypatch.setattr(tool, "_run_indexer", fake_run)
+
+    response, status = _dispatch("ce_index_github_repo", {
+        "repo": "o/r", "data_classification": "public",
+    })
+    assert status == 200
+    sha1 = response["result"]["structuredContent"]["commit_sha"]
+
+    # Same content (h1) → idempotent
+    response, _ = _dispatch("ce_index_github_repo", {
+        "repo": "o/r", "data_classification": "public",
+    })
+    assert response["result"]["structuredContent"]["commit_sha"] == sha1
+
+    # Changed content (h2) → different commit_sha
+    def fake_run_changed(owner, name, branch, token):
+        return {"files": [
+            {"path": "a.md", "hash": "h2", "tokens": 50,
+             "tree": {"depth": 0, "title": "a", "firstSentence": "x",
+                      "firstParagraph": "x", "text": "x", "children": []}},
+        ]}
+    monkeypatch.setattr(tool, "_run_indexer", fake_run_changed)
+
+    response, status = _dispatch("ce_index_github_repo", {
+        "repo": "o/r", "data_classification": "public",
+    })
+    assert status == 200
+    sha2 = response["result"]["structuredContent"]["commit_sha"]
+    assert sha2 != sha1, "commit_sha must change when content changes"
+
+
+def test_index_github_repo_corpus_locked(cache_dir, monkeypatch):
+    """Codex P1: index path must respect the .lock file held by upload."""
+    from _lib import corpus_store
+    from _lib.tools import index_github_repo as tool
+
+    def fake_run(owner, name, branch, token):
+        return {"files": [{"path": "a.md", "hash": "h1", "tokens": 50,
+                            "tree": {"depth": 0, "title": "a"}}]}
+    monkeypatch.setattr(tool, "_run_indexer", fake_run)
+
+    target = corpus_store.index_path_for("gh-o-r-main")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = target.with_suffix(".lock")
+    lock.write_text(str(__import__("time").time()))
+
+    response, status = _dispatch("ce_index_github_repo", {
+        "repo": "o/r", "data_classification": "public",
+    })
+    assert status == 409
+    assert response["result"]["structuredContent"]["code"] == "CORPUS_LOCKED"
+    lock.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))
