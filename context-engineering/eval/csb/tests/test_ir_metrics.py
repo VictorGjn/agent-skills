@@ -120,12 +120,40 @@ def test_extract_paths_from_response_success():
 
 
 def test_extract_paths_from_response_tool_error():
+    """Codex P1 fix: tool errors live at result.isError (NOT structuredContent.isError)."""
     import run_ir_bench
-    resp = {"result": {"structuredContent": {"isError": True, "code": "CORPUS_NOT_FOUND", "message": "x"}}}
+    # Wire shape produced by server-prod transport on tool error
+    resp = {
+        "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": "CORPUS_NOT_FOUND: x"}],
+            "structuredContent": {"code": "CORPUS_NOT_FOUND", "details": {"corpus_id": "x"},
+                                   "retryable": False, "retry_after_seconds": None},
+        },
+    }
     paths, err = run_ir_bench._extract_paths_from_response(resp)
     assert paths == []
     assert err["layer"] == "tool"
     assert err["code"] == "CORPUS_NOT_FOUND"
+    assert err["details"]["corpus_id"] == "x"
+
+
+def test_extract_paths_from_response_does_not_misclassify_success_with_isError_false():
+    """Successful responses don't have isError at all (or have it false). Don't trip on absence."""
+    import run_ir_bench
+    resp = {"result": {"structuredContent": {"files": [{"path": "a.py"}]}}}
+    paths, err = run_ir_bench._extract_paths_from_response(resp)
+    assert paths == ["a.py"]
+    assert err is None
+
+
+def test_extract_paths_from_response_transport_error():
+    import run_ir_bench
+    resp = {"_transport_error": "URLError: Connection refused"}
+    paths, err = run_ir_bench._extract_paths_from_response(resp)
+    assert paths == []
+    assert err["layer"] == "transport"
+    assert "Connection refused" in err["message"]
 
 
 def test_extract_paths_from_response_http_error():
@@ -172,6 +200,7 @@ def test_run_one_end_to_end(tmp_path, monkeypatch):
 
 
 def test_run_one_records_tool_error(tmp_path, monkeypatch):
+    """Codex P1: tool error must surface as rec.error, not as a silent zero-recall record."""
     import run_ir_bench
     task_dir = tmp_path / "task-2"
     task_dir.mkdir()
@@ -179,12 +208,62 @@ def test_run_one_records_tool_error(tmp_path, monkeypatch):
     (task_dir / "ground_truth.json").write_text(json.dumps(["a"]))
 
     def fake_post(url, token, payload, timeout=60):
-        return {"result": {"structuredContent": {"isError": True, "code": "CORPUS_NOT_FOUND"}}}
+        # Real wire shape: isError at result-level
+        return {
+            "result": {
+                "isError": True,
+                "structuredContent": {"code": "CORPUS_NOT_FOUND", "details": {}, "retryable": False},
+            },
+        }
     monkeypatch.setattr(run_ir_bench, "_post", fake_post)
 
     rec = run_ir_bench.run_one(task_dir, "http://x", "tok", "ce-keyword", top_k=5, budget=8000)
     assert rec["error"]["code"] == "CORPUS_NOT_FOUND"
+    assert rec["error"]["layer"] == "tool"
     assert rec["metrics"]["file_recall"] == 0.0
+
+
+def test_run_one_records_transport_error(tmp_path, monkeypatch):
+    """Codex P1: connection failures must NOT abort the bench loop."""
+    import run_ir_bench
+    task_dir = tmp_path / "task-3"
+    task_dir.mkdir()
+    (task_dir / "spec.json").write_text(json.dumps({"description": "x", "repo": "f/b", "branch": "main"}))
+    (task_dir / "ground_truth.json").write_text(json.dumps(["a"]))
+
+    def fake_post(url, token, payload, timeout=60):
+        return {"_transport_error": "URLError: Connection refused"}
+    monkeypatch.setattr(run_ir_bench, "_post", fake_post)
+
+    rec = run_ir_bench.run_one(task_dir, "http://x", "tok", "ce-keyword", top_k=5, budget=8000)
+    assert rec["error"]["layer"] == "transport"
+    assert rec["metrics"]["file_recall"] == 0.0
+
+
+def test_post_swallows_urlerror(monkeypatch):
+    """Verify _post returns _transport_error instead of raising."""
+    import run_ir_bench
+    import urllib.error
+
+    def boom(req, timeout=60):
+        raise urllib.error.URLError("Connection refused")
+    monkeypatch.setattr(run_ir_bench.urllib.request, "urlopen", boom)
+
+    out = run_ir_bench._post("http://x", "tok", {"a": 1})
+    assert "_transport_error" in out
+    assert "Connection refused" in out["_transport_error"]
+
+
+def test_post_swallows_oserror(monkeypatch):
+    """Generic OSError (DNS, socket-level) → _transport_error, no raise."""
+    import run_ir_bench
+
+    def boom(req, timeout=60):
+        raise OSError("DNS lookup failed")
+    monkeypatch.setattr(run_ir_bench.urllib.request, "urlopen", boom)
+
+    out = run_ir_bench._post("http://x", "tok", {"a": 1})
+    assert "_transport_error" in out
 
 
 if __name__ == "__main__":

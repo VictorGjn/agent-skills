@@ -66,6 +66,14 @@ def _post(url: str, token: str, payload: dict, timeout: int = 60) -> dict:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
         return {"_http_error": e.code, "_body": e.read().decode("utf-8", errors="replace")}
+    except urllib.error.URLError as e:
+        # Connection reset, DNS failure, refused, unreachable — keep the run alive.
+        return {"_transport_error": f"URLError: {e.reason}"}
+    except (TimeoutError, OSError) as e:
+        # socket.timeout, socket.error, etc.
+        return {"_transport_error": f"{type(e).__name__}: {e}"}
+    except Exception as e:  # noqa: BLE001 — defensive last-resort
+        return {"_transport_error": f"{type(e).__name__}: {e}"}
 
 
 def _call_find(mcp_url: str, token: str, query: str, corpus_id: str,
@@ -100,15 +108,26 @@ def _call_pack(mcp_url: str, token: str, query: str, corpus_id: str,
 
 
 def _extract_paths_from_response(resp: dict) -> tuple[list[str], dict | None]:
-    """Returns (ranked_paths, error_or_None). Handles HTTP, JSON-RPC, and tool errors."""
+    """Returns (ranked_paths, error_or_None). Handles HTTP, transport, JSON-RPC, and tool errors.
+
+    Per server-prod transport, the wire shape on tool error is:
+        {"result": {"isError": True,
+                    "content": [...],
+                    "structuredContent": {"code": ..., "details": ...}}}
+    The `isError` lives at `result`-level, NOT `result.structuredContent` — Codex P1 fix.
+    """
+    if "_transport_error" in resp:
+        return [], {"layer": "transport", "message": resp["_transport_error"]}
     if "_http_error" in resp:
         return [], {"layer": "http", "code": resp["_http_error"], "body": resp.get("_body", "")[:300]}
     if "error" in resp:
         return [], {"layer": "jsonrpc", "code": resp["error"].get("code"), "message": resp["error"].get("message")}
     result = resp.get("result", {}) or {}
-    s = result.get("structuredContent", {})
-    if s.get("isError"):
-        return [], {"layer": "tool", "code": s.get("code"), "message": s.get("message")}
+    if result.get("isError") is True:
+        s = result.get("structuredContent", {}) or {}
+        return [], {"layer": "tool", "code": s.get("code"), "message": s.get("message"),
+                    "details": s.get("details")}
+    s = result.get("structuredContent", {}) or {}
     files = s.get("files", []) or []
     return [f.get("path", "") for f in files], None
 
