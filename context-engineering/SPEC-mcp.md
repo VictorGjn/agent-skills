@@ -269,8 +269,10 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
 **Multi-corpus invariants**:
 - Exactly one of `corpus_id` / `corpus_ids` MUST be set (else `INVALID_ARGUMENT`).
 - In multi-corpus mode, `corpus_commit_sha` is `null`; `corpus_commit_shas` is the authoritative reproducibility key. ETag derives from `(lexicographic sort of "<corpus_id>:<sha>" pairs over corpus_ids, sha256(canonical_inputs))`.
-- All corpora MUST be readable by the caller's role / `data_classification_max`; if any one fails, the whole call returns `PERMISSION_DENIED` (no partial results).
+- All corpora MUST be readable by the caller's role / `data_classification_max`; classification denials return `INVALID_ARGUMENT` with `details.exceeded_classification` per § 6.3 (consistent with single-corpus). Authentication denials (no valid token at all) return `UNAUTHENTICATED` per § 7.2.
+- **All-or-nothing semantics**: any per-corpus failure (`CORPUS_NOT_FOUND`, `CORPUS_LOCKED`, `CORPUS_PREFIX_COLLISION`, `EMBEDDING_PROVIDER_MISMATCH`) fails the whole call — multi-corpus calls never return partial results. Failure details list which corpus / corpora caused the failure.
 - Path-prefix collisions (two corpora share the same root basename in `<corpus_id>:<path>`) trigger `CORPUS_PREFIX_COLLISION` with `details.colliding_corpora`.
+- `corpus_ids.length` is capped at **10** for v1 to bound latency and prefix-collision-detection cost. v2 may raise this; in latency-sensitive paths, prefer ≤5.
 
 **Errors**:
 
@@ -619,7 +621,9 @@ Wiki entity pages carry a freshness signal that read tools surface to consumers.
 
 **Decay formula**: `freshness_score = max(0, 1 - elapsed_seconds / (2 * half_life_seconds))` — linear, hits 0.5 at half-life and 0 at twice-half-life. Multi-source entities (`sources[]`) use the **shortest** half-life among the listed types (the most-stale-source rule prevents masking decay with one fresh signal).
 
-**Read-tool surfacing**: `ce_pack_context` and `ce_find_relevant_files` MAY include `freshness_score` per file in their structured output (mode-dependent). `freshness_score < 0.3` triggers the `freshness.expired` telemetry event (§ 9). v2 may add `freshness_floor` filter inputs to read tools.
+**Read-tool surfacing**: `ce_pack_context` and `ce_find_relevant_files` SHOULD include `freshness_score` per file in their `response_format: "structured"` output for entities that have a `last_verified_at` field. Entities without `last_verified_at` MUST omit `freshness_score` (do not return `0` or `null` — the field is absent). `freshness_score < 0.3` triggers the `freshness.expired` telemetry event (§ 9). When `ce_pack_context` packs a decision page past `valid_until`, it MUST mark the file with `expired: true` in structured output and downgrade depth to `Mention` unless the caller passes (v2) `include_expired: true`. v2 may add `freshness_floor` filter inputs to read tools.
+
+**Time semantics**: all "days" in this section refer to **86400-second days** (no DST/leap-second adjustment). `elapsed_seconds` and `half_life_seconds` use UTC-based `Math.floor((now - last_verified_at) / 1000)` and `half_life_days * 86400` respectively.
 
 This is a **wire-contract decision**: clients see the computed score, never the stored field directly. Implementers may rebuild the half-life table or formula in v2 (MAJOR bump per § 8); v1 must conform to the table above.
 
@@ -885,7 +889,7 @@ Required events:
 | `audit.broken_refs` | `lat_check` finds broken refs (CI integration) | `corpus_id, ref_count_total, ref_count_broken, exit_strict (boolean)` |
 | `freshness.expired` | computed `freshness_score < 0.3` AND `last_verified_at` older than half-life | `corpus_id, entity_id, source_type, half_life_days, elapsed_days, freshness_score` |
 | `corpus.consolidation_triggered` | semantic-shift detector triggers async consolidation after `ce_upload_corpus` / `wiki.add` events | `corpus_id, trigger (cosine_drift \| event_count_threshold \| manual), affected_entities, took_ms` |
-| `multi_corpus.pack` | `ce_pack_context` or `ce_find_relevant_files` called with `corpus_ids[]` | `corpus_count, corpora (sorted list), corpus_quota (boolean), prefix_collisions (count)` — sized for capacity planning |
+| `multi_corpus.pack` | `ce_pack_context` or `ce_find_relevant_files` called with `corpus_ids[]` | `corpus_count, corpora (lexicographically sorted by corpus_id), corpus_quota (boolean), prefix_collisions (count)` — sized for capacity planning |
 
 Event schemas freeze at the same MAJOR version as the tool API. Event sink is JSON-line stdout in v1 (caller pipes to OTel collector / Vercel Logs / wherever). v1.1 will commit to OpenTelemetry semantic conventions.
 
@@ -910,7 +914,7 @@ Entity-aware semantic ask over the wiki layer; returns markdown with cited entit
 |---|---|---|---|
 | `query` | string | — | Required. |
 | `corpus_id` | string | — | Target corpus (selects which corpus to query). Orthogonal to `scope` (which filters entities *within* the corpus by their frontmatter `scope:` field). |
-| `scope` | string | `default` | Filters to entities whose frontmatter `scope:` matches. **Absent `scope` parameter MUST default to `scope: "default"` only** — entities tagged with other scopes (e.g. `competitive-intel`, `code-context`, `leads`) MUST NOT leak in. Pass `scope: "*"` to match all scopes within `corpus_id`. This is the entity-isolation contract that makes the source-agnostic positioning enforceable. |
+| `scope` | string | `default` | Filters to entities whose frontmatter `scope:` matches. **Absent `scope` parameter MUST default to `scope: "default"` only** — entities tagged with other scopes (e.g. `competitive-intel`, `code-context`, `leads`) MUST NOT leak in. Pass `scope: "*"` to match all scopes within `corpus_id`. **The scope filter is applied AFTER the `data_classification_max` gate** — `scope: "*"` cannot bypass classification (see § 6.3). This is the entity-isolation contract that makes the source-agnostic positioning enforceable. |
 | `freshness_floor` | number 0..1 | `0.0` | Filter out entities with computed `freshness_score < floor` per § 4.4. |
 | `max_entities` | integer | 20 | Min 1, max 100. |
 
