@@ -674,11 +674,75 @@ def wiki_audit(
     return body
 
 
+@mcp.tool(name="wiki.impact_of")
+def wiki_impact_of(
+    entity: str,
+    brain: str | None = None,
+    max_hops: int = 3,
+    relation_kinds: list[str] | None = None,
+    min_weight: float = 0.0,
+    budget: int = 8000,
+    include_hubs: bool = False,
+) -> str:
+    """Return the entities affected by `entity` (impact closure).
+
+    Answers cross-corpus jobs: "what does this change touch?" (engineer),
+    "what's the fallout of this decision?" (exec), "which contracts use
+    this deprecated feature?" (CSM). Same primitive, same shape — verb
+    name domain-neutral on purpose.
+
+    Algorithm: BFS from `entity` through `[[wiki-link]]` body mentions and
+    `superseded_by` frontmatter chains, capped at `max_hops`. Hub entities
+    (>10 inbound mentions by default; override via CE_IMPACT_HUB_THRESHOLD)
+    are reported as 1-hop affected but not fanned through, to keep the
+    output useful on real brains. Pass `include_hubs=True` to bypass.
+
+    Recall: 100% when no hubs trip; "best-effort" when they do (excluded
+    list surfaces in the output).
+
+    Args:
+        entity: slug, id, or case-insensitive title.
+        brain: brain root; falls back to CE_BRAIN_DIR or ./brain.
+        max_hops: BFS depth cap (default 3).
+        relation_kinds: filter to ["mentions"] or ["supersedes"] or both
+            (None = all).
+        min_weight: drop entities with risk_score below this.
+        budget: soft markdown char budget × 4.
+        include_hubs: traverse through hub entities anyway.
+
+    Per ``plan/proposals/wiki-impact-of.md``.
+    """
+    from wiki.impact_of import compute_impact, render_markdown
+
+    brain_dir = _resolve_brain_path(brain)
+    _emit_telemetry("tool.call", tool="wiki.impact_of", brain=str(brain_dir),
+                    entity=entity, max_hops=max_hops,
+                    relation_kinds=relation_kinds, include_hubs=include_hubs)
+
+    result = compute_impact(
+        entity, brain_dir,
+        max_hops=max_hops,
+        relation_kinds=relation_kinds,
+        min_weight=min_weight,
+        include_hubs=include_hubs,
+    )
+
+    _emit_telemetry(
+        "tool.result", tool="wiki.impact_of",
+        status="error" if result.error else "ok",
+        error=result.error,
+        affected_count=len(result.affected),
+        skipped_hubs=len(result.skipped_hubs),
+        recall=result.recall,
+    )
+    return render_markdown(result, budget=budget)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Phase 4 (CE x lat.md): five new MCP tools mapping lat.md's verb surface
 # (locate / section / refs / search / expand) onto CE primitives. Each
 # tool is a thin wrapper over wikiref + code_index + existing wiki
-# helpers. Brings MCP surface from 9 -> 14 tools.
+# helpers. Brings MCP surface from 9 -> 15 tools (incl. wiki.impact_of).
 # ──────────────────────────────────────────────────────────────────
 
 
