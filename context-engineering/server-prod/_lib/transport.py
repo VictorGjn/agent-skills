@@ -255,7 +255,8 @@ def _initialize(payload: dict, request_id: Any) -> dict:
             "instructions": (
                 "CE MCP server (SPEC-mcp.md " + SPEC_VERSION + "). "
                 "7 tools per § 3 — call tools/list to enumerate. "
-                "Phase 2: only ce_get_health is implemented; other tools return NOT_IMPLEMENTED."
+                "All read + write tools are wired in v1; ce_index_github_repo "
+                "with async=true returns NOT_IMPLEMENTED until v1.1."
             ),
         },
     }
@@ -323,7 +324,17 @@ def _tools_call(payload: dict, token: TokenInfo, request_id: Any) -> tuple[dict,
         out = {k: v for k, v in out.items() if k != "_http_status"}
         return _wrap_tool_result(request_id, out), http_status
 
-    return _wrap_tool_result(request_id, out, alias_called=is_alias(raw_name)), 200
+    # Strip HTTP-layer hints from the structured payload before wrapping; pass
+    # them up via private envelope keys for api/mcp.py to emit as headers.
+    etag = out.pop("_x_etag", None) if isinstance(out, dict) else None
+    cache_control = out.pop("_x_cache_control", None) if isinstance(out, dict) else None
+
+    envelope = _wrap_tool_result(request_id, out, alias_called=is_alias(raw_name))
+    if etag:
+        envelope["_x_etag"] = etag
+    if cache_control:
+        envelope["_x_cache_control"] = cache_control
+    return envelope, 200
 
 
 def _wrap_tool_result(request_id: Any, result: dict, alias_called: bool = False) -> dict:

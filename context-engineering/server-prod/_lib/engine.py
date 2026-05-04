@@ -1,35 +1,20 @@
-"""Bridge to the production CE pack engine (`scripts/pack_context_lib.py`).
-
-We sys.path-import the engine instead of subprocess-shelling per the handoff
-decision: same pattern as `scripts/mcp_server.py`, no IPC overhead, isolated
-in-process testing. Vercel bundles the `scripts/` directory alongside the
-function thanks to `vercel.json`'s `includeFiles` glob.
+"""Bridge to the production CE pack engine.
 
 The engine ships the canonical scoring + packing pipeline (5 depth bands,
 knowledge-type weighting, 3-phase pack/demote/promote). The transport layer
 turns its outputs into the SPEC § 3.1 / § 3.2 wire shape.
+
+We import a vendored copy at `_lib.vendor.pack_context_lib` rather than the
+canonical `scripts/pack_context_lib.py` because Vercel's function bundler
+can't reach parent directories outside the function root. The vendor copy
+is sha-checked against canonical via the test_phase5 sync check.
 """
 from __future__ import annotations
-
-import sys
-from pathlib import Path
-from typing import Any
-
-
-_CE_ROOT = Path(__file__).resolve().parents[2]  # .../context-engineering/
-_SCRIPTS = _CE_ROOT / "scripts"
-
-
-def _ensure_path() -> None:
-    p = str(_SCRIPTS)
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 
 def _import_lib():
     """Lazy import — keeps cold-start cheap when tools that don't need it are called."""
-    _ensure_path()
-    import pack_context_lib  # type: ignore
+    from .vendor import pack_context_lib  # type: ignore
     return pack_context_lib
 
 

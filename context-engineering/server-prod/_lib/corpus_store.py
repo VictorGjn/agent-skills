@@ -149,6 +149,28 @@ def load_corpus(corpus_id: str) -> LoadedCorpus | None:
     return LoadedCorpus(meta=meta, files=files)
 
 
+def content_fingerprint(loaded: LoadedCorpus) -> str:
+    """Deterministic 12-char fingerprint of sorted (path, contentHash) pairs.
+
+    Used as an ETag fallback when `_meta.commit_sha` is missing or empty —
+    without this, the ETag would depend only on request args, not on the
+    corpus content, so a 304 could pin a stale response indefinitely
+    (Codex P1). This guarantees ETag tracks content even on hand-built
+    indices that skip the commit_sha field.
+    """
+    import hashlib
+    pairs = sorted([(f.get("path", ""), f.get("contentHash", "")) for f in loaded.files])
+    return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
+
+
+def commit_key(loaded: LoadedCorpus) -> str:
+    """Return the ETag commit_key for a corpus: commit_sha if present, else content_fingerprint."""
+    sha = (loaded.meta.commit_sha or "").strip()
+    if sha:
+        return sha
+    return f"cf-{content_fingerprint(loaded)}"
+
+
 def list_metas() -> list[CorpusMeta]:
     """List all corpus metas (no file payloads)."""
     out: list[CorpusMeta] = []

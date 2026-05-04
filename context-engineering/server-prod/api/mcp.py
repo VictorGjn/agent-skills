@@ -71,11 +71,25 @@ class handler(BaseHTTPRequestHandler):
 
         # Strip internal hints before serializing
         deprecated = response.pop("_x_ce_deprecated", False)
+        etag = response.pop("_x_etag", None)
+        cache_control = response.pop("_x_cache_control", None) or "no-store"
+
+        # § 3.1 conditional GET: If-None-Match against our computed ETag → 304.
+        if etag:
+            client_etag = self.headers.get("If-None-Match")
+            if client_etag and client_etag.strip('"') == etag:
+                self.send_response(304)
+                self.send_header("ETag", f'"{etag}"')
+                self.send_header("Cache-Control", cache_control)
+                self.end_headers()
+                return
 
         body = json.dumps(response, separators=(",", ":")).encode("utf-8")
         self.send_response(http_status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
+        if etag:
+            self.send_header("ETag", f'"{etag}"')
         if deprecated:
             self.send_header("X-CE-Deprecated", "true")
         self.end_headers()

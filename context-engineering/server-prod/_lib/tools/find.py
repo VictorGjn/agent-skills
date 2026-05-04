@@ -109,15 +109,20 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     cids = args.get("corpus_ids")
     multi = bool(cids)
 
+    canonical = {k: v for k, v in args.items() if v is not None}
+
     # ── Single-corpus ──
     if cid:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
         ranked = _rank_one(loaded, query, top_k, mode, prefix=None)
-        return _wire(ranked, multi=False,
-                     single_sha=loaded.meta.commit_sha or None, multi_shas=None,
-                     took_ms=int((time.time() - start) * 1000), keep_corpus_id=False)
+        out = _wire(ranked, multi=False,
+                    single_sha=loaded.meta.commit_sha or None, multi_shas=None,
+                    took_ms=int((time.time() - start) * 1000), keep_corpus_id=False)
+        out["_x_etag"] = _pack._compute_etag(canonical, corpus_store.commit_key(loaded))
+        out["_x_cache_control"] = _pack._cache_control_for([loaded.meta.data_classification])
+        return out
 
     # ── Multi-corpus ──
     loaded_list, err = corpus_access.aggregate_load(cids, token.data_classification_max)
@@ -143,8 +148,16 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     multi_shas = {c.meta.corpus_id: (c.meta.commit_sha or "") for c in loaded_list}
     multi_shas = dict(sorted(multi_shas.items()))
 
-    return _wire(flat, multi=True, single_sha=None, multi_shas=multi_shas,
-                 took_ms=int((time.time() - start) * 1000), keep_corpus_id=True)
+    out = _wire(flat, multi=True, single_sha=None, multi_shas=multi_shas,
+                took_ms=int((time.time() - start) * 1000), keep_corpus_id=True)
+    by_id = {c.meta.corpus_id: c for c in loaded_list}
+    commit_key = "|".join(
+        f"{cid}:{corpus_store.commit_key(by_id[cid])}" for cid in multi_shas
+    )
+    out["_x_etag"] = _pack._compute_etag(canonical, commit_key)
+    classifications = [c.meta.data_classification for c in loaded_list]
+    out["_x_cache_control"] = _pack._cache_control_for(classifications)
+    return out
 
 
 def _wire(ranked: list[dict], multi: bool, single_sha: str | None,
