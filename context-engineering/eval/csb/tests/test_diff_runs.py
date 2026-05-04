@@ -233,5 +233,42 @@ def test_diff_runs_cli_smoke(tmp_path, monkeypatch):
     assert "t1" in body
 
 
+# ── Codex review fixes ──
+
+def test_per_task_delta_is_last_vs_baseline_for_three_runs():
+    """Codex P2: with 3+ runs, per-task Δ must match aggregate's last-vs-baseline,
+    not collapse to runs[1] - runs[0]."""
+    import diff_runs
+    a = [_rec("t1", [], [], 0.10)]
+    b = [_rec("t1", [], [], 0.50)]   # b is NOT what gets compared in 3-run mode
+    c = [_rec("t1", [], [], 0.90)]   # c is the LAST run
+    paired = diff_runs.pair_by_task([a, b, c])
+    md = diff_runs.render_per_task_table(paired, ["C1", "C2", "C3"])
+    # Δ should be 0.90 - 0.10 = +0.800, NOT 0.50 - 0.10 = +0.400
+    assert "+0.800" in md
+    assert "+0.400" not in md
+
+
+def test_render_aggregate_table_handles_empty_last_run():
+    """Codex P2: a run where every record has n_truth=0 must not crash fmean."""
+    import diff_runs
+    a = [_rec("t1", [], ["truth"], 0.5)]   # has truth
+    b = [_rec("t1", [], [], 0.0)]          # no truth → filtered out
+    # Should not raise StatisticsError
+    md = diff_runs.render_aggregate_table([a, b], ["C1", "C2"])
+    assert "C1" in md and "C2" in md
+    # Empty run renders as 0.000 mean
+    assert "0.000" in md
+
+
+def test_render_aggregate_table_handles_completely_empty_runs():
+    """All runs empty after filtering → no crash, all-zero deltas."""
+    import diff_runs
+    a = [_rec("t1", [], [], 0.0)]   # n_truth=0 → filtered out
+    b = [_rec("t1", [], [], 0.0)]
+    md = diff_runs.render_aggregate_table([a, b], ["C1", "C2"])
+    assert "+0.000" in md
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

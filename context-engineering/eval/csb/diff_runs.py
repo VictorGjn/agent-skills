@@ -84,11 +84,19 @@ def bootstrap_ci(values: list[float], n_boot: int = 1000, alpha: float = 0.05) -
 
 
 def render_per_task_table(paired: dict, names: list[str], top_n: int | None = None) -> str:
-    """Per-task file_recall table. Optionally cap to top-N tasks by baseline-vs-other delta."""
+    """Per-task file_recall table. Cap to top-N by |Δ last-vs-baseline|.
+
+    Codex P2 fix: aggregate Δ in render_aggregate_table is `runs[-1] - runs[0]`,
+    so per-task Δ must match — otherwise 3+-run reports show inconsistent
+    rankings. We compute the delta against the LAST run, not the second one.
+    """
     rows = []
     for tid, recs in paired.items():
         recalls = [r["metrics"]["file_recall"] if r else None for r in recs]
-        delta = (recalls[1] or 0) - (recalls[0] or 0) if len(recalls) >= 2 and recalls[0] is not None else 0
+        if len(recalls) >= 2 and recalls[0] is not None and recalls[-1] is not None:
+            delta = recalls[-1] - recalls[0]
+        else:
+            delta = 0.0
         rows.append((tid, recalls, delta))
     rows.sort(key=lambda x: -abs(x[2]))
     if top_n:
@@ -117,9 +125,11 @@ def render_aggregate_table(runs: list[list[dict]], names: list[str]) -> str:
             cells.append(f"{mean:.3f} ({ci[0]:.3f}–{ci[1]:.3f})")
             if i == 0:
                 base_means[m] = mean
-        # Delta vs baseline (rightmost only — single most useful summary)
-        last_mean = statistics.fmean([r["metrics"][m] for r in runs[-1]
-                                       if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0]) if runs[-1] else 0.0
+        # Delta vs baseline (rightmost only — single most useful summary).
+        # Codex P2 fix: guard against empty filtered list — fmean([]) raises.
+        last_vals = [r["metrics"][m] for r in runs[-1]
+                      if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0]
+        last_mean = statistics.fmean(last_vals) if last_vals else 0.0
         delta = last_mean - base_means[m]
         cells.append(f"{delta:+.3f}")
         out.append(f"| {m} | " + " | ".join(cells) + " |")
