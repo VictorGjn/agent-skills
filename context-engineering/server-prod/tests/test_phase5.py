@@ -197,6 +197,44 @@ def test_pack_multi_corpus_cache_control_max_classification_wins(cache_dir):
 
 # ── Initialize message reflects v1 surface ──
 
+def test_pack_etag_falls_back_to_content_fingerprint_when_sha_missing(cache_dir):
+    """Codex P1: when commit_sha is empty, ETag must NOT collapse to a constant.
+
+    Two corpora with identical args but different file contents must produce
+    different ETags even when both have empty commit_sha.
+    """
+    raw_v1 = {
+        "_meta": {"corpus_id": "alpha"},  # commit_sha intentionally absent
+        "files": [{
+            "path": "a.py", "contentHash": "h1", "tokens": 50,
+            "tree": {"depth": 0, "title": "a.py", "firstSentence": "auth",
+                     "firstParagraph": "auth", "text": "auth", "children": []},
+        }],
+    }
+    raw_v2 = {
+        "_meta": {"corpus_id": "alpha"},
+        "files": [{
+            "path": "a.py", "contentHash": "h2", "tokens": 50,
+            "tree": {"depth": 0, "title": "a.py", "firstSentence": "auth",
+                     "firstParagraph": "auth", "text": "auth", "children": []},
+        }],
+    }
+    args = {"query": "auth", "corpus_id": "alpha", "budget": 2000}
+
+    (cache_dir / "alpha.index.json").write_text(json.dumps(raw_v1), encoding="utf-8")
+    r1, _ = _dispatch("ce_pack_context", args)
+    etag_v1 = r1["_x_etag"]
+
+    (cache_dir / "alpha.index.json").write_text(json.dumps(raw_v2), encoding="utf-8")
+    r2, _ = _dispatch("ce_pack_context", args)
+    etag_v2 = r2["_x_etag"]
+
+    assert etag_v1 != etag_v2, (
+        "ETag must change when corpus content changes, even when commit_sha is missing — "
+        "otherwise stale 304 responses leak forever."
+    )
+
+
 def test_initialize_message_reflects_v1_surface():
     from _lib import tools as _tools  # noqa: F401
     from _lib.transport import dispatch

@@ -300,7 +300,9 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             single_sha=loaded.meta.commit_sha or None, multi_shas=None,
             trace=trace, took_ms=int((time.time() - start) * 1000),
         )
-        out["_x_etag"] = _compute_etag(canonical, loaded.meta.commit_sha or "nosha")
+        # Codex P1: fall back to content fingerprint when commit_sha is missing
+        # — a constant placeholder would make ETag content-blind.
+        out["_x_etag"] = _compute_etag(canonical, corpus_store.commit_key(loaded))
         out["_x_cache_control"] = _cache_control_for([loaded.meta.data_classification])
         return out
 
@@ -354,7 +356,11 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         trace=trace, took_ms=int((time.time() - start) * 1000),
     )
     # § 3.1: multi-corpus ETag uses the lex-sorted '<corpus_id>:<sha>' concatenation.
-    commit_key = "|".join(f"{cid}:{sha}" for cid, sha in multi_shas.items())
+    # Per-corpus key falls back to content fingerprint when commit_sha missing.
+    by_id = {c.meta.corpus_id: c for c in loaded_list}
+    commit_key = "|".join(
+        f"{cid}:{corpus_store.commit_key(by_id[cid])}" for cid in multi_shas
+    )
     out["_x_etag"] = _compute_etag(canonical, commit_key)
     classifications = [c.meta.data_classification for c in loaded_list]
     out["_x_cache_control"] = _cache_control_for(classifications)

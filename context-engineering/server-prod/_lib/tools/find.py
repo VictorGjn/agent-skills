@@ -120,7 +120,7 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         out = _wire(ranked, multi=False,
                     single_sha=loaded.meta.commit_sha or None, multi_shas=None,
                     took_ms=int((time.time() - start) * 1000), keep_corpus_id=False)
-        out["_x_etag"] = _pack._compute_etag(canonical, loaded.meta.commit_sha or "nosha")
+        out["_x_etag"] = _pack._compute_etag(canonical, corpus_store.commit_key(loaded))
         out["_x_cache_control"] = _pack._cache_control_for([loaded.meta.data_classification])
         return out
 
@@ -150,7 +150,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     out = _wire(flat, multi=True, single_sha=None, multi_shas=multi_shas,
                 took_ms=int((time.time() - start) * 1000), keep_corpus_id=True)
-    commit_key = "|".join(f"{cid}:{sha}" for cid, sha in multi_shas.items())
+    by_id = {c.meta.corpus_id: c for c in loaded_list}
+    commit_key = "|".join(
+        f"{cid}:{corpus_store.commit_key(by_id[cid])}" for cid in multi_shas
+    )
     out["_x_etag"] = _pack._compute_etag(canonical, commit_key)
     classifications = [c.meta.data_classification for c in loaded_list]
     out["_x_cache_control"] = _pack._cache_control_for(classifications)
