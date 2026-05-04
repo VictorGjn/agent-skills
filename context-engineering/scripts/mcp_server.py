@@ -16,6 +16,35 @@ import sys
 import os
 from pathlib import Path
 
+# Embedding provider lock — MCP server runs in hosted mode (Vercel, Fly, etc.)
+# where local BGE inference is the wrong shape (130MB model, slow CPU,
+# bundle-size blowout). Refuse to start without a hosted API key, and lock
+# EMBED_PROVIDER to whichever is set so embed_resolve's BGE auto-detection
+# can never win — even if sentence-transformers somehow ends up in the bundle.
+def _lock_embedding_provider() -> None:
+    if os.environ.get('EMBED_PROVIDER', '').lower() == 'bge':
+        print('FATAL: EMBED_PROVIDER=bge is not supported in MCP server mode. '
+              'Use MISTRAL_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY.', file=sys.stderr)
+        sys.exit(1)
+    explicit = os.environ.get('EMBED_PROVIDER', '').lower()
+    if explicit in ('mistral', 'openai', 'voyage', 'external'):
+        return  # operator was explicit, trust them
+    if os.environ.get('MISTRAL_API_KEY'):
+        os.environ['EMBED_PROVIDER'] = 'mistral'
+    elif os.environ.get('VOYAGE_API_KEY'):
+        os.environ['EMBED_PROVIDER'] = 'voyage'
+    elif os.environ.get('OPENAI_API_KEY'):
+        os.environ['EMBED_PROVIDER'] = 'openai'
+    else:
+        print('FATAL: no embedding API key set. MCP server requires one of '
+              'MISTRAL_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY (BGE local '
+              'inference is intentionally disabled in MCP mode).',
+              file=sys.stderr)
+        sys.exit(1)
+
+
+_lock_embedding_provider()
+
 from mcp.server.fastmcp import FastMCP
 
 # Add scripts dir to path for imports

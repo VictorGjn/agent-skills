@@ -378,11 +378,26 @@ def main():
     parser.add_argument('--index', type=str, default=str(INDEX_PATH), help='Path to index')
     parser.add_argument('--graphify-path', type=str, default=None,
                         help='Path to graphify graph.json (auto-discovers at {workspace}/graphify-out/graph.json)')
+    parser.add_argument('--no-mmr', action='store_true',
+                        help='Disable MMR diversity rerank (default: on when --semantic and embeddings cached)')
+    parser.add_argument('--mmr-lambda', type=float, default=None,
+                        help='Override MMR λ (0=full diversity, 1=full relevance). Default: auto from query type.')
     args = parser.parse_args()
 
     t_start = time.time()
     why_trace = {}
-    semantic_available = bool(os.environ.get('OPENAI_API_KEY'))
+    # Semantic is available if any embedding provider is reachable: API key OR local BGE.
+    semantic_available = bool(
+        os.environ.get('OPENAI_API_KEY')
+        or os.environ.get('MISTRAL_API_KEY')
+        or os.environ.get('VOYAGE_API_KEY')
+    )
+    if not semantic_available:
+        try:
+            import sentence_transformers  # noqa: F401
+            semantic_available = True
+        except ImportError:
+            pass
 
     # ── Resolve mode ───────────────────────────────────────────────────────
     # Precedence: `--mode` is the first-class flag and wins over the legacy
@@ -532,6 +547,42 @@ def main():
                   files_packed=0, tokens_used=0, budget=args.budget,
                   time_ms=int((time.time() - t_start) * 1000), ok=True)
         sys.exit(0)
+
+    # MMR diversity rerank (only meaningful when --semantic gave us embeddings)
+    # Penalizes each next pick by similarity to already-selected, breaking
+    # cluster-dominance bias (e.g. 10 lookalike DTOs from one folder).
+    if args.semantic and not args.no_mmr and len(scored) >= 4:
+        try:
+            from embed_resolve import load_cache, embed_single
+            from mmr import rerank_with_mmr
+            cache = load_cache(str(EMBED_CACHE_PATH))
+            for s in scored:
+                entry = cache.get(s['path']) or {}
+                s['embedding'] = entry.get('embedding')
+            with_emb = [s for s in scored if s.get('embedding')]
+            if len(with_emb) >= 4:
+                qv = embed_single(args.query)
+                if qv is not None:
+                    picks, mmr_telemetry = rerank_with_mmr(
+                        qv, with_emb, query_text=args.query,
+                        k=len(with_emb), lam=args.mmr_lambda,
+                    )
+                    # Re-attach files that lacked embeddings at the tail.
+                    no_emb = [s for s in scored if not s.get('embedding')]
+                    scored = picks + no_emb
+                    for s in scored:
+                        s.pop('embedding', None)
+                    why_trace['mmr'] = {
+                        'qtype': mmr_telemetry['query_type'],
+                        'lambda': mmr_telemetry['lambda'],
+                        'div_before': round(mmr_telemetry['diversity_before_mmr'], 3),
+                        'div_after': round(mmr_telemetry['diversity_after_mmr'], 3),
+                    }
+                    print(f"<!-- MMR rerank: λ={mmr_telemetry['lambda']} ({mmr_telemetry['query_type']}), "
+                          f"diversity {mmr_telemetry['diversity_before_mmr']:.2f} → "
+                          f"{mmr_telemetry['diversity_after_mmr']:.2f} -->", file=sys.stderr)
+        except Exception as e:
+            print(f"<!-- MMR rerank skipped: {e} -->", file=sys.stderr)
 
     # Anti-hallucination: topic filter
     if args.topic_filter:
