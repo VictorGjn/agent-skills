@@ -300,9 +300,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "files": files,
             "embeddings": embeddings_map,
         }
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(target)
+        # Phase A (v1.1): write through the storage backend (Blob in prod,
+        # filesystem in tests).
+        body = json.dumps(index_obj, separators=(",", ":")).encode("utf-8")
+        corpus_store.write_corpus(corpus_id, body)
 
         job_store.register_complete(
             corpus_id, commit_sha,

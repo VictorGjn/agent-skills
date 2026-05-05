@@ -1,10 +1,9 @@
-"""Local-filesystem corpus store for production v1.
+"""Corpus store — pluggable storage backend (filesystem | Vercel Blob).
 
-v1 stores corpora as `<corpus_id>.index.json` files under a cache root
-(default `server-prod/cache/`, override via `CE_CORPUS_CACHE_DIR` env).
-
-v1.1 will replace this with a brain-repo (`syrocolab/company-brain`)
-backed reader. Same external shape — handlers don't care.
+v1 wrote `<corpus_id>.index.json` files to `cache/` (or `CE_CORPUS_CACHE_DIR`).
+v1.1 / Phase A: storage is abstracted behind `_lib/storage/`. Production now
+defaults to Vercel Blob when `BLOB_READ_WRITE_TOKEN` is set, with a
+per-instance `/tmp` warm cache to avoid round-tripping Blob on every read.
 
 Index file shape (mirrors server-stub's format, validated against v1):
 
@@ -21,11 +20,8 @@ Index file shape (mirrors server-stub's format, validated against v1):
         "lifecycle_state": "active|idle|archived|frozen",  # optional, default "active"
         "archive_location": "<string> | null"               # optional
       },
-      "files": [
-        { "path": ..., "contentHash": ..., "tokens": ..., "tree": {...},
-          "symbols": [...], "knowledge_type": ... },
-        ...
-      ]
+      "files": [...],
+      "embeddings": { "<path>": [float, ...], ... }   # optional
     }
 """
 from __future__ import annotations
@@ -37,11 +33,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import storage
 
+
+# Backwards-compat: still emit/read this path for the warm cache + tests.
 _DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "cache"
 
 # Same regex the stub used. Per § 4.1: `[a-z0-9][a-z0-9-]{0,127}`.
 _CORPUS_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+
+# Lazy backend instance. Tests monkeypatch via _backend()/set_backend.
+_BACKEND: storage.StorageBackend | None = None
+
+
+def _backend() -> storage.StorageBackend:
+    """Resolve and cache the configured storage backend.
+
+    Per-instance singleton — all reads/writes within one Vercel function
+    invocation share the same backend object. Tests can override via
+    `set_backend(...)` to inject a stub.
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        _BACKEND = storage.get_backend()
+    return _BACKEND
+
+
+def set_backend(backend: storage.StorageBackend | None) -> None:
+    """Override the active backend (test hook). Pass None to reset."""
+    global _BACKEND
+    _BACKEND = backend
 
 
 @dataclass(frozen=True)
@@ -93,8 +114,15 @@ class LoadedCorpus:
             object.__setattr__(self, "embeddings", {})
 
 
+# ── Cache dir / index path: kept for legacy callers + warm-cache hint ──
+
 def cache_dir() -> Path:
-    """Where corpus indices live. Override via CE_CORPUS_CACHE_DIR."""
+    """Filesystem location used by:
+    - LocalBackend storage root (when CE_STORAGE_BACKEND=local or no Blob token)
+    - The /tmp warm-cache layer used by the BlobBackend path
+
+    Override via `CE_CORPUS_CACHE_DIR`.
+    """
     override = os.environ.get("CE_CORPUS_CACHE_DIR")
     return Path(override).resolve() if override else _DEFAULT_CACHE
 
@@ -103,14 +131,24 @@ def is_valid_corpus_id(corpus_id: str) -> bool:
     return bool(corpus_id) and isinstance(corpus_id, str) and bool(_CORPUS_ID_RE.match(corpus_id))
 
 
-def index_path_for(corpus_id: str) -> Path:
-    return cache_dir() / f"{corpus_id}.index.json"
+def _key_for(corpus_id: str) -> str:
+    """Storage key (relative path / blob pathname) for a corpus."""
+    return f"{corpus_id}.index.json"
 
+
+def index_path_for(corpus_id: str) -> Path:
+    """Filesystem path for a corpus index — used by callers that still
+    write atomically via temp+rename (upload_corpus, index_github_repo lock
+    files). The Blob backend writes via _backend().put_bytes() instead and
+    these paths only refer to the warm-cache mirror.
+    """
+    return cache_dir() / _key_for(corpus_id)
+
+
+# ── Read path ──
 
 def _coerce_meta(raw: dict, size_bytes: int) -> CorpusMeta:
     file_count = int(raw.get("file_count", 0) or 0)
-    # If embedded_count isn't recorded, infer from embedding presence: dims>0 → all files
-    # have vectors (server-side indexer enforces this); dims=0 → none.
     embedding = raw.get("embedding") or {"provider": "none", "model": "n/a", "dims": 0}
     if "embedded_count" in raw:
         embedded_count = int(raw["embedded_count"] or 0)
@@ -132,26 +170,66 @@ def _coerce_meta(raw: dict, size_bytes: int) -> CorpusMeta:
     )
 
 
+def _read_bytes(corpus_id: str) -> bytes | None:
+    """Backend read with a per-instance /tmp warm cache.
+
+    Order of operations:
+    1. Check the warm cache (current cache_dir) — fast path on warm instances.
+    2. Fall back to the configured backend (Blob in production).
+    3. On Blob hit, populate the warm cache so subsequent reads in the same
+       instance skip the round-trip.
+
+    The warm cache is bounded by /tmp's natural size + the function's life.
+    """
+    key = _key_for(corpus_id)
+    backend = _backend()
+
+    # When the active backend IS LocalBackend on the same path, the warm-cache
+    # check is the same lookup as the backend read. Skip the duplicate work.
+    from .storage import local as _local
+    is_local = isinstance(backend, _local.LocalBackend)
+    if not is_local:
+        warm = cache_dir() / key
+        if warm.exists():
+            try:
+                return warm.read_bytes()
+            except OSError:
+                pass
+
+    body = backend.get_bytes(key)
+    if body is None:
+        return None
+
+    # Populate warm cache (best-effort; ignore failures — /tmp full, etc.)
+    if not is_local:
+        try:
+            warm = cache_dir() / key
+            warm.parent.mkdir(parents=True, exist_ok=True)
+            warm.write_bytes(body)
+        except OSError:
+            pass
+
+    return body
+
+
 def load_corpus(corpus_id: str) -> LoadedCorpus | None:
-    """Load `<cache>/corpus_id.index.json`. Returns None if missing or invalid id."""
+    """Load a corpus index. Returns None if missing or invalid id."""
     if not is_valid_corpus_id(corpus_id):
         return None
-    p = index_path_for(corpus_id)
-    if not p.exists():
+    body = _read_bytes(corpus_id)
+    if body is None:
         return None
     try:
-        with open(p, encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        raw = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    # Filename is authoritative (matches list_metas behavior). Hand-built or
-    # partially migrated indices may have missing/stale `_meta.corpus_id`;
-    # without this fallback, multi-corpus path prefixes and corpus_commit_shas
-    # keys would render with "" and break addressing.
+
     meta_raw = raw.get("_meta", {})
     if not meta_raw.get("corpus_id"):
         meta_raw = {**meta_raw, "corpus_id": corpus_id}
-    meta = _coerce_meta(meta_raw, p.stat().st_size)
+    size_bytes = len(body)
+    meta = _coerce_meta(meta_raw, size_bytes)
+
     files = raw.get("files") or []
     if isinstance(files, dict):
         files = list(files.values())
@@ -160,6 +238,34 @@ def load_corpus(corpus_id: str) -> LoadedCorpus | None:
         embeddings = {}
     return LoadedCorpus(meta=meta, files=files, embeddings=embeddings)
 
+
+# ── Write path ──
+
+def write_corpus(corpus_id: str, body: bytes) -> int:
+    """Write a corpus index file. Returns size_bytes.
+
+    Goes to the configured backend (Blob in prod). Also writes the warm
+    cache so the next read in the same instance is a fast-path hit.
+    """
+    key = _key_for(corpus_id)
+    backend = _backend()
+    backend.put_bytes(key, body)
+
+    from .storage import local as _local
+    if not isinstance(backend, _local.LocalBackend):
+        # Mirror to warm cache (best-effort)
+        try:
+            warm = cache_dir() / key
+            warm.parent.mkdir(parents=True, exist_ok=True)
+            tmp = warm.with_suffix(warm.suffix + ".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(warm)
+        except OSError:
+            pass
+    return len(body)
+
+
+# ── Integrity helpers (unchanged from v1) ──
 
 def content_fingerprint(loaded: LoadedCorpus) -> str:
     """Deterministic 12-char fingerprint of sorted (path, contentHash) pairs.
@@ -183,21 +289,30 @@ def commit_key(loaded: LoadedCorpus) -> str:
     return f"cf-{content_fingerprint(loaded)}"
 
 
+# ── List path ──
+
 def list_metas() -> list[CorpusMeta]:
-    """List all corpus metas (no file payloads)."""
+    """List all corpus metas (no file payloads).
+
+    Backed by the active storage backend. For Blob, this is a paged LIST
+    plus per-blob HEAD; we read the full body since v1 doesn't expose a
+    head-only metadata endpoint and the meta is in the index file.
+    """
+    backend = _backend()
     out: list[CorpusMeta] = []
-    cd = cache_dir()
-    if not cd.exists():
-        return out
-    for p in sorted(cd.glob("*.index.json")):
+    for key in backend.list_keys(prefix=""):
+        if not key.endswith(".index.json"):
+            continue
+        body = backend.get_bytes(key)
+        if body is None:
+            continue
         try:
-            with open(p, encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
+            raw = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         meta_raw = raw.get("_meta", {})
-        # Filename is authoritative — _meta might be missing or stale on a hand-built index.
         if not meta_raw.get("corpus_id"):
-            meta_raw = {**meta_raw, "corpus_id": p.stem.removesuffix(".index")}
-        out.append(_coerce_meta(meta_raw, p.stat().st_size))
+            stem = key[:-len(".index.json")]
+            meta_raw = {**meta_raw, "corpus_id": stem}
+        out.append(_coerce_meta(meta_raw, len(body)))
     return out

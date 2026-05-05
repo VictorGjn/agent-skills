@@ -274,16 +274,16 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "files": files,
             "embeddings": embeddings_for_files,
         }
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(target)
-
-        size_bytes = target.stat().st_size
+        # Phase A (v1.1): write through the storage backend (Blob in prod,
+        # filesystem in tests). Backend handles atomicity (Blob is
+        # transactional via PUT; LocalBackend uses temp+rename).
+        body = json.dumps(index_obj, separators=(",", ":")).encode("utf-8")
+        size_bytes = len(body)
         if size_bytes > MAX_CORPUS_BYTES:
-            target.unlink(missing_ok=True)
             return _err("PAYLOAD_TOO_LARGE",
                         f"corpus exceeds 1 GB cap ({size_bytes} bytes)",
                         details={"size_bytes": size_bytes, "max": MAX_CORPUS_BYTES})
+        corpus_store.write_corpus(corpus_id, body)
 
         # Register synthetic completion job for ce_get_job_status callers
         job_store.register_complete(
