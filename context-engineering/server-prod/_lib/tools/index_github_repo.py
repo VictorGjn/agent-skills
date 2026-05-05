@@ -189,7 +189,27 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     ).hexdigest()[:12]
 
     existing = corpus_store.load_corpus(corpus_id)
-    if existing and existing.meta.commit_sha == commit_sha:
+    # Idempotency: same content AND same intent. The intent guard blocks a
+    # keyword-only corpus (written by a prior call that lost the embed budget)
+    # from short-circuiting a fresh call that COULD embed now. Without it,
+    # once a Vercel-warm-instance writes /tmp/<corpus>.index.json with
+    # embedded_count=0, every subsequent call returns that same stale meta —
+    # the corpus stays keyword-forever even after MISTRAL_API_KEY arrives or
+    # the budget grows. We treat keyword-only corpora as "incomplete" and
+    # let the new call re-derive (the lock + atomic write handle the race).
+    embed_request_now = args.get("embed")
+    has_key_now = bool(_resolve_mistral_key())
+    intent_says_embed_now = embed_request_now is True or (
+        embed_request_now is None and has_key_now
+    )
+    existing_was_embedded = existing is not None and existing.meta.embedded_count > 0
+    intent_matches_existing = (
+        existing is not None and (
+            (intent_says_embed_now and existing_was_embedded) or
+            (not intent_says_embed_now and not existing_was_embedded)
+        )
+    )
+    if existing and existing.meta.commit_sha == commit_sha and intent_matches_existing:
         return {
             "corpus_id": corpus_id,
             "commit_sha": commit_sha,
@@ -277,6 +297,11 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 def _resolve_github_token() -> str | None:
     import os
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+
+def _resolve_mistral_key() -> str | None:
+    import os
+    return os.environ.get("MISTRAL_API_KEY")
 
 
 def _file_embed_text(f: dict) -> str:

@@ -616,6 +616,72 @@ def test_index_github_repo_partial_text_drops_unembeddable(cache_dir, monkeypatc
     assert out["stats"]["embedded_count"] >= 1
 
 
+def test_index_github_repo_idempotency_does_not_pin_keyword_only(cache_dir, monkeypatch):
+    """Regression: a corpus written keyword-only by a prior call (e.g.,
+    one that lost the embed budget or ran before MISTRAL_API_KEY was set)
+    must not block a fresh call from re-deriving with embeddings.
+
+    Without the intent-aware idempotency check, once /tmp had a keyword-only
+    index for a given commit_sha, every subsequent call returned that stale
+    meta and the corpus could never be upgraded — production gap caught
+    while smoking flipt-io/flipt after the maxDuration bump.
+    """
+    from _lib.tools import index_github_repo as _tool
+
+    # First call: simulate the "lost budget" path — no key, keyword-only
+    # corpus persisted.
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    files = [
+        {"path": "a.py", "tokens": 10, "hash": "h1",
+         "tree": {"text": "auth code", "title": "a.py", "children": []}},
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+
+    out1 = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                        _admin_token())
+    assert out1["stats"]["embedded_count"] == 0
+    corpus_id = out1["corpus_id"]
+
+    # Second call: key arrives, caller defaults to auto. The stored corpus
+    # has the same commit_sha (content unchanged), but it's keyword-only.
+    # Idempotency must NOT short-circuit — we want to embed now.
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setattr(embed, "embed_batch",
+                        lambda texts, **kw: [[1.0] + [0.0] * 1535 for _ in texts])
+
+    out2 = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                        _admin_token())
+    assert out2["corpus_id"] == corpus_id
+    assert out2["stats"]["embedded_count"] == 1, (
+        "stale keyword-only corpus blocked re-embed; intent guard didn't fire"
+    )
+
+
+def test_index_github_repo_idempotency_short_circuits_when_intent_matches(cache_dir, monkeypatch):
+    """Idempotency still fires correctly when content + intent both match —
+    re-running without changes should be a fast no-op."""
+    from _lib.tools import index_github_repo as _tool
+    files = [
+        {"path": "a.py", "tokens": 10, "hash": "h1",
+         "tree": {"text": "auth code", "title": "a.py", "children": []}},
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setattr(embed, "embed_batch",
+                        lambda texts, **kw: [[1.0] + [0.0] * 1535 for _ in texts])
+
+    out1 = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                        _admin_token())
+    assert out1["stats"]["embedded_count"] == 1
+    v1 = out1["version"]
+
+    # Re-run with same args + same content. Intent matches (still embedded).
+    out2 = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                        _admin_token())
+    assert out2["version"] == v1, "idempotency should keep version stable on no-op re-run"
+    assert out2["stats"]["embedded_count"] == 1
+
+
 def test_index_github_repo_embed_arg_validates(cache_dir, monkeypatch):
     """`embed` must be bool or null."""
     from _lib.tools import index_github_repo as _tool
