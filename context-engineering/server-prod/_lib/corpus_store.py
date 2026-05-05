@@ -201,11 +201,16 @@ def _read_bytes(corpus_id: str) -> bytes | None:
         return None
 
     # Populate warm cache (best-effort; ignore failures — /tmp full, etc.)
+    # Atomic temp+rename so a crash mid-write doesn't leave a partial file
+    # the next read would treat as a cache hit. Concern from Codex review
+    # of PR #50.
     if not is_local:
         try:
             warm = cache_dir() / key
             warm.parent.mkdir(parents=True, exist_ok=True)
-            warm.write_bytes(body)
+            tmp = warm.with_suffix(warm.suffix + ".tmp")
+            tmp.write_bytes(body)
+            tmp.replace(warm)
         except OSError:
             pass
 

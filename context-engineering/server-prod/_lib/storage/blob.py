@@ -33,6 +33,15 @@ DEFAULT_API_URL = "https://vercel.com/api/blob"
 DEFAULT_TIMEOUT_S = 30
 LIST_PAGE_SIZE = 1000  # max per Vercel API page
 
+# Pinned to vercel/storage's BLOB_API_VERSION constant (api.ts).
+# Override via VERCEL_BLOB_API_VERSION_OVERRIDE env (mirrors the SDK).
+DEFAULT_API_VERSION = "12"
+
+# Vercel Blob's `access` is REQUIRED on writes. Our corpora are not
+# user-shared assets — keep them private (token-gated). Public blobs are
+# served from a different host with no auth, which we don't want.
+DEFAULT_ACCESS = "private"
+
 
 class BlobError(Exception):
     """Raised on transport / API failure. `code` matches our SPEC § 7 codes
@@ -49,6 +58,20 @@ class BlobError(Exception):
 
 def _api_base() -> str:
     return os.environ.get("VERCEL_BLOB_API_URL") or DEFAULT_API_URL
+
+
+def _api_version() -> str:
+    return os.environ.get("VERCEL_BLOB_API_VERSION_OVERRIDE") or DEFAULT_API_VERSION
+
+
+def _common_headers() -> dict[str, str]:
+    """Headers the SDK sends on EVERY request: api-version + per-request id."""
+    import uuid
+    return {
+        "x-api-version": _api_version(),
+        "x-api-blob-request-id": uuid.uuid4().hex,
+        "x-api-blob-request-attempt": "0",
+    }
 
 
 def _token() -> str:
@@ -109,18 +132,28 @@ class BlobBackend:
         return body
 
     def put_bytes(self, key: str, body: bytes) -> None:
-        """Upload bytes under pathname `key`, overwriting any existing blob."""
+        """Upload bytes under pathname `key`, overwriting any existing blob.
+
+        Header set verified against vercel/storage @vercel/blob put-helpers.ts
+        and api.ts:
+        - x-api-version + x-api-blob-request-id + x-api-blob-request-attempt
+          are required on every API call (api.ts).
+        - x-vercel-blob-access is required on writes ("private" | "public").
+          Our corpora are token-gated → private always.
+        - x-add-random-suffix=0 + x-allow-overwrite=1 → deterministic pathname
+          + idempotent re-write (so re-indexing the same content doesn't 409).
+        - x-content-length is sent only when the SDK can compute it.
+        """
         params = urllib.parse.urlencode({"pathname": key})
         url = f"{_api_base()}/?{params}"
-        # `addRandomSuffix=false` + `allowOverwrite=true` give us deterministic
-        # pathnames (so corpus_id matches the stored key 1:1) and idempotent
-        # writes (so re-indexing doesn't 409).
-        headers = {
+        headers = _common_headers()
+        headers.update({
+            "x-vercel-blob-access": DEFAULT_ACCESS,
             "x-add-random-suffix": "0",
             "x-allow-overwrite": "1",
             "x-content-length": str(len(body)),
-            "x-api-version": "7",
-        }
+            "x-content-type": "application/json",
+        })
         status, resp_body, _ = _request("PUT", url, body=body, headers=headers)
         if status >= 400:
             raise BlobError(
@@ -138,7 +171,7 @@ class BlobBackend:
         """
         params = urllib.parse.urlencode({"url": key})
         url = f"{_api_base()}/?{params}"
-        headers = {"x-api-version": "7"}
+        headers = _common_headers()
         status, resp_body, _ = _request("GET", url, headers=headers)
         if status == 404:
             return None
@@ -169,7 +202,8 @@ class BlobBackend:
             return
         url = f"{_api_base()}/delete"
         body = json.dumps({"urls": [target_url]}).encode("utf-8")
-        headers = {"Content-Type": "application/json", "x-api-version": "7"}
+        headers = _common_headers()
+        headers["Content-Type"] = "application/json"
         status, resp_body, _ = _request("POST", url, body=body, headers=headers)
         if status >= 400 and status != 404:
             raise BlobError(
@@ -190,7 +224,7 @@ class BlobBackend:
             if cursor:
                 params["cursor"] = cursor
             url = f"{_api_base()}/?{urllib.parse.urlencode(params)}"
-            headers = {"x-api-version": "7"}
+            headers = _common_headers()
             status, resp_body, _ = _request("GET", url, headers=headers)
             if status >= 400:
                 raise BlobError(

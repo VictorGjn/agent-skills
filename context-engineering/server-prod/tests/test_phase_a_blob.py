@@ -165,8 +165,14 @@ def test_blob_put_sends_pathname_query_and_bearer(fake_blob):
     call = fake_blob.calls[0]
     assert call["method"] == "PUT"
     assert "pathname=foo.json" in call["url"]
+    # Verified against vercel/storage @vercel/blob put-helpers.ts header map.
     assert call["headers"]["x-allow-overwrite"] == "1"
     assert call["headers"]["x-add-random-suffix"] == "0"
+    assert call["headers"]["x-vercel-blob-access"] == "private"
+    assert call["headers"]["x-api-version"] == "12"
+    # Per-request id required by the API (api.ts requestApi).
+    assert "x-api-blob-request-id" in call["headers"]
+    assert call["headers"]["x-content-length"] == str(len(b'{"hello": "world"}'))
 
 
 def test_blob_get_uses_head_then_download_url(fake_blob):
