@@ -156,7 +156,15 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             return _err("SOURCE_FORBIDDEN",
                         f"server cannot read repo {repo!r}; use ce_upload_corpus instead",
                         details={"repo": repo, "branch": branch})
-        # Any other failure surfaces as INTERNAL via transport's catch-all
+        # Vendored indexer raises RuntimeError("GitHub returned no tree …")
+        # when the API returns 200 with no tree (empty repo, branch with no
+        # files, etc.). Map to SOURCE_NOT_FOUND so callers get a structured
+        # error instead of the transport catch-all's INTERNAL.
+        if "GitHub returned no tree" in msg:
+            return _err("SOURCE_NOT_FOUND",
+                        f"repo {repo!r} (branch {branch!r}) returned an empty tree",
+                        details={"repo": repo, "branch": branch, "upstream": msg})
+        # Any other failure surfaces as INTERNAL via transport's catch-all.
         raise
 
     # Apply indexed_paths filter, if provided

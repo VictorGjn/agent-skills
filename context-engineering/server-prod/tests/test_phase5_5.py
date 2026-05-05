@@ -768,6 +768,30 @@ def test_index_github_repo_idempotency_partial_coverage_does_not_pin(cache_dir, 
     assert embed_calls["n"] >= 1, "embed_batch was not called — re-derive path skipped"
 
 
+def test_index_github_repo_indexer_runtimeerror_maps_to_source_not_found(cache_dir, monkeypatch):
+    """Codex P1 (763b271): the vendored indexer's `if 'tree' not in tree_data: sys.exit(1)`
+    raised SystemExit, which is BaseException — escaped the tool handler's
+    `except Exception` and aborted the function instead of mapping to a
+    structured error. After the fix it raises RuntimeError; this test
+    pins both the runtime safety (no SystemExit escape) AND that the
+    error gets mapped to SOURCE_NOT_FOUND.
+    """
+    from _lib.tools import index_github_repo as _tool
+
+    def boom(owner, name, branch, gh_token):
+        raise RuntimeError(
+            f"GitHub returned no tree for {owner}/{name}@{branch}: Git Repository is empty."
+        )
+    monkeypatch.setattr(_tool, "_run_indexer", boom)
+
+    out = _tool.handle({"repo": "x/y", "branch": "main",
+                        "data_classification": "public"},
+                       _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "SOURCE_NOT_FOUND"
+    assert "empty tree" in out["content"][0]["text"]
+
+
 def test_index_github_repo_embed_arg_validates(cache_dir, monkeypatch):
     """`embed` must be bool or null."""
     from _lib.tools import index_github_repo as _tool

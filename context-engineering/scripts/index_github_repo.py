@@ -273,8 +273,14 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
     tree_data = github_get(tree_url, token)
 
     if 'tree' not in tree_data:
-        print(f'Error: {tree_data.get("message", "unknown")}', file=sys.stderr)
-        sys.exit(1)
+        # Used both as CLI and imported from server-prod's vendored copy.
+        # SystemExit (from sys.exit) is BaseException — escapes the tool
+        # handler's `except Exception` and aborts the function instead of
+        # mapping to SOURCE_NOT_FOUND / SOURCE_FORBIDDEN. Raise a regular
+        # exception; the CLI's __main__ exits via uncaught-exception path,
+        # the importer catches it and maps to a structured tool error.
+        msg = tree_data.get('message', 'unknown')
+        raise RuntimeError(f'GitHub returned no tree for {owner}/{repo}@{branch}: {msg}')
 
     # Filter indexable files
     candidates = []
