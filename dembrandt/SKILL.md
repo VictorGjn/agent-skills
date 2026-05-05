@@ -139,7 +139,7 @@ If any stage-6 check fails, **stop and fix.** Blockers, not nice-to-haves.
 ## How to operate
 
 1. **Identify the entry stage.** A new brand starts at 1; a component-consistency review starts at 4; a pre-ship audit runs 5 → 6.
-2. **Load only the sub-skill(s) for the current stage.** Each sub-skill is at `~/.claude/skills/<name>/SKILL.md`. Loading all 30 upfront wastes context.
+2. **Load only the sub-skill(s) for the current stage.** Each sub-skill lives in its own folder (`skills/<name>/SKILL.md` in this repo, or under your harness's installed-skills directory once added). Loading all 30 upfront wastes context.
 3. **Apply, capture decisions, move to the next stage.** Carry forward concrete outputs (token values, hierarchy choices) — not vague impressions.
 4. **Always finish with stage 6.** A11y and performance are mandatory gates.
 
