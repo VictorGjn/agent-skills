@@ -77,11 +77,20 @@ def _derive_corpus_id(repo: str, branch: str = "main") -> str:
 
 
 def _extract_files_from_ground_truth(gt_obj: dict) -> list[str] | None:
-    """Return a list of paths or None if the shape isn't IR-scorable."""
-    if "files" in gt_obj and isinstance(gt_obj["files"], list):
-        return [p for p in gt_obj["files"] if isinstance(p, str)]
-    if "expected_files" in gt_obj and isinstance(gt_obj["expected_files"], list):
-        return [p for p in gt_obj["expected_files"] if isinstance(p, str)]
+    """Return a list of paths or None if the shape isn't IR-scorable.
+
+    CSB tasks ship four file-list shapes across SDLC categories:
+    - "files"          — fix/feature/test (canonical)
+    - "expected_files" — refactor/secure
+    - "buggy_files"    — debug (linux SDLC pins via this key)
+    - none of the above (verifier-pattern style: required_findings) — skipped
+    """
+    for key in ("files", "expected_files", "buggy_files"):
+        v = gt_obj.get(key)
+        if isinstance(v, list):
+            paths = [p for p in v if isinstance(p, str)]
+            if paths:
+                return paths
     return None
 
 
@@ -91,21 +100,33 @@ _GH_URL_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9][A-Za-z0-9._-]+?)(?:\.git|\s|$)"
 )
 
+# Match `git clone` lines that pin a branch/tag/ref. Both the long form
+# (`--branch v5.6.7`) and short form (`-b master`) appear in CSB Dockerfiles.
+_BRANCH_RE = re.compile(r"git\s+clone\b[^\n]*?(?:--branch|-b)\s+([A-Za-z0-9._/-]+)")
 
-def _extract_repo_from_dockerfile(task_dir: Path) -> str | None:
-    """Most CSB tasks store the canonical repo as `sg-evals/<repo>--<sha>` in
+
+def _extract_from_dockerfile(task_dir: Path) -> tuple[str | None, str | None]:
+    """Return (repo, branch) extracted from the task's Dockerfile.
+
+    Most CSB tasks store the canonical repo as `sg-evals/<repo>--<sha>` in
     a `git clone` line in environment/Dockerfile (a snapshot fork pinned to
-    the task's pre_fix_rev). Pull the FIRST github.com URL we see.
+    the task's pre_fix_rev). Some tasks (linux-* SDLC) pin a specific tag
+    via `--branch v5.6.7` — without extracting that, the converter would
+    hardcode branch=main and ce_index_github_repo would 404 on the snapshot
+    repo's actual default ref. Returns the FIRST match for both.
     """
     for name in ("Dockerfile", "Dockerfile.sg_only", "Dockerfile.artifact_only"):
         p = task_dir / "environment" / name
         if not p.exists():
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
-        m = _GH_URL_RE.search(text)
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
-    return None
+        repo_m = _GH_URL_RE.search(text)
+        repo = f"{repo_m.group(1)}/{repo_m.group(2)}" if repo_m else None
+        branch_m = _BRANCH_RE.search(text)
+        branch = branch_m.group(1) if branch_m else None
+        if repo or branch:
+            return repo, branch
+    return None, None
 
 
 def _read_instruction(task_dir: Path) -> str:
@@ -131,10 +152,12 @@ def convert_one(task_dir: Path, out_dir: Path) -> dict | None:
         toml = tomllib.load(f)
     task_meta = toml.get("task", {}) or {}
     repo = task_meta.get("repo")
+
     # task.toml repo is often a bare name (e.g. "aspnetcore"); canonical
-    # owner/name lives in the Dockerfile as a sg-evals/<repo>--<sha> snapshot.
+    # owner/name + branch (pinned tag like v5.6.7) live in the Dockerfile.
+    dockerfile_repo, dockerfile_branch = _extract_from_dockerfile(task_dir)
     if not repo or "/" not in repo:
-        repo = _extract_repo_from_dockerfile(task_dir)
+        repo = dockerfile_repo
     if not repo or "/" not in repo:
         return None
 
@@ -150,7 +173,10 @@ def convert_one(task_dir: Path, out_dir: Path) -> dict | None:
     if not paths:
         return None
 
-    branch = "main"
+    # Prefer the branch the Dockerfile pinned (e.g. linux v5.6.7 tasks).
+    # Without this, ce_index_github_repo would default to `main` against a
+    # snapshot fork whose only ref is the pinned tag → SOURCE_NOT_FOUND.
+    branch = dockerfile_branch or "main"
     corpus_id = _derive_corpus_id(repo, branch)
     spec = {
         "description": description,

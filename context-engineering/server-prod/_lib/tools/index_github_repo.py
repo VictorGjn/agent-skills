@@ -202,7 +202,22 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     intent_says_embed_now = embed_request_now is True or (
         embed_request_now is None and has_key_now
     )
-    existing_was_embedded = existing is not None and existing.meta.embedded_count > 0
+    # FULL coverage required (not partial). A corpus where embedded_count <
+    # file_count is "incomplete" — re-running with the same intent should
+    # try to fill the missing files in case an indexer change made more of
+    # them embeddable. Today's _maybe_embed is all-or-nothing per call so
+    # this is mostly a future-proofing guard, but it also catches a real
+    # corner case: a corpus where _file_embed_text returned "" for some
+    # files (e.g. zero-token doc files) gets embedded_count < file_count
+    # legitimately. We treat that as "not fully embedded" so a future
+    # _file_embed_text improvement that surfaces text for those files
+    # actually re-embeds. False matches cost a re-fetch + re-embed, which
+    # is cheap; false skips silently lock the corpus into stale state.
+    existing_was_embedded = (
+        existing is not None
+        and existing.meta.embedded_count > 0
+        and existing.meta.embedded_count >= existing.meta.file_count
+    )
     intent_matches_existing = (
         existing is not None and (
             (intent_says_embed_now and existing_was_embedded) or
@@ -245,9 +260,18 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         # write the corpus keyword-only and surface that via embedding.dims=0,
         # so the strict parity check (corpus_access.check_embeddings_loaded)
         # treats it as "keyword corpus by design" rather than "broken".
-        embeddings_map, embedding, embed_skip_reason = _maybe_embed(
-            files, embed_request, start, file_count,
-        )
+        try:
+            embeddings_map, embedding, embed_skip_reason = _maybe_embed(
+                files, embed_request, start, file_count,
+            )
+        except embed_lib.EmbedError as e:
+            # Only PROVIDER_UNAVAILABLE escapes _maybe_embed today (raised
+            # when caller asked embed=True and server has no key). Surface
+            # as a tool error so the response carries isError=true and the
+            # caller knows the explicit-intent ask was rejected.
+            if e.code == "PROVIDER_UNAVAILABLE":
+                return _err(e.code, e.message, details=e.details or None)
+            raise
         embedded_count = len(embeddings_map)
         index_obj = {
             "_meta": {
@@ -331,11 +355,15 @@ def _maybe_embed(
 ) -> tuple[dict[str, list[float]], dict, str | None]:
     """Compute embeddings server-side when feasible.
 
-    Returns (embeddings_map, embedding_meta, skip_reason).
+    Returns (embeddings_map, embedding_meta, skip_reason). Raises
+    `embed_lib.EmbedError("PROVIDER_UNAVAILABLE", ...)` ONLY when the
+    caller passed `embed=True` explicitly and the server has no key —
+    we honour the explicit-intent contract by failing loudly instead of
+    silently returning keyword-only.
+
     `embedding_meta.dims=0` means we did NOT embed; the corpus is keyword-only.
     `dims=1536` means all `file_count` files have a vector in `embeddings_map`
-    (we don't ship partial coverage — the strict parity check would reject
-    a "dims>0 but missing some" corpus as broken).
+    (modulo files with no embeddable text — see `_file_embed_text`).
     """
     import os
 
@@ -344,15 +372,17 @@ def _maybe_embed(
 
     has_key = bool(os.environ.get("MISTRAL_API_KEY"))
     if embed_request is True and not has_key:
-        # Caller asked for embeddings explicitly but server can't honour it.
-        # Returning a None skip_reason here would silently downgrade — instead
-        # caller sees PROVIDER_UNAVAILABLE via embed_lib.embed_batch raising
-        # below. We still return the keyword-only fallback shape so the
-        # response is consistent with the soft-skip path.
-        return {}, {"provider": "none", "model": "n/a", "dims": 0}, "MISTRAL_API_KEY not set"
+        # Explicit intent failure. Surface as PROVIDER_UNAVAILABLE so the
+        # tool envelope returns isError=True — silent fallback would let
+        # bench callers think they got semantic embeddings when they didn't.
+        raise embed_lib.EmbedError(
+            "PROVIDER_UNAVAILABLE",
+            "embed=true requires MISTRAL_API_KEY on the server "
+            "(use embed=false or embed=null/auto for keyword-only fallback)",
+        )
 
     if not has_key:
-        # auto path with no key — keyword-only corpus.
+        # auto path with no key — keyword-only corpus, soft-skip is intended.
         return {}, {"provider": "none", "model": "n/a", "dims": 0}, "MISTRAL_API_KEY not set"
 
     # Wall-time estimate: ~1/EMBED_FILES_PER_SECOND seconds per file.

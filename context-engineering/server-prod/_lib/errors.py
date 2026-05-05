@@ -34,6 +34,8 @@ TOOL_ERROR_CODES = {
     "PAYLOAD_TOO_LARGE": (413, False),
     "RATE_LIMITED": (429, True),
     "NOT_IMPLEMENTED": (501, False),  # Phase 2 placeholder for tools landing in Phase 3/4
+    "PROVIDER_UNAVAILABLE": (503, False),  # missing config (e.g. MISTRAL_API_KEY for embed=true)
+    "INTERNAL": (500, True),  # safe fallback when an unknown code is passed (see tool_error)
 }
 
 # § 7.2 protocol errors — emitted as JSON-RPC `error`

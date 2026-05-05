@@ -682,6 +682,92 @@ def test_index_github_repo_idempotency_short_circuits_when_intent_matches(cache_
     assert out2["stats"]["embedded_count"] == 1
 
 
+def test_index_github_repo_embed_true_no_key_returns_provider_unavailable(cache_dir, monkeypatch):
+    """Explicit embed=true must error rather than silent-fallback when the
+    server has no MISTRAL_API_KEY. Soft-fallback is for embed=auto only —
+    a caller saying 'I require embeddings' deserves to know they didn't
+    get them. P3 fix from PR #49 self-review.
+    """
+    from _lib.tools import index_github_repo as _tool
+    files = [{"path": "a.py", "tokens": 1, "hash": "h",
+              "tree": {"text": "x", "children": []}}]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public",
+                        "embed": True},
+                       _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "PROVIDER_UNAVAILABLE"
+    assert "embed=true" in out["content"][0]["text"]
+
+
+def test_index_github_repo_idempotency_partial_coverage_does_not_pin(cache_dir, monkeypatch):
+    """Regression: a corpus with embedded_count > 0 BUT < file_count is
+    incomplete. Idempotency must NOT short-circuit on partial coverage,
+    otherwise a future indexer change that surfaces text for previously-
+    unembeddable files can never upgrade the corpus. P2 fix from PR #49
+    self-review.
+
+    We hand-build a corpus index file with 2 files but only 1 embedded,
+    matching commit_sha to the indexer output. The fresh call should
+    re-derive (lock + write), not short-circuit.
+    """
+    from _lib.tools import index_github_repo as _tool
+
+    files = [
+        {"path": "a.py", "tokens": 10, "hash": "h-a-py",
+         "tree": {"text": "auth", "title": "a.py", "children": []}},
+        {"path": "b.py", "tokens": 10, "hash": "h-b-py",
+         "tree": {"text": "frob", "title": "b.py", "children": []}},
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+
+    # Pre-compute commit_sha the way the tool does, so the partial corpus
+    # we plant matches.
+    import hashlib
+    pairs = sorted([(f["path"], f["hash"]) for f in files])
+    commit_sha = hashlib.sha256(
+        json.dumps({"repo": "x/y", "branch": "main", "pairs": pairs},
+                    separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+
+    # Plant a partial-coverage index: 2 files, only 1 embedded.
+    partial = {
+        "_meta": {
+            "corpus_id": "gh-x-y-main",
+            "source": {"type": "github_repo", "uri": "https://github.com/x/y",
+                       "branch": "main"},
+            "data_classification": "public",
+            "embedding": {"provider": "mistral", "model": "codestral-embed", "dims": 1536},
+            "file_count": 2, "embedded_count": 1,  # partial!
+            "version": 1,
+            "last_refresh_completed_at": "2026-05-06T00:00:00Z",
+            "commit_sha": commit_sha,
+            "lifecycle_state": "active",
+        },
+        "files": [{"path": f["path"], "contentHash": f["hash"], "tokens": f["tokens"],
+                   "tree": f["tree"]} for f in files],
+        "embeddings": {"a.py": _unit_vec(4, 0)},  # only one embedded
+    }
+    (cache_dir / "gh-x-y-main.index.json").write_text(json.dumps(partial), encoding="utf-8")
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    embed_calls = {"n": 0}
+    def fake_embed(texts, **kw):
+        embed_calls["n"] += 1
+        return [[1.0] + [0.0] * 1535 for _ in texts]
+    monkeypatch.setattr(embed, "embed_batch", fake_embed)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out
+    assert out["stats"]["embedded_count"] == 2, (
+        "partial-coverage corpus pinned idempotency; full-coverage guard didn't fire"
+    )
+    assert embed_calls["n"] >= 1, "embed_batch was not called — re-derive path skipped"
+
+
 def test_index_github_repo_embed_arg_validates(cache_dir, monkeypatch):
     """`embed` must be bool or null."""
     from _lib.tools import index_github_repo as _tool
