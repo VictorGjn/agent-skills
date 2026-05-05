@@ -540,13 +540,17 @@ def test_index_github_repo_embed_auto_with_key_embeds(cache_dir, monkeypatch):
 
 
 def test_index_github_repo_embed_skips_when_estimated_over_budget(cache_dir, monkeypatch):
-    """Big repo + key set → estimated time exceeds budget → keyword-only with reason."""
+    """Big repo + key set → estimated time exceeds budget → keyword-only with reason.
+
+    Uses 5000 files (at EMBED_FILES_PER_SECOND=16 → 312s estimate) to stay
+    safely over budget even after the maxDuration bump (SYNC_TIMEOUT_S=280
+    minus EMBED_TIMING_HEADROOM_S=20 → 260s available).
+    """
     from _lib.tools import index_github_repo as _tool
-    # 1000 files at EMBED_FILES_PER_SECOND=16 = 62.5s estimate, well over budget.
     files = [
         {"path": f"f{i}.py", "tokens": 10, "hash": f"h{i}",
          "tree": {"text": f"file {i}", "title": f"f{i}.py", "children": []}}
-        for i in range(1000)
+        for i in range(5000)
     ]
     _stub_indexer_files(monkeypatch, files, elapsed_s=0)
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")

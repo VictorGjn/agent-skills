@@ -35,15 +35,16 @@ from . import upload_corpus  # reuse _acquire_lock / _release_lock
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
 VALID_EMBED = {None, True, False}
 
-# Soft timeout on sync run — under Vercel's 60s ceiling. Above this we
-# return BUDGET_EXCEEDED so caller switches to async (which lands in v1.1).
-SYNC_TIMEOUT_S = 50
+# Soft timeout on sync run — under Vercel's maxDuration ceiling. Above this we
+# return BUDGET_EXCEEDED so caller switches to async (v1.1).
+# vercel.json sets maxDuration=300; we leave 20s headroom for write+response.
+SYNC_TIMEOUT_S = 280
 
 # Phase 5.5 server-side embedding: ~2s per 32-row batch on Mistral codestral-embed.
 # We estimate `N / EMBED_FILES_PER_SECOND` seconds and skip if estimate > budget.
 EMBED_FILES_PER_SECOND = 16
-# Reserve 5s for index-write + lock + response-build below the 50s budget cap.
-EMBED_TIMING_HEADROOM_S = 5
+# Reserve headroom below SYNC_TIMEOUT_S for index-write + lock + response-build.
+EMBED_TIMING_HEADROOM_S = 20
 
 # Same regex used by SPEC § 4.1 for repo strings.
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
