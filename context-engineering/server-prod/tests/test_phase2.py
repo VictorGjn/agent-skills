@@ -183,6 +183,23 @@ def test_missing_method_field_returns_invalid_request():
     assert response["error"]["code"] == errors.JSONRPC_INVALID_REQUEST
 
 
+def test_tools_call_non_object_params_returns_invalid_params():
+    """Non-object `params` must produce a -32602 envelope, not a 500/AttributeError."""
+    for bad in ([], [1, 2, 3], "x", 7, True):
+        payload = {"jsonrpc": "2.0", "id": 200, "method": "tools/call", "params": bad}
+        response, status = dispatch(payload, _admin_token())
+        assert status == 200, f"params={bad!r}"
+        assert response["error"]["code"] == errors.JSONRPC_INVALID_PARAMS, f"params={bad!r}"
+
+
+def test_tool_error_unknown_code_falls_back_safely():
+    """Unknown code in tool_error() must fall back to INTERNAL without KeyError."""
+    env = errors.tool_error("NOT_A_REAL_CODE", "boom")
+    assert env["isError"] is True
+    assert env["structuredContent"]["code"] == "INTERNAL"
+    assert env["_http_status"] == 500
+
+
 def test_authenticate_case_sensitive_bearer_scheme():
     """RFC 7235 says auth-scheme is case-insensitive, but our parser only accepts 'Bearer '.
     This documents the gap — clients SHOULD use canonical case.
