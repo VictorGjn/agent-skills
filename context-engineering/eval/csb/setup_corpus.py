@@ -77,12 +77,15 @@ def index_via_server(mcp_url: str, token: str, repo: str, branch: str,
     return cid
 
 
-def _embed_files_mistral(workspace: str, files: list[dict]) -> list[list[float]]:
+def _embed_files_mistral(workspace: str, files: list[dict]
+                         ) -> tuple[list[dict], list[list[float]]]:
     """Read each file's content from disk and call Mistral codestral-embed in batches.
 
-    Returns one 1536-d vector per input file, in the same order. Files that can't
-    be read (binary, gone, permission denied) get a zero-length vector — the
-    server stores them but the engine's semantic ranker drops zero-vec rows.
+    Returns (kept_files, kept_vectors) — drops files that can't be embedded
+    (empty content, OSError, contains null bytes after replace-decode) from
+    BOTH lists in lockstep so callers can build a payload where len(files) ==
+    len(vectors) and every vector has the right dim. Sending `[]` placeholders
+    would fail server-side EMBEDDING_MISMATCH validation (dims=1536 vs len=0).
     """
     from pathlib import Path
 
@@ -93,26 +96,29 @@ def _embed_files_mistral(workspace: str, files: list[dict]) -> list[list[float]]
     from _lib import embed as _embed  # type: ignore
 
     ws = Path(workspace)
-    texts: list[str] = []
-    keep: list[int] = []
-    for i, f in enumerate(files):
+    kept_files: list[dict] = []
+    kept_texts: list[str] = []
+    skipped = 0
+    for f in files:
         path = ws / f["path"]
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            text = ""
-        texts.append(text)
-        if text.strip():
-            keep.append(i)
+            skipped += 1
+            continue
+        if not text.strip() or "\x00" in text:
+            skipped += 1
+            continue
+        kept_files.append(f)
+        kept_texts.append(text)
 
-    print(f"  embedding {len(keep)}/{len(texts)} files via Mistral codestral-embed…",
+    if skipped:
+        print(f"  skipped {skipped} unembeddable files (empty/binary/unreadable)",
+              file=sys.stderr)
+    print(f"  embedding {len(kept_texts)} files via Mistral codestral-embed…",
           file=sys.stderr)
-    embedded = _embed.embed_batch([texts[i] for i in keep])
-
-    vectors: list[list[float]] = [[] for _ in texts]
-    for k, vec in zip(keep, embedded):
-        vectors[k] = vec
-    return vectors
+    vectors = _embed.embed_batch(kept_texts) if kept_texts else []
+    return kept_files, vectors
 
 
 def upload_via_local_index(mcp_url: str, token: str, workspace: str,
@@ -156,7 +162,10 @@ def upload_via_local_index(mcp_url: str, token: str, workspace: str,
 
     if use_mistral:
         embedding_meta = {"provider": "mistral", "model": "codestral-embed", "dims": 1536}
-        vectors = _embed_files_mistral(workspace, files)
+        # Filter files to only those we successfully embedded — server rejects
+        # any zero-length vector when dims>0, so payload arrays must be aligned
+        # (same length, same indices, same files).
+        files, vectors = _embed_files_mistral(workspace, files)
     else:
         embedding_meta = {"provider": "none", "model": "n/a", "dims": 0}
         vectors = [[] for _ in files]

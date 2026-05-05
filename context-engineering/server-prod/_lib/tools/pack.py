@@ -134,6 +134,12 @@ def _validate_args(args: dict) -> dict | None:
             "INVALID_ARGUMENT", f"unknown rerank: {rerank!r}",
             details={"valid_rerank": sorted(x for x in VALID_RERANK if x is not None)},
         )
+    if rerank == "mmr" and mode != "semantic":
+        return errors.tool_error(
+            "INVALID_ARGUMENT",
+            "rerank='mmr' requires mode='semantic' (MMR diversifies cosine results)",
+            details={"got_mode": mode, "got_rerank": rerank},
+        )
 
     budget = args.get("budget")
     if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool)):
@@ -333,6 +339,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
+        if mode == "semantic":
+            err = corpus_access.check_embeddings_loaded([loaded])
+            if err:
+                return err
         packed = _pack_single(loaded, query, budget, prefix=None,
                               mode=mode, query_embedding=query_embedding, rerank=rerank)
         trace = _build_trace(why, mode, task, query, [loaded], budget) if why else None
@@ -355,6 +365,9 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     # Embedding parity check (semantic mode only). Other modes don't use vectors.
     if mode == "semantic":
         err = corpus_access.check_embedding_parity(loaded_list)
+        if err:
+            return err
+        err = corpus_access.check_embeddings_loaded(loaded_list)
         if err:
             return err
 

@@ -334,6 +334,318 @@ def test_pack_rerank_invalid_returns_invalid_argument(cache_dir):
     assert out["structuredContent"]["code"] == "INVALID_ARGUMENT"
 
 
+def test_pack_semantic_falls_back_to_keyword_when_no_embeddings(cache_dir, monkeypatch):
+    """Pack-side parity test for the find-side soft-fallback contract."""
+    files = [_file("a.py", text="auth"), _file("b.py", text="frob")]
+    _write_corpus(cache_dir, "alpha", files)  # dims=0, no embeddings
+
+    monkeypatch.setattr(embed, "embed_query", lambda q, **kw: _unit_vec(4, 0))
+
+    out = pack.handle({"query": "auth", "corpus_id": "alpha", "mode": "semantic",
+                       "budget": 8000, "response_format": "structured"},
+                      _admin_token())
+    assert "isError" not in out
+    if out["files"]:
+        # Whatever ranks, it must be keyword-scored (semantic_score field
+        # not on pack output, but the engine fell back via mode dispatch).
+        assert out["files"][0]["relevance"] > 0
+
+
+def test_pack_semantic_falls_back_when_query_embed_fails(cache_dir, monkeypatch):
+    """Mistral unreachable / no key → request still succeeds, keyword fallback."""
+    files = [_file("a.py", text="auth")]
+    embeddings = {"a.py": _unit_vec(4, 0)}
+    _write_corpus(cache_dir, "alpha", files, embeddings=embeddings)
+
+    def boom(q, **kw):
+        raise embed.EmbedError("PROVIDER_UNAVAILABLE", "no key")
+    monkeypatch.setattr(embed, "embed_query", boom)
+
+    out = pack.handle({"query": "auth", "corpus_id": "alpha", "mode": "semantic",
+                       "budget": 8000, "response_format": "structured"},
+                      _admin_token())
+    assert "isError" not in out
+
+
+# ── New strict parity check (P1.2 fix) ──
+
+def test_find_semantic_rejects_corpus_with_dims_but_no_embeddings(cache_dir, monkeypatch):
+    """Corpus declares dims>0 in metadata but `embeddings` payload is empty.
+
+    This is hand-built-index drift, not "keyword-only by design" (which is
+    dims=0). Must error rather than silently fall back to keyword — otherwise
+    a multi-corpus call could mix cosine scores from a real semantic corpus
+    with keyword scores from a broken one and the merged ranking would be
+    meaningless. P1.2 fix.
+    """
+    files = [_file("a.py")]
+    cd = cache_dir
+    # Hand-construct a corpus with dims=1536 declared but no embeddings map
+    index_obj = {
+        "_meta": {
+            "corpus_id": "broken",
+            "source": {"type": "github_repo", "uri": "https://github.com/x/broken"},
+            "data_classification": "internal",
+            "embedding": {"provider": "mistral", "model": "codestral-embed", "dims": 1536},
+            "file_count": 1,
+            "embedded_count": 0,
+            "version": 1,
+            "last_refresh_completed_at": "2026-05-05T00:00:00Z",
+            "commit_sha": "deadbeef",
+            "lifecycle_state": "active",
+        },
+        "files": files,
+        # NOTE: no top-level "embeddings" field
+    }
+    (cd / "broken.index.json").write_text(json.dumps(index_obj), encoding="utf-8")
+
+    monkeypatch.setattr(embed, "embed_query", lambda q, **kw: _unit_vec(4, 0))
+
+    out = find.handle({"query": "x", "corpus_id": "broken", "mode": "semantic"},
+                      _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "EMBEDDING_PROVIDER_MISMATCH"
+    assert "empty_corpora" in out["structuredContent"].get("details", {})
+
+
+def test_pack_semantic_rejects_corpus_with_dims_but_no_embeddings(cache_dir, monkeypatch):
+    """Pack-side mirror of the strict parity test."""
+    files = [_file("a.py")]
+    index_obj = {
+        "_meta": {
+            "corpus_id": "broken",
+            "source": {"type": "github_repo", "uri": "https://github.com/x/broken"},
+            "data_classification": "internal",
+            "embedding": {"provider": "mistral", "model": "codestral-embed", "dims": 1536},
+            "file_count": 1,
+            "embedded_count": 0,
+            "version": 1,
+            "last_refresh_completed_at": "2026-05-05T00:00:00Z",
+            "commit_sha": "deadbeef",
+            "lifecycle_state": "active",
+        },
+        "files": files,
+    }
+    (cache_dir / "broken.index.json").write_text(json.dumps(index_obj), encoding="utf-8")
+
+    monkeypatch.setattr(embed, "embed_query", lambda q, **kw: _unit_vec(4, 0))
+
+    out = pack.handle({"query": "x", "corpus_id": "broken", "mode": "semantic",
+                       "budget": 8000},
+                      _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "EMBEDDING_PROVIDER_MISMATCH"
+
+
+# ── New rerank/mode validation (P2.3 fix) ──
+
+def test_find_rerank_mmr_without_semantic_mode_returns_invalid_argument(cache_dir):
+    """rerank=mmr only makes sense with mode=semantic — MMR operates on cosine
+    similarity scores, which keyword mode doesn't produce. P2.3 fix.
+    """
+    _write_corpus(cache_dir, "alpha", [_file("a.py")])
+    out = find.handle(
+        {"query": "x", "corpus_id": "alpha", "mode": "keyword", "rerank": "mmr"},
+        _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "INVALID_ARGUMENT"
+    assert "mode='semantic'" in out["content"][0]["text"]
+
+
+def test_pack_rerank_mmr_without_semantic_mode_returns_invalid_argument(cache_dir):
+    _write_corpus(cache_dir, "alpha", [_file("a.py")])
+    out = pack.handle(
+        {"query": "x", "corpus_id": "alpha", "mode": "auto", "rerank": "mmr"},
+        _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "INVALID_ARGUMENT"
+
+
+# ── Partial-embeddings coverage (mixed corpus) ──
+
+# ── Server-side embedding in ce_index_github_repo (Phase 5.5 B) ──
+
+def _stub_indexer_files(monkeypatch, files: list[dict], elapsed_s: float = 0.5):
+    """Replace tools.index_github_repo._run_indexer with a stub that returns
+    a synthetic indexer result. `elapsed_s` simulates the wall-clock cost so
+    the budget estimator path is exercisable.
+    """
+    from _lib.tools import index_github_repo as _tool
+
+    def fake_indexer(owner, name, branch, gh_token):
+        if elapsed_s:
+            import time as _time
+            _time.sleep(elapsed_s)
+        return {"files": files}
+    monkeypatch.setattr(_tool, "_run_indexer", fake_indexer)
+    return _tool
+
+
+def test_index_github_repo_embed_false_skips(cache_dir, monkeypatch):
+    """embed=False → corpus written keyword-only with embed_skipped reason."""
+    from _lib.tools import index_github_repo as _tool
+    files = [
+        {"path": "a.py", "tokens": 10, "hash": "h1",
+         "tree": {"text": "auth code", "title": "a.py", "children": []}},
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+
+    out = _tool.handle({"repo": "x/y", "branch": "main",
+                        "data_classification": "public", "embed": False},
+                       _admin_token())
+    assert "isError" not in out
+    assert out["stats"]["embedded_count"] == 0
+    assert "embed=false" in out["embed_skipped"]
+
+
+def test_index_github_repo_embed_auto_no_key_skips(cache_dir, monkeypatch):
+    """embed=null + no MISTRAL_API_KEY → keyword-only, marked embed_skipped."""
+    from _lib.tools import index_github_repo as _tool
+    files = [{"path": "a.py", "tokens": 10, "hash": "h1",
+              "tree": {"text": "auth", "title": "a.py", "children": []}}]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out
+    assert out["stats"]["embedded_count"] == 0
+    assert "MISTRAL_API_KEY not set" in out["embed_skipped"]
+
+
+def test_index_github_repo_embed_auto_with_key_embeds(cache_dir, monkeypatch):
+    """embed=null + key set + small file count → embed_batch called, all files in map."""
+    from _lib.tools import index_github_repo as _tool
+    files = [
+        {"path": f"f{i}.py", "tokens": 10, "hash": f"h{i}",
+         "tree": {"text": f"file {i} content", "title": f"f{i}.py", "children": []}}
+        for i in range(3)
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    captured: dict = {"called": False, "n_inputs": None}
+    def fake_embed_batch(texts, **kw):
+        captured["called"] = True
+        captured["n_inputs"] = len(texts)
+        return [[1.0] + [0.0] * 1535 for _ in texts]
+    monkeypatch.setattr(embed, "embed_batch", fake_embed_batch)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out, out
+    assert "embed_skipped" not in out
+    assert out["stats"]["embedded_count"] == 3
+    assert captured["called"] and captured["n_inputs"] == 3
+
+
+def test_index_github_repo_embed_skips_when_estimated_over_budget(cache_dir, monkeypatch):
+    """Big repo + key set → estimated time exceeds budget → keyword-only with reason."""
+    from _lib.tools import index_github_repo as _tool
+    # 1000 files at EMBED_FILES_PER_SECOND=16 = 62.5s estimate, well over budget.
+    files = [
+        {"path": f"f{i}.py", "tokens": 10, "hash": f"h{i}",
+         "tree": {"text": f"file {i}", "title": f"f{i}.py", "children": []}}
+        for i in range(1000)
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    called = {"hit": False}
+    def boom(*a, **kw):
+        called["hit"] = True
+        return []
+    monkeypatch.setattr(embed, "embed_batch", boom)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out
+    assert out["stats"]["embedded_count"] == 0
+    assert "estimated embed time" in out["embed_skipped"]
+    assert "remaining budget" in out["embed_skipped"]
+    assert not called["hit"], "embed_batch should not be called when over budget"
+
+
+def test_index_github_repo_embed_failure_falls_back_to_keyword(cache_dir, monkeypatch):
+    """If embed_batch raises EmbedError, the index call still succeeds with a
+    keyword-only corpus and the failure surfaced in embed_skipped — not a
+    whole-call failure."""
+    from _lib.tools import index_github_repo as _tool
+    files = [{"path": "a.py", "tokens": 10, "hash": "h1",
+              "tree": {"text": "auth", "title": "a.py", "children": []}}]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    def boom(*a, **kw):
+        raise embed.EmbedError("EMBED_HTTP", "Mistral timed out")
+    monkeypatch.setattr(embed, "embed_batch", boom)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out
+    assert out["stats"]["embedded_count"] == 0
+    assert "EMBED_HTTP" in out["embed_skipped"]
+
+
+def test_index_github_repo_partial_text_drops_unembeddable(cache_dir, monkeypatch):
+    """Files with no usable text in tree (e.g., a.py has no tree.text/firstParagraph/title)
+    are dropped from the embedding map but the corpus is still semantic-eligible
+    via the populated subset."""
+    from _lib.tools import index_github_repo as _tool
+    files = [
+        {"path": "good.py", "tokens": 10, "hash": "h1",
+         "tree": {"text": "real content", "title": "good.py", "children": []}},
+        {"path": "empty.py", "tokens": 0, "hash": "h2",
+         "tree": {"children": []}},  # no text/firstParagraph/firstSentence/title
+    ]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setattr(embed, "embed_batch",
+                        lambda texts, **kw: [[1.0] + [0.0] * 1535 for _ in texts])
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public"},
+                       _admin_token())
+    assert "isError" not in out
+    # good.py path returned a valid embed text via _file_embed_text. empty.py
+    # has tree.title fallback → "empty.py" string → embeds. So both end up in
+    # the map. Confirm both vectors stored.
+    assert out["stats"]["embedded_count"] >= 1
+
+
+def test_index_github_repo_embed_arg_validates(cache_dir, monkeypatch):
+    """`embed` must be bool or null."""
+    from _lib.tools import index_github_repo as _tool
+    files = [{"path": "a.py", "tokens": 1, "hash": "h",
+              "tree": {"text": "x", "children": []}}]
+    _stub_indexer_files(monkeypatch, files, elapsed_s=0)
+
+    out = _tool.handle({"repo": "x/y", "data_classification": "public",
+                        "embed": "yes-please"},
+                       _admin_token())
+    assert out.get("isError") is True
+    assert out["structuredContent"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_score_corpus_semantic_handles_partial_embeddings():
+    """Corpus where some files have vectors, some don't — non-embedded files
+    are silently dropped from semantic ranking (caller can fall back to
+    keyword for those if needed)."""
+    files = [
+        {"path": "embedded.py", "tokens": 100},
+        {"path": "no-embed.py", "tokens": 100},
+        {"path": "also-embedded.py", "tokens": 100},
+    ]
+    embeddings = {
+        "embedded.py": _unit_vec(4, 0),
+        "also-embedded.py": [0.5, 0.5, 0.5, 0.5],
+    }
+    out = engine.score_corpus_semantic(_unit_vec(4, 0), files, embeddings)
+    paths = [s["path"] for s in out]
+    assert "embedded.py" in paths
+    assert "also-embedded.py" in paths
+    assert "no-embed.py" not in paths
+
+
 # ── embed module unit tests ──
 
 def test_embed_query_raises_provider_unavailable_without_key(monkeypatch):

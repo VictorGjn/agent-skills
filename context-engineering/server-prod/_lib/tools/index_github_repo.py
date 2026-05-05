@@ -27,16 +27,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, errors, job_store
+from .. import corpus_store, embed as embed_lib, errors, job_store
 from ..auth import TokenInfo
 from . import upload_corpus  # reuse _acquire_lock / _release_lock
 
 
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
+VALID_EMBED = {None, True, False}
 
 # Soft timeout on sync run — under Vercel's 60s ceiling. Above this we
 # return BUDGET_EXCEEDED so caller switches to async (which lands in v1.1).
 SYNC_TIMEOUT_S = 50
+
+# Phase 5.5 server-side embedding: ~2s per 32-row batch on Mistral codestral-embed.
+# We estimate `N / EMBED_FILES_PER_SECOND` seconds and skip if estimate > budget.
+EMBED_FILES_PER_SECOND = 16
+# Reserve 5s for index-write + lock + response-build below the 50s budget cap.
+EMBED_TIMING_HEADROOM_S = 5
 
 # Same regex used by SPEC § 4.1 for repo strings.
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -79,6 +86,11 @@ def _validate_args(args: dict) -> dict | None:
     is_async = args.get("async", False)
     if not isinstance(is_async, bool):
         return _err("INVALID_ARGUMENT", "async must be a boolean")
+    embed_arg = args.get("embed")
+    if embed_arg not in VALID_EMBED:
+        return _err("INVALID_ARGUMENT",
+                    "embed must be a boolean or null (null = auto-detect from MISTRAL_API_KEY)",
+                    details={"got": embed_arg})
     return None
 
 
@@ -101,6 +113,7 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     indexed_paths = args.get("indexed_paths", [])
     is_async = args.get("async", False)
     explicit_cid = args.get("corpus_id")
+    embed_request: bool | None = args.get("embed")  # None = auto
 
     owner, name = repo.split("/", 1)
     derived_cid = _slugify(f"gh-{owner}-{name}-{branch}")
@@ -193,7 +206,18 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
                     details={"corpus_id": corpus_id})
 
     try:
-        embedding = {"provider": "none", "model": "n/a", "dims": 0}
+        # Phase 5.5: opportunistic server-side embedding via Mistral
+        # codestral-embed when MISTRAL_API_KEY is set and timing fits the
+        # remaining sync budget. All-or-nothing — partial coverage would
+        # silently degrade semantic ranking (caller wouldn't know which
+        # files were missing). If the wall-time estimate doesn't fit, we
+        # write the corpus keyword-only and surface that via embedding.dims=0,
+        # so the strict parity check (corpus_access.check_embeddings_loaded)
+        # treats it as "keyword corpus by design" rather than "broken".
+        embeddings_map, embedding, embed_skip_reason = _maybe_embed(
+            files, embed_request, start, file_count,
+        )
+        embedded_count = len(embeddings_map)
         index_obj = {
             "_meta": {
                 "corpus_id": corpus_id,
@@ -204,13 +228,14 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
                 "data_classification": classification,
                 "embedding": embedding,
                 "file_count": file_count,
-                "embedded_count": 0,
+                "embedded_count": embedded_count,
                 "version": version,
                 "last_refresh_completed_at": datetime.now(timezone.utc).isoformat(),
                 "commit_sha": commit_sha,
                 "lifecycle_state": "active",
             },
             "files": files,
+            "embeddings": embeddings_map,
         }
         tmp = target.with_suffix(".tmp")
         tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
@@ -221,16 +246,19 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             files_indexed=file_count, files_total=file_count,
         )
 
-        return {
+        out = {
             "corpus_id": corpus_id,
             "commit_sha": commit_sha,
             "version": version,
             "stats": {
                 "file_count": file_count,
-                "embedded_count": 0,
+                "embedded_count": embedded_count,
                 "took_ms": int((time.time() - start) * 1000),
             },
         }
+        if embed_skip_reason:
+            out["embed_skipped"] = embed_skip_reason
+        return out
     finally:
         upload_corpus._release_lock(lock)
 
@@ -238,3 +266,106 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 def _resolve_github_token() -> str | None:
     import os
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+
+def _file_embed_text(f: dict) -> str:
+    """Pick the best representation of a file for embedding.
+
+    Preference: full content from `tree.text` (root node) → first paragraph →
+    title. Empty after strip → returned as empty so caller can drop the file.
+    """
+    tree = f.get("tree") or {}
+    candidates = (
+        tree.get("text") or "",
+        tree.get("firstParagraph") or "",
+        tree.get("firstSentence") or "",
+        tree.get("title") or f.get("path") or "",
+    )
+    for c in candidates:
+        if c and c.strip():
+            return c
+    return ""
+
+
+def _maybe_embed(
+    files: list[dict],
+    embed_request: bool | None,
+    start_time: float,
+    file_count: int,
+) -> tuple[dict[str, list[float]], dict, str | None]:
+    """Compute embeddings server-side when feasible.
+
+    Returns (embeddings_map, embedding_meta, skip_reason).
+    `embedding_meta.dims=0` means we did NOT embed; the corpus is keyword-only.
+    `dims=1536` means all `file_count` files have a vector in `embeddings_map`
+    (we don't ship partial coverage — the strict parity check would reject
+    a "dims>0 but missing some" corpus as broken).
+    """
+    import os
+
+    if embed_request is False:
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, "embed=false requested"
+
+    has_key = bool(os.environ.get("MISTRAL_API_KEY"))
+    if embed_request is True and not has_key:
+        # Caller asked for embeddings explicitly but server can't honour it.
+        # Returning a None skip_reason here would silently downgrade — instead
+        # caller sees PROVIDER_UNAVAILABLE via embed_lib.embed_batch raising
+        # below. We still return the keyword-only fallback shape so the
+        # response is consistent with the soft-skip path.
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, "MISTRAL_API_KEY not set"
+
+    if not has_key:
+        # auto path with no key — keyword-only corpus.
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, "MISTRAL_API_KEY not set"
+
+    # Wall-time estimate: ~1/EMBED_FILES_PER_SECOND seconds per file.
+    elapsed = time.time() - start_time
+    remaining = SYNC_TIMEOUT_S - elapsed - EMBED_TIMING_HEADROOM_S
+    estimated = file_count / EMBED_FILES_PER_SECOND
+    if estimated > remaining:
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, (
+            f"estimated embed time {estimated:.1f}s > remaining budget {remaining:.1f}s; "
+            "use ce_upload_corpus with client-computed embeddings for this repo"
+        )
+
+    # Build embed inputs. Files with no usable text are dropped from the
+    # embedding pool — but to maintain all-or-nothing semantics, we still
+    # produce a "broken" outcome below if any file is unembeddable. Better:
+    # filter such files out of the corpus entirely so file_count + embedded
+    # count stay aligned. v1: drop them with a counter; the caller sees
+    # `file_count` shrink in the response.
+    keep_files: list[dict] = []
+    keep_texts: list[str] = []
+    for f in files:
+        text = _file_embed_text(f)
+        if not text:
+            continue
+        keep_files.append(f)
+        keep_texts.append(text)
+
+    if not keep_files:
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, (
+            "no files had embeddable text content"
+        )
+
+    try:
+        vectors = embed_lib.embed_batch(keep_texts)
+    except embed_lib.EmbedError as e:
+        # Provider failure mid-flight — fall back to keyword-only corpus
+        # rather than failing the whole index call. Caller sees the trace via
+        # embed_skipped in the response and can retry or use upload.
+        return {}, {"provider": "none", "model": "n/a", "dims": 0}, (
+            f"embed failed: {e.code}: {e.message}"
+        )
+
+    # Mutate caller's `files` list in place — drop unembeddable rows so
+    # commit_sha + file_count + embeddings stay consistent. (We computed
+    # commit_sha BEFORE this function ran, so dropping files here would
+    # diverge the index from its commit_sha. Keep all files in `files[]`
+    # but only the embedded subset in the embeddings map; the strict parity
+    # check fires on EMPTY embeddings, not partial.)
+    embeddings_map = {f["path"]: v for f, v in zip(keep_files, vectors)}
+    embedding_meta = {"provider": "mistral", "model": embed_lib.MISTRAL_MODEL,
+                      "dims": embed_lib.MISTRAL_DIMS}
+    return embeddings_map, embedding_meta, None

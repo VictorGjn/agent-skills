@@ -79,6 +79,12 @@ def _validate_args(args: dict) -> dict | None:
             f"unknown rerank: {rerank!r}",
             details={"valid_rerank": sorted(x for x in VALID_RERANK if x is not None)},
         )
+    if rerank == "mmr" and mode != "semantic":
+        return errors.tool_error(
+            "INVALID_ARGUMENT",
+            "rerank='mmr' requires mode='semantic' (MMR diversifies cosine results)",
+            details={"got_mode": mode, "got_rerank": rerank},
+        )
 
     return None
 
@@ -178,6 +184,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
+        if mode == "semantic":
+            err = corpus_access.check_embeddings_loaded([loaded])
+            if err:
+                return err
         ranked = _rank_one(loaded, query, top_k, mode, prefix=None,
                            query_embedding=query_embedding, rerank=rerank)
         out = _wire(ranked, multi=False,
@@ -194,6 +204,9 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     if mode == "semantic":
         err = corpus_access.check_embedding_parity(loaded_list)
+        if err:
+            return err
+        err = corpus_access.check_embeddings_loaded(loaded_list)
         if err:
             return err
 
