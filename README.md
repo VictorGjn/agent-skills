@@ -16,6 +16,9 @@ Decompose complex tasks into parallel sub-agent work: Research → Synthesis →
 ### [proactive-brief](./proactive-brief/)
 Concise, delta-based status reports. What changed, what needs attention, what to do next. Designed for daily/weekly use as a slash command or cron job. Inspired by Claude Code's KAIROS Brief Mode.
 
+### [dembrandt](./dembrandt/)
+Opinionated orchestrator for the [dembrandt-skills](https://github.com/dembrandt/dembrandt-skills) design collection. Routes a UI/UX task through a six-stage pipeline (brand → tokens → layout → components → UX polish → a11y/performance gate) and loads the right sub-skill at each stage. Stage 6 is a hard ship gate, not a nice-to-have.
+
 ## How to Use
 
 Each skill is a standalone folder with a `SKILL.md` containing instructions. No dependencies between skills. Three ways to use them:

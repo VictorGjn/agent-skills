@@ -32,6 +32,106 @@ _DEPTH_NAMES = {
 }
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Both vectors must be same length and non-zero."""
+    if len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    import math
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def score_corpus_semantic(
+    query_embedding: list[float],
+    files: list[dict],
+    embeddings_map: dict[str, list[float]],
+    top: int = 100,
+) -> list[dict]:
+    """Cosine-rank `files` against `query_embedding` using `embeddings_map[path]`.
+
+    Files whose path is missing from `embeddings_map` are dropped silently —
+    callers (find/pack) decide whether to fall back to keyword for those.
+    Score is mapped to [0, 1] (cosine maps to [-1, 1]; we clip negative to 0
+    so a near-orthogonal vector is "no match" rather than "anti-match").
+    """
+    if not query_embedding or not files:
+        return []
+    scored = []
+    for f in files:
+        path = f.get("path", "")
+        vec = embeddings_map.get(path)
+        if not vec:
+            continue
+        sim = _cosine(query_embedding, vec)
+        if sim <= 0:
+            continue
+        scored.append({
+            "path": path,
+            "relevance": sim,
+            "tokens": int(f.get("tokens", 0) or 0),
+            "tree": f.get("tree"),
+            "knowledge_type": f.get("knowledge_type", "evidence"),
+        })
+    scored.sort(key=lambda x: -x["relevance"])
+    return scored[:top]
+
+
+def mmr_rerank(
+    scored: list[dict],
+    query_embedding: list[float],
+    embeddings_map: dict[str, list[float]],
+    lambda_: float = 0.7,
+    k: int | None = None,
+) -> list[dict]:
+    """Maximal Marginal Relevance rerank.
+
+    For each step, picks the candidate that maximises:
+        lambda * sim(q, d) - (1 - lambda) * max sim(d, selected)
+
+    `lambda_=1.0` collapses to relevance-only (no diversity); `0.0` is
+    diversity-only. `0.7` is the modular-patchbay default (PR #35 port).
+    Items without an embedding in `embeddings_map` are dropped — they can't
+    be diversity-reranked because we have nothing to compare against.
+    """
+    if not scored or not query_embedding:
+        return scored
+    candidates = [s for s in scored if s["path"] in embeddings_map]
+    dropped = [s for s in scored if s["path"] not in embeddings_map]
+    target_k = k if k is not None else len(scored)
+    selected: list[dict] = []
+    selected_vecs: list[list[float]] = []
+
+    while candidates and len(selected) < target_k:
+        best_idx = 0
+        best_score = float("-inf")
+        for i, item in enumerate(candidates):
+            vec = embeddings_map[item["path"]]
+            relevance = item["relevance"]
+            diversity_penalty = max(
+                (_cosine(vec, sv) for sv in selected_vecs),
+                default=0.0,
+            )
+            mmr = lambda_ * relevance - (1 - lambda_) * diversity_penalty
+            if mmr > best_score:
+                best_score = mmr
+                best_idx = i
+        chosen = candidates.pop(best_idx)
+        selected.append(chosen)
+        selected_vecs.append(embeddings_map[chosen["path"]])
+
+    # Append any items we couldn't rerank (no embedding) at the tail in
+    # original order — preserves their visibility for downstream packing.
+    return selected + dropped[: max(0, target_k - len(selected))]
+
+
 def score_corpus(query: str, files: list[dict], top: int = 100) -> list[dict]:
     """Keyword-score every file in a corpus and return the top-N as scored items.
 

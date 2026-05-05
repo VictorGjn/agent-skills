@@ -82,6 +82,15 @@ class CorpusMeta:
 class LoadedCorpus:
     meta: CorpusMeta
     files: list[dict]
+    # path → embedding vector. Empty when corpus was indexed without embeddings
+    # (server-side ce_index_github_repo today, or upload with provider="none").
+    # Phase 5.5: semantic mode uses this map; missing path → that file is
+    # excluded from semantic ranking and falls back to keyword.
+    embeddings: dict[str, list[float]] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.embeddings is None:
+            object.__setattr__(self, "embeddings", {})
 
 
 def cache_dir() -> Path:
@@ -146,7 +155,10 @@ def load_corpus(corpus_id: str) -> LoadedCorpus | None:
     files = raw.get("files") or []
     if isinstance(files, dict):
         files = list(files.values())
-    return LoadedCorpus(meta=meta, files=files)
+    embeddings = raw.get("embeddings") or {}
+    if not isinstance(embeddings, dict):
+        embeddings = {}
+    return LoadedCorpus(meta=meta, files=files, embeddings=embeddings)
 
 
 def content_fingerprint(loaded: LoadedCorpus) -> str:

@@ -45,10 +45,10 @@ import ir_metrics  # noqa: E402
 
 
 VALID_CONFIGS = {
-    "ce-keyword": {"mode": "keyword"},
-    "ce-codestral": {"mode": "semantic"},
-    "ce-codestral-mmr": {"mode": "semantic"},   # MMR is server-side; same wire shape
-    "ce-shipping": {"mode": "auto"},            # let server pick semantic+graph
+    "ce-keyword":       {"mode": "keyword"},
+    "ce-codestral":     {"mode": "semantic"},
+    "ce-codestral-mmr": {"mode": "semantic", "rerank": "mmr"},  # Phase 5.5: server-side MMR
+    "ce-shipping":      {"mode": "semantic", "rerank": "mmr"},  # v1 production = semantic + MMR
 }
 
 
@@ -77,32 +77,32 @@ def _post(url: str, token: str, payload: dict, timeout: int = 60) -> dict:
 
 
 def _call_find(mcp_url: str, token: str, query: str, corpus_id: str,
-                mode: str, top_k: int) -> dict:
+                mode: str, top_k: int, rerank: str | None = None) -> dict:
+    arguments: dict = {
+        "query": query, "corpus_id": corpus_id,
+        "mode": mode, "top_k": top_k,
+    }
+    if rerank is not None:
+        arguments["rerank"] = rerank
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {
-            "name": "ce_find_relevant_files",
-            "arguments": {
-                "query": query, "corpus_id": corpus_id,
-                "mode": mode, "top_k": top_k,
-            },
-        },
+        "params": {"name": "ce_find_relevant_files", "arguments": arguments},
     }
     return _post(f"{mcp_url}/api/mcp", token, payload, timeout=60)
 
 
 def _call_pack(mcp_url: str, token: str, query: str, corpus_id: str,
-                mode: str, budget: int) -> dict:
+                mode: str, budget: int, rerank: str | None = None) -> dict:
+    arguments: dict = {
+        "query": query, "corpus_id": corpus_id,
+        "mode": mode, "budget": budget,
+        "response_format": "structured",
+    }
+    if rerank is not None:
+        arguments["rerank"] = rerank
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {
-            "name": "ce_pack_context",
-            "arguments": {
-                "query": query, "corpus_id": corpus_id,
-                "mode": mode, "budget": budget,
-                "response_format": "structured",
-            },
-        },
+        "params": {"name": "ce_pack_context", "arguments": arguments},
     }
     return _post(f"{mcp_url}/api/mcp", token, payload, timeout=120)
 
@@ -140,14 +140,15 @@ def run_one(task_dir: Path, mcp_url: str, token: str,
 
     cfg = VALID_CONFIGS[config]
     mode = cfg["mode"]
+    rerank = cfg.get("rerank")
     query = spec["description"]
     corpus_id = spec.get("corpus_id") or _derive_corpus_id(spec)
 
     start = time.time()
     if metric_tool == "find":
-        resp = _call_find(mcp_url, token, query, corpus_id, mode, top_k)
+        resp = _call_find(mcp_url, token, query, corpus_id, mode, top_k, rerank=rerank)
     else:
-        resp = _call_pack(mcp_url, token, query, corpus_id, mode, budget)
+        resp = _call_pack(mcp_url, token, query, corpus_id, mode, budget, rerank=rerank)
     elapsed = time.time() - start
 
     paths, err = _extract_paths_from_response(resp)
@@ -157,6 +158,7 @@ def run_one(task_dir: Path, mcp_url: str, token: str,
         "task_id": task_dir.name,
         "config": config,
         "mode": mode,
+        "rerank": rerank,
         "metric_tool": metric_tool,
         "query": query[:200] + ("…" if len(query) > 200 else ""),
         "corpus_id": corpus_id,
