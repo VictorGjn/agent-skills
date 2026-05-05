@@ -272,7 +272,24 @@ def _tools_list(request_id: Any) -> dict:
 
 
 def _tools_call(payload: dict, token: TokenInfo, request_id: Any) -> tuple[dict, int]:
-    params = payload.get("params") or {}
+    raw_params = payload.get("params")
+    # JSON-RPC permits omitting params, but when present they must be structured
+    # (object or array). MCP tools/call is always object-shaped; reject anything
+    # else as INVALID_PARAMS so a non-dict (e.g. `[]`, `7`, `"x"`) doesn't escape
+    # as a 500 via AttributeError on params.get(...).
+    if raw_params is None:
+        params: dict = {}
+    elif isinstance(raw_params, dict):
+        params = raw_params
+    else:
+        err = {
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {
+                "code": errors.JSONRPC_INVALID_PARAMS,
+                "message": "tools/call params must be an object",
+            },
+        }
+        return err, 200
     raw_name = params.get("name", "")
     args = params.get("arguments") or {}
 
