@@ -21,13 +21,15 @@ import json
 import time
 from typing import Any
 
-from .. import corpus_access, corpus_store, engine, errors
+from .. import corpus_access, corpus_store, embed, engine, errors
 from ..auth import TokenInfo
 
 
 VALID_MODES = {"auto", "keyword", "semantic", "graph", "deep", "wide"}
 VALID_TASKS = {"fix", "review", "explain", "build", "document", "research"}
 VALID_RESPONSE_FORMATS = {"markdown", "structured", "both"}
+VALID_RERANK = {None, "mmr"}
+MMR_LAMBDA = 0.7
 
 DEFAULT_BUDGET = 32000
 MIN_BUDGET = 1000
@@ -126,6 +128,13 @@ def _validate_args(args: dict) -> dict | None:
         return errors.tool_error("INVALID_ARGUMENT", f"unknown response_format: {rf!r}",
                                  details={"valid": sorted(VALID_RESPONSE_FORMATS)})
 
+    rerank = args.get("rerank")
+    if rerank not in VALID_RERANK:
+        return errors.tool_error(
+            "INVALID_ARGUMENT", f"unknown rerank: {rerank!r}",
+            details={"valid_rerank": sorted(x for x in VALID_RERANK if x is not None)},
+        )
+
     budget = args.get("budget")
     if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool)):
         return errors.tool_error("INVALID_ARGUMENT", "budget must be an integer")
@@ -160,9 +169,32 @@ def _check_budget(budget: int) -> dict | None:
 
 
 def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
-                 prefix: str | None) -> list[dict]:
-    """Score → pack one corpus. Returns packed items annotated with corpus_id + prefixed path."""
-    scored = engine.score_corpus(query, loaded.files, top=100)
+                 prefix: str | None,
+                 mode: str = "auto",
+                 query_embedding: list[float] | None = None,
+                 rerank: str | None = None) -> list[dict]:
+    """Score → pack one corpus. Returns packed items annotated with corpus_id + prefixed path.
+
+    Phase 5.5: when mode=="semantic" and corpus has embeddings, rank via cosine
+    against `query_embedding` (and MMR-rerank if `rerank=="mmr"`). Otherwise
+    falls back to keyword scoring.
+    """
+    use_semantic = (
+        mode == "semantic"
+        and query_embedding is not None
+        and bool(loaded.embeddings)
+    )
+    if use_semantic:
+        scored = engine.score_corpus_semantic(
+            query_embedding, loaded.files, loaded.embeddings, top=400,
+        )
+        if rerank == "mmr" and scored:
+            scored = engine.mmr_rerank(
+                scored, query_embedding, loaded.embeddings,
+                lambda_=MMR_LAMBDA,
+            )
+    else:
+        scored = engine.score_corpus(query, loaded.files, top=100)
     packed = engine.pack(scored, budget) if scored else []
     out = []
     for item in packed:
@@ -272,10 +304,18 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     query: str = args["query"].strip()
     mode: str = args.get("mode", "auto")
+    rerank: str | None = args.get("rerank")
     task = args.get("task")
     why = bool(args.get("why", False))
     response_format = args.get("response_format", "markdown")
     budget = _scale_budget(args.get("budget"), args.get("model_context"))
+
+    query_embedding: list[float] | None = None
+    if mode == "semantic":
+        try:
+            query_embedding = embed.embed_query(query)
+        except embed.EmbedError:
+            query_embedding = None
 
     err = _check_budget(budget)
     if err:
@@ -293,7 +333,8 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
-        packed = _pack_single(loaded, query, budget, prefix=None)
+        packed = _pack_single(loaded, query, budget, prefix=None,
+                              mode=mode, query_embedding=query_embedding, rerank=rerank)
         trace = _build_trace(why, mode, task, query, [loaded], budget) if why else None
         out = _build_output(
             packed, budget, response_format, query, mode, multi=False,
@@ -325,7 +366,8 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     use_quota = args.get("corpus_quota", True)
     per_corpus_budget = _allocate_quota(budget, len(loaded_list)) if use_quota else budget
     per_corpus_packed = [
-        _pack_single(c, query, per_corpus_budget, prefix=c.meta.corpus_id)
+        _pack_single(c, query, per_corpus_budget, prefix=c.meta.corpus_id,
+                     mode=mode, query_embedding=query_embedding, rerank=rerank)
         for c in loaded_list
     ]
     if use_quota:
