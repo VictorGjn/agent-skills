@@ -390,9 +390,16 @@ def _maybe_embed(
     except embed_lib.EmbedError as e:
         # Provider failure mid-flight — fall back to keyword-only corpus
         # rather than failing the whole index call. Caller sees the trace via
-        # embed_skipped in the response and can retry or use upload.
+        # embed_skipped in the response and can retry or use upload. Include
+        # a snippet of the response body for HTTP errors so callers can
+        # diagnose 400/429/etc. without re-running.
+        body_hint = ""
+        if e.code == "EMBED_HTTP":
+            body = e.details.get("body", "") or ""
+            if body:
+                body_hint = f" (body: {body[:200]!r})"
         return {}, {"provider": "none", "model": "n/a", "dims": 0}, (
-            f"embed failed: {e.code}: {e.message}"
+            f"embed failed: {e.code}: {e.message}{body_hint}"
         )
 
     # Mutate caller's `files` list in place — drop unembeddable rows so

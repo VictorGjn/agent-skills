@@ -28,7 +28,11 @@ import urllib.request
 MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/embeddings"
 MISTRAL_MODEL = "codestral-embed"
 MISTRAL_DIMS = 1536
-MAX_INPUT_CHARS = 32_000  # ~8K tokens at 4 chars/token, safe head-truncate
+# codestral-embed-v1 caps at 8192 input tokens. Code is denser than prose
+# (~3 chars/token vs ~4); a 32K-char truncate produced 9349-token inputs and
+# returned HTTP 400 from Mistral. 20K chars gives ~6500 tokens at code
+# density, leaving headroom for outliers.
+MAX_INPUT_CHARS = 20_000
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_TIMEOUT_S = 30
 
