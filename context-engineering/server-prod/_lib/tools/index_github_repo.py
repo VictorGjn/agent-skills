@@ -58,8 +58,14 @@ def _slugify(s: str) -> str:
 
 
 def _ensure_scripts_path() -> None:
-    scripts = Path(__file__).resolve().parents[3] / "scripts"
-    p = str(scripts)
+    """Ensure the vendored indexer's parent dir is on sys.path so its
+    `from pack_context_lib import …` line resolves to the sibling vendor
+    module rather than the canonical scripts/ copy outside the function
+    bundle. Phase 5 vendored pack_context_lib.py for the same reason —
+    Vercel function bundles can't reach parent dirs.
+    """
+    vendor = Path(__file__).resolve().parent.parent / "vendor"
+    p = str(vendor)
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -95,9 +101,13 @@ def _validate_args(args: dict) -> dict | None:
 
 
 def _run_indexer(owner: str, repo: str, branch: str, token: str | None) -> dict:
-    """Call into scripts/index_github_repo.py:index_github_repo()."""
+    """Call the vendored indexer (server-prod/_lib/vendor/index_github_repo.py).
+
+    Vercel function bundles can't reach `../scripts/`, so we vendor with a
+    sha-sync test (test_phase5.py-style) to detect drift from canonical.
+    """
     _ensure_scripts_path()
-    import index_github_repo as _gh  # type: ignore
+    import index_github_repo as _gh  # type: ignore — resolved via vendor/ on sys.path
     return _gh.index_github_repo(owner, repo, branch, token)
 
 

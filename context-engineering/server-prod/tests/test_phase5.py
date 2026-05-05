@@ -40,6 +40,29 @@ def test_vendor_pack_context_lib_in_sync_with_canonical():
     )
 
 
+def test_vendor_index_github_repo_in_sync_with_canonical():
+    """Phase 5.5: vendored indexer must byte-match scripts/index_github_repo.py.
+
+    The original tools/index_github_repo._run_indexer imported from
+    `../scripts/`, which Vercel function bundles can't reach. Production
+    smoke (octocat/Hello-World) returned ModuleNotFoundError. Vendoring +
+    this drift check makes both work.
+    """
+    here = Path(__file__).resolve()
+    vendor = here.parent.parent / "_lib" / "vendor" / "index_github_repo.py"
+    canonical = here.parent.parent.parent / "scripts" / "index_github_repo.py"
+    assert vendor.exists(), f"vendor copy missing at {vendor}"
+    assert canonical.exists(), f"canonical missing at {canonical}"
+    vh = hashlib.sha256(vendor.read_bytes()).hexdigest()
+    ch = hashlib.sha256(canonical.read_bytes()).hexdigest()
+    assert vh == ch, (
+        f"vendor / canonical drift!\n"
+        f"  vendor    = {vh}\n"
+        f"  canonical = {ch}\n"
+        f"Refresh with: cp ../scripts/index_github_repo.py _lib/vendor/index_github_repo.py"
+    )
+
+
 # ── Fixtures ──
 
 @pytest.fixture
