@@ -5,16 +5,22 @@ metadata:
   priority: 10
   promptSignals:
     phrases:
-      - "design a"
+      - "design a screen"
+      - "design a UI"
+      - "design a flow"
+      - "design a dashboard"
+      - "design a design system"
       - "build ui"
       - "design review"
       - "ui review"
       - "audit interface"
+      - "audit ui"
       - "ux review"
       - "from brand to ui"
       - "design system review"
       - "review this screen"
-      - "design pipeline"
+      - "design pipeline review"
+      - "design system audit"
 retrieval:
   aliases:
     - dembrandt
@@ -40,6 +46,16 @@ retrieval:
 # dembrandt
 
 Opinionated orchestrator for the dembrandt design-skill collection. Routes a multi-dimensional UI task through the right sub-skills, in the right order.
+
+## Prerequisites
+
+This skill orchestrates the [`dembrandt/dembrandt-skills`](https://github.com/dembrandt/dembrandt-skills) collection — 30 individual sub-skills referenced by name throughout this file (e.g. `algorithmic-color-palette`, `wcag-accessibility`). It does NOT bundle them. Install the collection once before running the pipeline:
+
+```bash
+npx skills add dembrandt/dembrandt-skills
+```
+
+If a sub-skill referenced below isn't available when you try to load it (the `Skill` tool returns "skill not found"), STOP the pipeline and tell the user to run the install command. Do NOT silently continue with a partial pipeline — the resulting design output would skip the very dimensions this orchestrator exists to cover. As a last-resort fallback, hand off to `find-skills` so the user can locate equivalent skills outside dembrandt.
 
 ## Philosophy
 
@@ -143,6 +159,8 @@ If any stage-6 check fails, **stop and fix.** Blockers, not nice-to-haves.
 3. **Apply, capture decisions, move to the next stage.** Carry forward concrete outputs (token values, hierarchy choices) — not vague impressions.
 4. **Always finish with stage 6.** A11y and performance are mandatory gates.
 
+If a sub-skill load fails ("skill not found"), see Prerequisites above — do not paper over the gap by approximating the missing skill from training memory; tell the user the collection isn't fully installed.
+
 ## Output expectations
 
 **Full-pipeline task** — produce:
@@ -159,7 +177,7 @@ If any stage-6 check fails, **stop and fix.** Blockers, not nice-to-haves.
 - Loading all 30 sub-skills "just in case" — wastes context. Load on demand.
 - Skipping stage 6 to ship faster — the EU Accessibility Act doesn't care about the deadline.
 - Treating dembrandt as a checklist of nice-to-haves — these are decisions, not options.
-- Mixing dembrandt advice with contradictory generic best-practice from training — dembrandt wins.
+- Mixing dembrandt advice with contradictory generic best-practice from training — when a dembrandt sub-skill explicitly contradicts a generic claim, prefer the sub-skill (its rationale is documented in the skill body). When in doubt, follow the sub-skill and surface the conflict to the user rather than silently overriding.
 - Re-deriving choices already pinned in stage 1–2 when working on stage 4 — carry decisions forward, don't relitigate.
 
 ## See also
