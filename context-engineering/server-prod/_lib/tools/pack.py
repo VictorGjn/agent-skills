@@ -178,12 +178,13 @@ def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
                  prefix: str | None,
                  mode: str = "auto",
                  query_embedding: list[float] | None = None,
-                 rerank: str | None = None) -> list[dict]:
-    """Score → pack one corpus. Returns packed items annotated with corpus_id + prefixed path.
+                 rerank: str | None = None) -> tuple[list[dict], bool]:
+    """Score → pack one corpus. Returns (packed_items, ran_semantic).
 
     Phase 5.5: when mode=="semantic" and corpus has embeddings, rank via cosine
     against `query_embedding` (and MMR-rerank if `rerank=="mmr"`). Otherwise
-    falls back to keyword scoring.
+    falls back to keyword scoring. The returned `ran_semantic` flag lets
+    handle() build the SPEC § 3.0.5 coverage block accurately.
     """
     use_semantic = (
         mode == "semantic"
@@ -215,7 +216,7 @@ def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
             "_engine": item,  # internal — kept for markdown rendering, stripped before return
             "corpus_id": loaded.meta.corpus_id,
         })
-    return out
+    return out, use_semantic
 
 
 def _merge_with_quota(per_corpus: list[list[dict]], total_budget: int) -> list[dict]:
@@ -316,12 +317,18 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     response_format = args.get("response_format", "markdown")
     budget = _scale_budget(args.get("budget"), args.get("model_context"))
 
+    # SPEC § 3.0.5: trace_id is server-assigned uuid for log correlation.
+    import uuid
+    trace_id = uuid.uuid4().hex
+
     query_embedding: list[float] | None = None
+    embed_failed = False
     if mode == "semantic":
         try:
             query_embedding = embed.embed_query(query)
         except embed.EmbedError:
             query_embedding = None
+            embed_failed = True
 
     err = _check_budget(budget)
     if err:
@@ -343,13 +350,23 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             err = corpus_access.check_embeddings_loaded([loaded])
             if err:
                 return err
-        packed = _pack_single(loaded, query, budget, prefix=None,
-                              mode=mode, query_embedding=query_embedding, rerank=rerank)
+        packed, ran_semantic = _pack_single(
+            loaded, query, budget, prefix=None,
+            mode=mode, query_embedding=query_embedding, rerank=rerank,
+        )
         trace = _build_trace(why, mode, task, query, [loaded], budget) if why else None
         out = _build_output(
             packed, budget, response_format, query, mode, multi=False,
             single_sha=loaded.meta.commit_sha or None, multi_shas=None,
             trace=trace, took_ms=int((time.time() - start) * 1000),
+        )
+        out["coverage"] = corpus_access.build_coverage(
+            [loaded],
+            mode_requested=mode,
+            mode_used="semantic" if ran_semantic else "keyword",
+            fell_back=(mode == "semantic" and not ran_semantic),
+            trace_id=trace_id,
+            lane="fallback" if (mode == "semantic" and embed_failed) else "live",
         )
         # Codex P1: fall back to content fingerprint when commit_sha is missing
         # — a constant placeholder would make ETag content-blind.
@@ -378,11 +395,13 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     # Per-corpus pack with quota allocation, then global merge.
     use_quota = args.get("corpus_quota", True)
     per_corpus_budget = _allocate_quota(budget, len(loaded_list)) if use_quota else budget
-    per_corpus_packed = [
+    per_corpus_results = [
         _pack_single(c, query, per_corpus_budget, prefix=c.meta.corpus_id,
                      mode=mode, query_embedding=query_embedding, rerank=rerank)
         for c in loaded_list
     ]
+    per_corpus_packed = [items for items, _ran in per_corpus_results]
+    all_semantic = mode == "semantic" and all(ran for _items, ran in per_corpus_results)
     if use_quota:
         packed = _merge_with_quota(per_corpus_packed, budget)
     else:
@@ -409,6 +428,14 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         packed, budget, response_format, query, mode, multi=True,
         single_sha=None, multi_shas=multi_shas,
         trace=trace, took_ms=int((time.time() - start) * 1000),
+    )
+    out["coverage"] = corpus_access.build_coverage(
+        loaded_list,
+        mode_requested=mode,
+        mode_used="semantic" if all_semantic else "keyword",
+        fell_back=(mode == "semantic" and not all_semantic),
+        trace_id=trace_id,
+        lane="fallback" if (mode == "semantic" and embed_failed) else "live",
     )
     # § 3.1: multi-corpus ETag uses the lex-sorted '<corpus_id>:<sha>' concatenation.
     # Per-corpus key falls back to content fingerprint when commit_sha missing.

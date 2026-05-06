@@ -142,6 +142,50 @@ def detect_prefix_collisions(corpora: list[corpus_store.LoadedCorpus]) -> dict |
     return None
 
 
+def build_coverage(
+    corpora: list[corpus_store.LoadedCorpus],
+    *,
+    mode_requested: str,
+    mode_used: str,
+    fell_back: bool,
+    trace_id: str,
+    lane: str = "live",
+) -> dict[str, Any]:
+    """Build the SPEC § 3.0.5 `coverage` block for a read-tool response.
+
+    `mode_requested` is what the caller asked for (`auto`/`keyword`/`semantic`/...).
+    `mode_used` is what the engine actually executed (may differ when soft-
+    fallback fires, e.g. semantic→keyword on no embeddings).
+
+    `lane` is the resolver lane that ran (per SPEC § 10c.5 future-pattern).
+    v1.1 emits "live" when Mistral fired and "fallback" when degraded; the
+    "static"/"local" enum values are reserved for v1.2.
+
+    For `keyword` (or `auto`/`deep`/`wide` which run keyword today), all
+    files are eligible. For `semantic`, only files with embeddings are.
+    Multi-corpus aggregates: file_count is summed; eligible is the union.
+    """
+    corpus_size_files = sum(c.meta.file_count for c in corpora)
+
+    is_semantic = mode_used == "semantic"
+    if is_semantic:
+        eligible = sum(len(c.embeddings or {}) for c in corpora)
+    else:
+        eligible = corpus_size_files
+
+    skipped = max(0, corpus_size_files - eligible) if is_semantic else 0
+
+    return {
+        "corpus_size_files": corpus_size_files,
+        "ranked_with": mode_used,
+        "ranked_with_lane": lane,
+        "files_eligible_for_mode": eligible,
+        "files_skipped_unembedded": skipped,
+        "fallback_to_keyword": fell_back,
+        "trace_id": trace_id,
+    }
+
+
 def aggregate_load(corpus_ids: list[str], classification_max: str
                    ) -> tuple[list[corpus_store.LoadedCorpus] | None, dict | None]:
     """Load N corpora, fail-fast on any non-NOT_FOUND error, aggregate NOT_FOUND.

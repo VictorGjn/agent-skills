@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, errors, job_store
+from .. import corpus_store, errors, job_store, locks
 from ..auth import TokenInfo
 
 
@@ -202,8 +202,6 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     cache_dir = corpus_store.cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = corpus_store.index_path_for(corpus_id)
-    lock = target.with_suffix(".lock")
 
     # Idempotency: same (corpus_id, content_hashes) → return existing commit_sha
     existing = corpus_store.load_corpus(corpus_id)
@@ -221,7 +219,12 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "took_ms": int((time.time() - start) * 1000),
         }
 
-    if not _acquire_lock(lock):
+    # Phase B (Codex P1 on PR #50): writes target a SHARED backend (Blob in
+    # prod). Filesystem lock is intra-instance only — two instances could
+    # both pass it and overwrite each other. acquire_corpus_write_lock
+    # picks the right primitive (fs for LocalBackend, KV for BlobBackend).
+    held = locks.acquire_corpus_write_lock(corpus_id)
+    if held is None:
         return _err("CORPUS_LOCKED",
                     f"corpus {corpus_id!r} is being written by another caller; retry",
                     details={"corpus_id": corpus_id})
@@ -274,16 +277,16 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "files": files,
             "embeddings": embeddings_for_files,
         }
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(target)
-
-        size_bytes = target.stat().st_size
+        # Phase A (v1.1): write through the storage backend (Blob in prod,
+        # filesystem in tests). Backend handles atomicity (Blob is
+        # transactional via PUT; LocalBackend uses temp+rename).
+        body = json.dumps(index_obj, separators=(",", ":")).encode("utf-8")
+        size_bytes = len(body)
         if size_bytes > MAX_CORPUS_BYTES:
-            target.unlink(missing_ok=True)
             return _err("PAYLOAD_TOO_LARGE",
                         f"corpus exceeds 1 GB cap ({size_bytes} bytes)",
                         details={"size_bytes": size_bytes, "max": MAX_CORPUS_BYTES})
+        corpus_store.write_corpus(corpus_id, body)
 
         # Register synthetic completion job for ce_get_job_status callers
         job_store.register_complete(
@@ -303,4 +306,4 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "took_ms": int((time.time() - start) * 1000),
         }
     finally:
-        _release_lock(lock)
+        locks.release_corpus_write_lock(corpus_id, held)
