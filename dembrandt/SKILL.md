@@ -26,7 +26,7 @@ retrieval:
     - dembrandt
     - ui design pipeline
     - ui orchestrator
-    - design router
+    - ui skill router
     - opinionated ui review
     - end-to-end ui design
   intents:
