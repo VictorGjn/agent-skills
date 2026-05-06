@@ -2,13 +2,13 @@
 
 **Status**: design only. Implementation deferred to when sg-evals org access is sorted.
 **Phase**: v1.2 P4.4
-**Goal**: lift the bench's reachable subset from the projected ~50/70 (post P1+P2 merge) to the full 70/70 by handling the 18 sg-evals/* private fork snapshots that the prod bench token can't read.
+**Goal**: lift the bench's reachable subset from the projected ~50/70 (post P1+P2 merge) to ~66/70 by handling the 17 sg-evals/* private fork snapshots that the prod bench token can't read. The remaining 4 unreachable tasks reference `torvalds/linux@v3.7.6 / v4.1.15 / v5.6.7 / v5.6-rc2` (git TAG refs, not branch heads) and need a separate indexer fix to reach the full 70/70 (out of P4.4 scope).
 
-## Why these 18 tasks fail the bench
+## Why these 17 tasks fail the bench
 
 `sg-evals/*` repos are private fork snapshots used by the CodeScaleBench evaluation suite (e.g. `sg-evals/django--674eda1c`, `sg-evals/pytorch--5811a8d7`). The prod indexer's `GITHUB_TOKEN` doesn't have read access to that org, so `ce_index_github_repo` returns `SOURCE_FORBIDDEN` for every sg-evals task.
 
-This is org-side access, not a code problem. The 18 repos are:
+This is org-side access, not a code problem. The 17 repos (verified against `eval/csb/runs/index-2026-05-06.jsonl`'s SOURCE_FORBIDDEN cluster):
 
 ```
 sg-evals/aspnetcore--87525573
@@ -56,7 +56,7 @@ Operator clones each sg-evals repo to local disk (using their own GitHub credent
 
 #### Steps
 
-1. **Clone the 18 repos** (operator's own credentials):
+1. **Clone the 17 repos** (operator's own credentials):
    ```bash
    mkdir -p ~/sg-evals && cd ~/sg-evals
    for repo in $(cat repos.txt); do
@@ -129,7 +129,7 @@ def main():
 
 ## Recommendation
 
-Path A (GH App) once feasible. Path B (local clone + uploader) as a workable bridge if operator can clone. Either way, sg-evals reachability lifts the bench from ~50/70 to ~68/70 (still excludes the 2 v1.2-fixed-but-untested-on-tags torvalds/linux@v3.7.6/v4.1.15/v5.6.7 tasks pending separate triage).
+Path A (GH App) once feasible. Path B (local clone + uploader) as a workable bridge if operator can clone. Either way, sg-evals reachability lifts the bench from ~50/70 to ~66/70. The remaining 4 unreachable tasks reference `torvalds/linux` git TAG refs (`v3.7.6`, `v4.1.15`, `v5.6.7`, `v5.6-rc2`) which the indexer's branch-fetch path doesn't currently handle; closing that gap is a separate triage to reach the full 70/70.
 
 ## Tracking
 
