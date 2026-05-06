@@ -264,25 +264,27 @@ def detect_language(path: str) -> str:
 
 # ── Main indexer ──
 
-def index_github_repo(owner: str, repo: str, branch: str = 'main',
-                       token: str = None) -> dict:
-    """Fetch and index a GitHub repository."""
+def fetch_tree(owner: str, repo: str, branch: str = 'main',
+               token: str = None) -> list[dict]:
+    """Phase 1 of indexing: fetch the GitHub tree, filter to indexable
+    files, sort + cap. Pure data — no per-file content fetches yet.
+    Idempotent and cheap (~1 GitHub API call). Run ONCE per job.
 
+    Phase B.2: this is the first of three split functions. The async
+    cron worker calls this on the first tick and stores the candidates
+    list in KV; subsequent ticks call index_chunk on slices of it.
+    """
     print(f'Fetching tree for {owner}/{repo}@{branch}...', file=sys.stderr)
     tree_url = f'https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1'
     tree_data = github_get(tree_url, token)
 
     if 'tree' not in tree_data:
-        # Used both as CLI and imported from server-prod's vendored copy.
-        # SystemExit (from sys.exit) is BaseException — escapes the tool
-        # handler's `except Exception` and aborts the function instead of
-        # mapping to SOURCE_NOT_FOUND / SOURCE_FORBIDDEN. Raise a regular
-        # exception; the CLI's __main__ exits via uncaught-exception path,
-        # the importer catches it and maps to a structured tool error.
+        # SystemExit (from sys.exit) is BaseException — escapes tool
+        # handler's `except Exception` and aborts the function instead
+        # of mapping to SOURCE_NOT_FOUND. Raise a regular exception.
         msg = tree_data.get('message', 'unknown')
         raise RuntimeError(f'GitHub returned no tree for {owner}/{repo}@{branch}: {msg}')
 
-    # Filter indexable files
     candidates = []
     for item in tree_data['tree']:
         if item['type'] != 'blob':
@@ -296,9 +298,7 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
 
     print(f'Found {len(candidates)} indexable files (of {len(tree_data["tree"])} total)', file=sys.stderr)
 
-    # Limit for rate safety
     if len(candidates) > MAX_FILES_TO_FETCH:
-        # Prioritize: .md first, then code, then config
         def sort_key(item):
             ext = Path(item['path']).suffix.lower()
             if ext in ('.md', '.mdx'): return (0, item['path'])
@@ -308,27 +308,56 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
         candidates = candidates[:MAX_FILES_TO_FETCH]
         print(f'Capped to {MAX_FILES_TO_FETCH} files', file=sys.stderr)
 
-    # Fetch content
-    files = []
-    total_tokens = 0
+    return candidates
 
-    for i, item in enumerate(candidates):
+
+def index_chunk(owner: str, repo: str, branch: str,
+                token: str | None,
+                candidates: list[dict],
+                *,
+                start_idx: int,
+                max_files: int = 50,
+                time_budget_s: float = 50.0) -> dict:
+    """Phase 2 of indexing: fetch + parse `candidates[start_idx:start_idx+max_files]`.
+
+    Wall-time-bounded — stops mid-batch if the budget runs out and returns
+    `done=False` with `next_idx` pointing at the unprocessed remainder.
+    The async cron worker re-queues the job; the next tick resumes from
+    `next_idx` (idempotent re-fetch is fine — GitHub content is the same).
+
+    Returns:
+        files:       list[dict] — newly indexed file entries (may be < max_files)
+        next_idx:    int        — where the next chunk should resume
+        done:        bool       — True when next_idx >= len(candidates)
+        time_used_s: float
+    """
+    start_time = time.time()
+    end_idx = min(start_idx + max_files, len(candidates))
+    files: list[dict] = []
+    cur = start_idx
+
+    while cur < end_idx:
+        elapsed = time.time() - start_time
+        if elapsed > time_budget_s:
+            # Out of wall-time. Return partial chunk; caller re-queues.
+            break
+
+        item = candidates[cur]
         path = item['path']
         language = detect_language(path)
 
         content_url = f'https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}'
         content = github_get_raw(content_url, token)
+        cur += 1
 
         if not content:
             continue
 
-        # Parse into tree
         if language in ('markdown', 'text'):
             tree = parse_markdown_tree(path, content)
         elif language in ('typescript', 'javascript', 'python', 'rust', 'go', 'java', 'ruby'):
             tree = parse_code_tree(path, content, language)
         else:
-            # Simple flat tree for config/other
             tree = {
                 'nodeId': 'n0-1', 'title': path, 'depth': 0,
                 'text': content, 'tokens': estimate_tokens(content),
@@ -339,11 +368,9 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
 
         headings = extract_headings(tree, max_depth=3)
         headings_text = ' '.join(h['title'] for h in headings)
-
-        # Classify knowledge type
         kt = classify_knowledge_type(path, headings_text, tree.get('firstParagraph', ''))
 
-        file_entry = {
+        files.append({
             'path': path,
             'size': item.get('size', 0),
             'tokens': tree['totalTokens'],
@@ -353,23 +380,31 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
             'knowledge_type': kt,
             'headings': headings,
             'tree': tree,
-        }
+        })
 
-        files.append(file_entry)
-        total_tokens += tree['totalTokens']
+    return {
+        'files': files,
+        'next_idx': cur,
+        'done': cur >= len(candidates),
+        'time_used_s': round(time.time() - start_time, 3),
+    }
 
-        if (i + 1) % 50 == 0:
-            print(f'  Indexed {i+1}/{len(candidates)} files...', file=sys.stderr)
 
-    # Build directory list
+def finalize(files: list[dict], owner: str, repo: str,
+             branch: str = 'main') -> dict:
+    """Phase 3 of indexing: build the manifest from accumulated files.
+    Pure aggregation (directories, knowledge-type distribution, totals).
+    Same shape as the previous monolithic `index_github_repo()` returned.
+    """
+    total_tokens = sum(f['tokens'] for f in files)
+
     dirs = set()
     for f in files:
         parts = Path(f['path']).parts
         for j in range(1, len(parts)):
             dirs.add('/'.join(parts[:j]))
 
-    # Knowledge type distribution
-    kt_dist = {}
+    kt_dist: dict = {}
     for f in files:
         kt = f['knowledge_type']
         kt_dist[kt] = kt_dist.get(kt, 0) + 1
@@ -385,6 +420,31 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
         'knowledgeTypeDistribution': kt_dist,
         'files': files,
     }
+
+
+def index_github_repo(owner: str, repo: str, branch: str = 'main',
+                       token: str = None) -> dict:
+    """Sync wrapper: fetch_tree → loop index_chunk → finalize. Same return
+    shape as the pre-Phase-B.2 monolithic version. Used by the local CLI
+    and by the synchronous (`async=false`) `ce_index_github_repo` path.
+    """
+    candidates = fetch_tree(owner, repo, branch, token)
+    files: list[dict] = []
+    next_idx = 0
+    while next_idx < len(candidates):
+        chunk = index_chunk(
+            owner, repo, branch, token, candidates,
+            start_idx=next_idx,
+            max_files=MAX_FILES_TO_FETCH,  # no chunking in sync mode
+            time_budget_s=999_999,         # no wall-time cap in sync mode
+        )
+        files.extend(chunk['files'])
+        if next_idx % 50 == 0 or chunk['done']:
+            print(f'  Indexed {len(files)}/{len(candidates)} files...', file=sys.stderr)
+        next_idx = chunk['next_idx']
+        if chunk['done']:
+            break
+    return finalize(files, owner, repo, branch)
 
 
 # ── Main ──

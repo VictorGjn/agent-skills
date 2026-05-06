@@ -341,6 +341,13 @@ def list_metas() -> list[CorpusMeta]:
     for key in backend.list_keys(prefix=""):
         if not key.endswith(".index.json"):
             continue
+        # Phase B.2 (Codex P2 on PR #52): the async chunked indexer writes
+        # partial corpora under `partial-<corpus_id>.index.json` while a job
+        # is in flight. Hide them from ce_list_corpora — callers should not
+        # see half-built indices, and pack/find queries against `partial-*`
+        # would return inconsistent results.
+        if key.startswith("partial-"):
+            continue
         body = backend.get_bytes(key)
         if body is None:
             continue

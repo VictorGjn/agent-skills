@@ -27,9 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, embed as embed_lib, errors, job_store, locks
+from .. import corpus_store, embed as embed_lib, errors, job_store, jobs, locks
 from ..auth import TokenInfo
-from . import upload_corpus  # reuse _acquire_lock / _release_lock for legacy path
 
 
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
@@ -131,12 +130,36 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     corpus_id = explicit_cid or derived_cid
 
     if is_async:
-        # v1 has no async backend — Cron + queue is v1.1.
-        return errors.tool_error(
-            "NOT_IMPLEMENTED",
-            "async=true is not implemented in v1; retry with async=false (or wait for v1.1)",
-            details={"phase": "4", "spec_section": "§ 3.4"},
-        )
+        # Phase B.3: enqueue + return job_id immediately. The Vercel Cron
+        # worker (api/cron/index_worker.py) picks the job up next tick and
+        # advances it through async_indexer.advance_one_tick — fetching
+        # the tree on the first tick, then ~50 files per subsequent tick
+        # until done. ce_get_job_status reads the live progress out of KV.
+        # Sync path stays as-is for repos that fit the 300s budget.
+        #
+        # Codex P2 (PR #52 review): explicit embed=True without a Mistral
+        # key would silently degrade to keyword-only on the async path
+        # (no parity with the sync path's PROVIDER_UNAVAILABLE). Reject
+        # at enqueue rather than queuing a doomed job.
+        if embed_request is True and not _resolve_mistral_key():
+            return _err(
+                "PROVIDER_UNAVAILABLE",
+                "embed=true requires MISTRAL_API_KEY on the server "
+                "(use embed=false or embed=null/auto for keyword-only fallback)",
+            )
+        job_id = jobs.enqueue("index_github_repo", {
+            "repo": repo, "branch": branch,
+            "data_classification": classification,
+            "corpus_id": corpus_id,
+            "indexed_paths": indexed_paths,
+            "embed": embed_request,
+        }, owner=token.token_id)
+        return {
+            "job_id": job_id,
+            "corpus_id": corpus_id,
+            "status": "queued",
+            "poll_with": "ce_get_job_status",
+        }
 
     # Idempotency: if existing corpus has same source.commit_sha, no-op.
     # We don't have the source commit_sha until after fetching the tree, so

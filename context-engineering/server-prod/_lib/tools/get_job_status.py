@@ -1,18 +1,18 @@
 """ce_get_job_status — § 3.7.
 
-Surface async-job progress + terminal state. v1 has no real async backend
-(Vercel Cron worker is v1.1) — we register synthetic complete jobs from sync
-upload_corpus / index_github_repo calls so callers that always poll get a
-uniform shape.
+Surface async-job progress + terminal state. Phase B.3 of v1.1 plan: this
+now reads from `_lib.jobs` (KV-backed in production via the Phase B.1
+primitive; in-memory in tests). The legacy `_lib.job_store` synthetic-
+records path is kept as a fallback so existing tests + sync paths that
+register completion through the old API still work.
 
-For job IDs we don't recognize (or that have been evicted from in-memory
-storage across cold starts), return JOB_NOT_FOUND per § 3.7.
+For job IDs we don't recognize, return JOB_NOT_FOUND per § 3.7.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from .. import errors, job_store
+from .. import errors, job_store, jobs
 from ..auth import TokenInfo
 
 
@@ -25,9 +25,16 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     if not isinstance(job_id, str) or not job_id:
         return _err("INVALID_ARGUMENT", "job_id is required and must be a non-empty string")
 
-    rec = job_store.get(job_id)
-    if rec is None:
+    # Phase B.3: prefer the KV-backed jobs API (durable across cold starts
+    # for async jobs). Fall back to the in-memory job_store for legacy
+    # synthetic records produced by sync upload_corpus / index_github_repo.
+    rec = jobs.status(job_id)
+    if rec is not None:
+        return rec
+
+    legacy = job_store.get(job_id)
+    if legacy is None:
         return _err("JOB_NOT_FOUND",
-                    f"no job with id {job_id!r} (v1 in-memory store; jobs may evict on cold start)",
+                    f"no job with id {job_id!r}",
                     details={"job_id": job_id})
-    return rec.to_wire()
+    return legacy.to_wire()
