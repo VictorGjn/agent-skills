@@ -40,17 +40,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server-prod"))
 
 
 def _load_text(target_chars: int) -> str:
-    """Build a stable test payload of approximately target_chars chars.
+    """Build a stable test payload of EXACTLY target_chars chars.
 
-    Repeats a Lorem-ipsum-style stem so token count is deterministic-ish at
-    the per-call level. codestral-embed is ~3 chars/token on code; this stem
-    targets that density loosely."""
+    Repeats a code-shaped stem so token count is deterministic-ish at the
+    per-call level. codestral-embed is ~3 chars/token on code; this stem
+    targets that density loosely.
+
+    Codex P2 fix on PR #56: previously used `stem * (target // len(stem))`
+    which rounds DOWN — a 6000-char request produced 5928 chars. Throttle
+    behavior is measured against approximate tokens per call, so systematic
+    undersizing biases observed limits low. Filling to the exact target
+    via a partial-stem tail removes that bias.
+    """
     stem = (
         "def process(items): "
         "return [item.strip().lower() for item in items if item] "
     )
-    out = stem * max(1, target_chars // len(stem))
-    return out[:target_chars]
+    if target_chars <= 0:
+        return ""
+    full_repeats, remainder = divmod(target_chars, len(stem))
+    return stem * full_repeats + stem[:remainder]
 
 
 def _one_call(text: str, idx: int, timeout_s: float) -> dict:
@@ -99,7 +108,27 @@ def main() -> int:
         print("ERROR: MISTRAL_API_KEY not set", file=sys.stderr)
         return 1
 
-    text = _load_text(args.tokens_per_call * 3)
+    # Codex P1 fix on PR #56: surface the embed-side truncation cap so the
+    # operator doesn't think they're sending more tokens than Mistral
+    # actually receives. embed.py:_truncate caps inputs at MAX_INPUT_CHARS
+    # (currently 20_000), so any --tokens-per-call value whose 3x char
+    # expansion exceeds that gets silently clipped → throttle measurements
+    # overstate "safe" concurrency at high token sizes.
+    from _lib import embed as embed_lib
+    target_chars = args.tokens_per_call * 3
+    actual_chars = min(target_chars, embed_lib.MAX_INPUT_CHARS)
+    actual_tokens = actual_chars // 3
+    if target_chars > embed_lib.MAX_INPUT_CHARS:
+        print(
+            f"WARN: --tokens-per-call={args.tokens_per_call} (~{target_chars} chars) "
+            f"exceeds embed.MAX_INPUT_CHARS={embed_lib.MAX_INPUT_CHARS}. "
+            f"Mistral will only receive ~{actual_tokens} tokens per call. "
+            f"To actually probe higher token counts, raise MAX_INPUT_CHARS in embed.py "
+            f"or split the input across multiple calls.",
+            file=sys.stderr,
+        )
+
+    text = _load_text(target_chars)
     sink = args.output.open("w", encoding="utf-8") if args.output else sys.stdout
 
     t0 = time.monotonic()
@@ -138,6 +167,11 @@ def main() -> int:
         "other_errors": n_other_err,
         "p50_ok_ms": p50v,
         "tokens_per_call_target": args.tokens_per_call,
+        # Codex P1 fix on PR #56: surface the actual tokens Mistral receives
+        # so summary readers don't conflate the requested target with what
+        # was actually sent (the embed module truncates at MAX_INPUT_CHARS).
+        "tokens_per_call_actual": actual_tokens,
+        "input_truncated": target_chars > embed_lib.MAX_INPUT_CHARS,
     }
     print(json.dumps(summary), file=sink)
     if args.output:
