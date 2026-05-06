@@ -55,8 +55,9 @@ def _load_text(target_chars: int) -> str:
 
 def _one_call(text: str, idx: int, timeout_s: float) -> dict:
     from _lib import embed as embed_lib
-    start = time.time()
-    rec: dict = {"idx": idx, "started_at": start}
+    start_wall = time.time()  # timeline marker only — elapsed math uses monotonic
+    start = time.monotonic()
+    rec: dict = {"idx": idx, "started_at": start_wall}
     try:
         v = embed_lib.embed_query(text, timeout=timeout_s)
         rec["ok"] = True
@@ -66,13 +67,17 @@ def _one_call(text: str, idx: int, timeout_s: float) -> dict:
         rec["error_code"] = e.code
         rec["error_message"] = e.message[:200]
         rec["details"] = e.details
-        # 429 is the throttle signal; carries Retry-After in body sometimes.
-        if "429" in e.message or e.code == "EMBED_HTTP" and "429" in str(e.details.get("status", "")):
+        # 429 is the throttle signal. embed.py raises
+        # EmbedError("EMBED_HTTP", ..., details={"status": <int>, "body": ...})
+        # on HTTPError, so the integer status field is the canonical check.
+        # Fall back to message scan for code paths that don't populate details
+        # (e.g. raw URLError subclasses).
+        if e.details.get("status") == 429 or "429" in e.message:
             rec["throttled"] = True
     except Exception as e:  # noqa: BLE001
         rec["ok"] = False
         rec["error_message"] = f"{type(e).__name__}: {e}"
-    rec["took_ms"] = int((time.time() - start) * 1000)
+    rec["took_ms"] = int((time.monotonic() - start) * 1000)
     return rec
 
 
@@ -97,7 +102,7 @@ def main() -> int:
     text = _load_text(args.tokens_per_call * 3)
     sink = args.output.open("w", encoding="utf-8") if args.output else sys.stdout
 
-    t0 = time.time()
+    t0 = time.monotonic()
     results: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futures = [ex.submit(_one_call, text, i, args.timeout_s)
@@ -107,12 +112,21 @@ def main() -> int:
             results.append(rec)
             print(json.dumps(rec), file=sink, flush=True)
 
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
     n_ok = sum(1 for r in results if r["ok"])
     n_throttled = sum(1 for r in results if r.get("throttled"))
     n_other_err = len(results) - n_ok - n_throttled
-    p50 = sorted(r["took_ms"] for r in results if r["ok"])
-    p50v = p50[len(p50) // 2] if p50 else 0
+    # Median: average the two middle values for even-length lists. p50_ok_ms
+    # is what an operator cites as "typical latency" — use the textbook median
+    # so a 4-call run doesn't show the upper-of-two-middle artifact.
+    ok_lat = sorted(r["took_ms"] for r in results if r["ok"])
+    if not ok_lat:
+        p50v = 0
+    elif len(ok_lat) % 2 == 1:
+        p50v = ok_lat[len(ok_lat) // 2]
+    else:
+        mid = len(ok_lat) // 2
+        p50v = (ok_lat[mid - 1] + ok_lat[mid]) // 2
     summary = {
         "_summary": True,
         "concurrency": args.concurrency,
