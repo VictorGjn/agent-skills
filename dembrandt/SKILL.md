@@ -24,11 +24,11 @@ metadata:
 retrieval:
   aliases:
     - dembrandt
-    - design pipeline
+    - ui design pipeline
     - ui orchestrator
     - design router
     - opinionated ui review
-    - end-to-end design
+    - end-to-end ui design
   intents:
     - run a full design pipeline on a UI task
     - decide which dembrandt skills apply to a task
