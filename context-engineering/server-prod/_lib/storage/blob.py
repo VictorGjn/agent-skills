@@ -42,6 +42,10 @@ DEFAULT_API_VERSION = "12"
 # served from a different host with no auth, which we don't want.
 # Override with BLOB_ACCESS=public for bench/eval setups that use a
 # public-mode store (created on Hobby plan or for shared eval corpora).
+# Read at module import — Vercel injects env before imports so prod is
+# fine, but tests that monkeypatch BLOB_ACCESS after this module loads
+# won't see the change. Tests that need to flip the mode should reload
+# this module via importlib.reload(blob) after setting the env.
 DEFAULT_ACCESS = os.environ.get("BLOB_ACCESS", "private")
 
 

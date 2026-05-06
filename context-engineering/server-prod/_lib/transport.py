@@ -336,10 +336,14 @@ def _tools_call(payload: dict, token: TokenInfo, request_id: Any) -> tuple[dict,
         # Diagnostic: include exception message + .code/.status (BlobError /
         # KVError carry useful context) so callers don't have to dig through
         # runtime logs to diagnose a transient backend failure.
+        # Probed attrs are restricted to ("code", "status", "body") — picked
+        # to match BlobError/KVError's public surface; avoid generic names
+        # like "type"/"message" that would collide with the keys we set
+        # explicitly above.
         details: dict[str, object] = {"exception_type": type(exc).__name__}
-        msg = str(exc)
+        msg = str(exc)[:500]  # cap before formatting to bound peak allocation
         if msg:
-            details["exception_message"] = msg[:500]
+            details["exception_message"] = msg
         for attr in ("code", "status", "body"):
             v = getattr(exc, attr, None)
             if v is not None:

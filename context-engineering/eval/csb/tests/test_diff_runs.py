@@ -270,5 +270,77 @@ def test_render_aggregate_table_handles_completely_empty_runs():
     assert "+0.000" in md
 
 
+# ── compute_reachable_ids — intersection across runs ─────────────────────────
+
+def test_compute_reachable_ids_intersection():
+    """Reachable = task IDs with no `error` in EVERY run."""
+    import diff_runs
+    run_a = [
+        {"task_id": "t1"},                          # ok in A
+        {"task_id": "t2"},                          # ok in A
+        {"task_id": "t3", "error": {"layer": "tool"}},  # errored in A
+    ]
+    run_b = [
+        {"task_id": "t1"},                          # ok in B
+        {"task_id": "t2", "error": {"layer": "http"}},  # errored in B
+        {"task_id": "t3"},                          # ok in B
+    ]
+    # Intersection: only t1 was non-error in BOTH runs
+    assert diff_runs.compute_reachable_ids([run_a, run_b]) == {"t1"}
+
+
+def test_compute_reachable_ids_empty_runs_returns_empty_set():
+    """Empty runs list returns empty set, not crash."""
+    import diff_runs
+    assert diff_runs.compute_reachable_ids([]) == set()
+
+
+def test_compute_reachable_ids_skips_records_without_task_id():
+    """Summary lines and malformed records (no task_id) shouldn't poison the set."""
+    import diff_runs
+    run_a = [{"task_id": "t1"}, {"_summary": {"foo": 1}}]  # summary skipped
+    run_b = [{"task_id": "t1"}, {"task_id": "t2"}]
+    assert diff_runs.compute_reachable_ids([run_a, run_b]) == {"t1"}
+
+
+def test_metric_means_with_reachable_ids_filter():
+    """reachable_ids restricts mean to that subset."""
+    import diff_runs
+    records = [
+        _rec("reachable",   [], ["a"], file_recall=1.0),
+        _rec("unreachable", [], ["a"], file_recall=0.0),
+    ]
+    full = diff_runs.metric_means(records, "file_recall")
+    restricted = diff_runs.metric_means(records, "file_recall",
+                                         reachable_ids={"reachable"})
+    # full averages both: (1.0 + 0.0) / 2 = 0.5
+    # restricted averages just reachable: 1.0 / 1 = 1.0
+    assert full == 0.5
+    assert restricted == 1.0
+
+
+def test_evaluate_hypotheses_reachable_subset_changes_verdict():
+    """Same data, reachable_ids filter changes H1 PASS/FAIL boundary."""
+    import diff_runs
+    # 4 tasks: 1 reachable with semantic win, 3 unreachable scoring zero
+    c1 = [_rec("hit", [], ["a"], 0.0),
+          _rec("miss1", [], ["a"], 0.0, ),
+          _rec("miss2", [], ["a"], 0.0, ),
+          _rec("miss3", [], ["a"], 0.0, )]
+    c2 = [_rec("hit", ["a"], ["a"], 1.0, p_at_k=0.2, r_at_k=1.0, f1_at_k=0.33),
+          _rec("miss1", [], ["a"], 0.0),
+          _rec("miss2", [], ["a"], 0.0),
+          _rec("miss3", [], ["a"], 0.0)]
+    md_loose = diff_runs.evaluate_hypotheses([c1, c2], ["C1", "C2"])
+    md_strict = diff_runs.evaluate_hypotheses([c1, c2], ["C1", "C2"],
+                                               reachable_ids={"hit"})
+    # Loose: Δ = (1.0 / 4) - 0.0 = 0.25, still PASS but Δ smaller
+    # Strict: Δ = 1.0 - 0.0 = 1.0, much stronger PASS
+    assert "PASS" in md_loose and "Δ=+0.250" in md_loose
+    assert "PASS" in md_strict and "Δ=+1.000" in md_strict
+    # Strict report names the subset count
+    assert "n=1" in md_strict
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-xvs"]))

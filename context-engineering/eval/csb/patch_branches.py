@@ -6,12 +6,21 @@ Drives off a hard-coded mapping (queried via GitHub `default_branch` during
 derived corpus_id matches what the indexer will produce on next run.
 
 Idempotent: re-running over already-patched files is a no-op.
+
+`--verify-live` re-queries GitHub for the current default branch of each
+mapped repo and warns if the static map has drifted (e.g. upstream renamed
+their default branch). No spec.jsons are modified in this mode — it's a
+read-only audit.
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Confirmed via GitHub /repos/<o>/<n>.default_branch on 2026-05-06.
@@ -34,7 +43,46 @@ def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", s.lower()).strip("-")
 
 
-def main():
+def fetch_live_default_branch(repo: str, gh_token: str | None) -> str | None:
+    """GET /repos/<owner>/<name>; return `default_branch` or None on failure."""
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "csb-patch-branches"}
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode("utf-8")).get("default_branch")
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        return None
+
+
+def verify_live(gh_token: str | None) -> int:
+    """Compare DEFAULT_BRANCH_MAP against GitHub's current state.
+
+    Returns nonzero exit code if any drift is detected — useful as a CI
+    pre-check before bench launches that depend on the static map.
+    """
+    drift = []
+    unreachable = []
+    for repo, mapped in sorted(DEFAULT_BRANCH_MAP.items()):
+        live = fetch_live_default_branch(repo, gh_token)
+        if live is None:
+            unreachable.append(repo)
+            print(f"[!] {repo}: GitHub lookup failed (rate limit? token scope?)")
+            continue
+        if live != mapped:
+            drift.append((repo, mapped, live))
+            print(f"[X] {repo}: map says {mapped!r}, GitHub says {live!r}")
+        else:
+            print(f"[ok] {repo}: {mapped}")
+    if drift:
+        print(f"\nDrift detected on {len(drift)} repo(s). Update DEFAULT_BRANCH_MAP and re-run patch.")
+    if unreachable:
+        print(f"\n{len(unreachable)} repo(s) unreachable; verify auth or rate limits.")
+    return 1 if drift else 0
+
+
+def patch_specs() -> tuple[int, int]:
     root = Path("eval/csb/converted-tasks")
     if not root.is_dir():
         print(f"ERROR: {root} not found; run from context-engineering/", file=sys.stderr)
@@ -61,8 +109,27 @@ def main():
         spec_path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
         patched += 1
         print(f"[+] {task_dir.name}: branch -> {new_branch}, corpus_id -> {new_cid}")
+    return patched, skipped
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--verify-live", action="store_true",
+                   help="Audit DEFAULT_BRANCH_MAP against GitHub's current "
+                        "default_branch for each mapped repo. Read-only; no "
+                        "spec.jsons modified. Nonzero exit on drift.")
+    args = p.parse_args()
+
+    if args.verify_live:
+        gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if not gh_token:
+            print("WARN: no GITHUB_TOKEN/GH_TOKEN; live lookups may be rate-limited.", file=sys.stderr)
+        return verify_live(gh_token)
+
+    patched, skipped = patch_specs()
     print(f"\nDone. patched={patched} skipped={skipped} (already correct)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
