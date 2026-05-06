@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, errors, job_store
+from .. import corpus_store, errors, job_store, locks
 from ..auth import TokenInfo
 
 
@@ -202,8 +202,6 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     cache_dir = corpus_store.cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = corpus_store.index_path_for(corpus_id)
-    lock = target.with_suffix(".lock")
 
     # Idempotency: same (corpus_id, content_hashes) → return existing commit_sha
     existing = corpus_store.load_corpus(corpus_id)
@@ -221,7 +219,12 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "took_ms": int((time.time() - start) * 1000),
         }
 
-    if not _acquire_lock(lock):
+    # Phase B (Codex P1 on PR #50): writes target a SHARED backend (Blob in
+    # prod). Filesystem lock is intra-instance only — two instances could
+    # both pass it and overwrite each other. acquire_corpus_write_lock
+    # picks the right primitive (fs for LocalBackend, KV for BlobBackend).
+    held = locks.acquire_corpus_write_lock(corpus_id)
+    if held is None:
         return _err("CORPUS_LOCKED",
                     f"corpus {corpus_id!r} is being written by another caller; retry",
                     details={"corpus_id": corpus_id})
@@ -303,4 +306,4 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "took_ms": int((time.time() - start) * 1000),
         }
     finally:
-        _release_lock(lock)
+        locks.release_corpus_write_lock(corpus_id, held)

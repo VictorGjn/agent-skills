@@ -351,11 +351,48 @@ def test_jobs_status_returns_none_for_unknown_id(_isolate_jobs_backend):
 
 def test_jobs_unknown_id_in_queue_is_skipped(_isolate_jobs_backend):
     """If a stale job_id is in the queue (record TTL'd or was deleted),
-    claim_next returns None rather than crashing."""
+    claim_next returns None rather than crashing — but it must drain the
+    stale entry off the queue before returning."""
     backend = _isolate_jobs_backend
     backend.queue_push("stale-job-id")
     # No corresponding record in the dict
     assert jobs.claim_next() is None
+    # Stale entry should have been popped (drained) so it doesn't keep
+    # blocking subsequent claim_next calls.
+    assert backend.queue_len() == 0
+
+
+def test_jobs_claim_next_loops_past_stale_to_live(_isolate_jobs_backend):
+    """Codex P2 on PR #50: a stale queue head should NOT cause claim_next
+    to return None when there's a live job behind it. Without the loop,
+    each stale entry costs a whole cron tick of latency before real work
+    runs.
+    """
+    backend = _isolate_jobs_backend
+    # Plant a stale id BEFORE a real one
+    backend.queue_push("stale-1")
+    backend.queue_push("stale-2")
+    real_id = jobs.enqueue("index_github_repo", {"repo": "x/y"}, owner="t-1")
+    # Queue order: [stale-1, stale-2, real_id]
+    assert backend.queue_len() == 3
+
+    claimed = jobs.claim_next()
+    assert claimed is not None, (
+        "claim_next stopped on first stale entry instead of looping past it"
+    )
+    assert claimed["id"] == real_id
+    # Both stale entries + the real one should be off the queue
+    assert backend.queue_len() == 0
+
+
+def test_jobs_claim_next_returns_none_when_only_stale(_isolate_jobs_backend):
+    """If every queue head is stale, claim_next eventually returns None
+    (after draining them) rather than spinning forever."""
+    backend = _isolate_jobs_backend
+    for i in range(5):
+        backend.queue_push(f"stale-{i}")
+    assert jobs.claim_next() is None
+    assert backend.queue_len() == 0
 
 
 def test_jobs_kv_backend_picked_when_env_set(monkeypatch):

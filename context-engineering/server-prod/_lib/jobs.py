@@ -201,26 +201,38 @@ def enqueue(kind: str, args: dict, *, owner: str = "") -> str:
     return job_id
 
 
+_MAX_STALE_POPS = 100  # bound the inner loop — defense against a corrupt queue
+
+
 def claim_next() -> dict | None:
     """Worker pulls the next pending job. Atomic — two workers can't claim
     the same job_id (LPOP guarantees). Marks status='running', sets
     started_at if first claim. Returns the full job record.
 
-    Returns None if the queue is empty.
+    Loops past stale queue heads (job_id whose record was TTL'd / deleted)
+    until a live record is found or the queue is truly empty. Codex P2 on
+    PR #50: a single stale entry shouldn't make a non-empty queue look
+    empty for a whole cron tick.
+
+    Bounded by _MAX_STALE_POPS to prevent a corrupt queue (or a buggy
+    sweeper writing nothing but stale ids) from spinning a worker forever.
+    Returns None if the queue is empty OR every head we drained was stale.
     """
     backend = _backend()
-    job_id = backend.queue_pop()
-    if job_id is None:
-        return None
-    record = backend.get(job_id)
-    if record is None:
-        # Stale queue entry (job record TTL'd or was deleted). Skip.
-        return None
-    if record["status"] == "queued":
-        record["status"] = "running"
-        record["started_at"] = _now()
-        backend.put(job_id, record)
-    return record
+    for _ in range(_MAX_STALE_POPS):
+        job_id = backend.queue_pop()
+        if job_id is None:
+            return None
+        record = backend.get(job_id)
+        if record is None:
+            # Stale queue entry — record TTL'd / deleted. Try the next one.
+            continue
+        if record["status"] == "queued":
+            record["status"] = "running"
+            record["started_at"] = _now()
+            backend.put(job_id, record)
+        return record
+    return None
 
 
 def update_progress(job_id: str, *, cursor: int, files_indexed: int,
