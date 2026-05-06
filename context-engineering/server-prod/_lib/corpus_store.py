@@ -339,6 +339,14 @@ def list_metas() -> list[CorpusMeta]:
     backend = _backend()
     out: list[CorpusMeta] = []
     for key in backend.list_keys(prefix=""):
+        # Phase B.2: async indexer writes partial corpora under
+        # `<corpus_id>.partial.json` (NOT `.index.json`) — naturally
+        # excluded by this suffix filter. The earlier `partial-*` prefix
+        # filter was dropped because (Codex P2 on PR #51): users could
+        # legitimately name a corpus `partial-foo` and we'd hide it; AND
+        # the prefix scheme caused the 128-char corpus_id cap to overflow
+        # on long names. Storing partials under a different KEY entirely
+        # (not a corpus_id) sidesteps both.
         if not key.endswith(".index.json"):
             continue
         body = backend.get_bytes(key)
