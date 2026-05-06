@@ -272,6 +272,15 @@ def _advance_one_tick_locked(
         backend = corpus_store._backend()
         partial_raw = backend.get_bytes(partial_key)
         if partial_raw is None:
+            # Codex P1 round 2 on PR #51: fall back to the legacy
+            # `partial-<corpus_id>.index.json` scheme for any job that was
+            # mid-flight when this code shipped. Practically defensive
+            # (no production ever ran the prefix scheme — it was changed
+            # within this same PR before merge), but the cost is trivial
+            # and prevents any stale-deploy edge case from stranding jobs.
+            legacy_key = f"partial-{corpus_id}.index.json"
+            partial_raw = backend.get_bytes(legacy_key)
+        if partial_raw is None:
             jobs.fail(job_id, code="INTERNAL",
                       message=f"partial corpus {partial_key!r} missing mid-flight",
                       retry=True)
