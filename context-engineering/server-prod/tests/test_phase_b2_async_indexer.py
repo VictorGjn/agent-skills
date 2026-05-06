@@ -74,13 +74,16 @@ def vendor_indexer(monkeypatch):
 
 
 def test_fetch_tree_returns_filtered_candidates(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    # P2.4 fix: fetch_tree now returns (candidates, resolved_branch). On the
+    # happy path resolved_branch == input branch.
+    candidates, branch = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     paths = sorted(c["path"] for c in candidates)
     assert paths == ["README.md", "src/auth.py", "src/login.py"]
+    assert branch == "main"
 
 
 def test_index_chunk_processes_slice_returns_done_when_exhausted(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=10, time_budget_s=999,
@@ -94,7 +97,7 @@ def test_index_chunk_processes_slice_returns_done_when_exhausted(vendor_indexer)
 
 
 def test_index_chunk_partial_returns_not_done_with_next_idx(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=2, time_budget_s=999,
@@ -105,7 +108,7 @@ def test_index_chunk_partial_returns_not_done_with_next_idx(vendor_indexer):
 
 
 def test_finalize_builds_manifest_with_kt_distribution_and_dirs(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=10, time_budget_s=999,
@@ -266,7 +269,9 @@ def test_advance_one_tick_tree_fetch_404_marks_job_failed(fake_kv, cache_dir, mo
     sys.path.insert(0, str(vendor))
     import index_github_repo as _gh  # type: ignore
 
-    def boom(owner, name, branch, token):
+    def boom(owner, name, branch, token, **kwargs):
+        # **kwargs absorbs the keyword-only args (max_files, etc.) async_indexer
+        # passes through after the P2.3 split-cap change.
         raise RuntimeError("HTTP 404 Not Found")
     monkeypatch.setattr(_gh, "fetch_tree", boom)
 

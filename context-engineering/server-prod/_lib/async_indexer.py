@@ -173,9 +173,20 @@ def _advance_one_tick_locked(
             # processes ~50 files / tick at 1-min cadence, so a 10k corpus
             # finishes in ~3.5h of cron ticks. Sync wrapper still defaults
             # to the smaller 2k cap to fit the 280s function budget.
-            candidates = _gh.fetch_tree(owner, name, branch,
-                                         _resolve_github_token(),
-                                         max_files=_gh.MAX_FILES_TO_FETCH_ASYNC)
+            #
+            # P2.4 fix (Codex P1 on PR #54): fetch_tree returns
+            # (candidates, resolved_branch). resolved_branch may differ
+            # from the input `branch` if auto-resolve fired on a 404. We
+            # persist the resolved branch into the partial blob's
+            # _meta.source.branch so subsequent ticks (which can't see this
+            # local var) call index_chunk against the right ref. Without
+            # this, content URLs after a 404 retry use the wrong ref and
+            # every file fetch returns empty.
+            candidates, resolved_branch = _gh.fetch_tree(
+                owner, name, branch,
+                _resolve_github_token(),
+                max_files=_gh.MAX_FILES_TO_FETCH_ASYNC,
+            )
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             if "404" in msg or "no tree" in msg:
@@ -204,7 +215,10 @@ def _advance_one_tick_locked(
                 "corpus_id": corpus_id,  # the eventual corpus, not a partial alias
                 "source": {"type": "github_repo",
                            "uri": f"https://github.com/{repo}",
-                           "branch": branch,
+                           # Use resolved_branch (post-auto-resolve) so the
+                           # manifest reflects what was actually fetched and
+                           # subsequent ticks pick up the correct ref.
+                           "branch": resolved_branch,
                            "indexed_paths": indexed_paths},
                 "data_classification": classification,
                 "embedding": {"provider": "none", "model": "n/a", "dims": 0},
@@ -272,31 +286,24 @@ def _advance_one_tick_locked(
         }
 
     try:
-        try:
-            chunk = _gh.index_chunk(
-                owner, name, branch, _resolve_github_token(),
-                candidates,
-                start_idx=next_idx,
-                max_files=TICK_MAX_FILES,
-                time_budget_s=TICK_TIME_BUDGET_S,
-            )
-        except Exception as exc:  # noqa: BLE001
-            jobs.fail(job_id, code="INTERNAL",
-                      message=f"index_chunk failed at idx={next_idx}: {exc}",
-                      retry=True)
-            return {"job_id": job_id, "status": "failed", "reason": "chunk_failed"}
-
-        # Merge new files into the partial corpus (read direct via backend
-        # since the partial uses a non-corpus_id key).
+        # P2.4 fix (Codex P1 on PR #54): the resolved branch is persisted
+        # in the partial blob's _meta.source.branch on first tick. We
+        # read the partial here BEFORE index_chunk so we can pass the
+        # actual ref (which may differ from the original `branch` arg if
+        # first-tick auto-resolved a 404). Without this, every
+        # subsequent-tick content URL points at a non-existent ref and
+        # fetches return empty.
+        #
+        # The same partial is reused below for the chunk merge — within
+        # the per-corpus write lock it can't change between read and
+        # merge, so a single read suffices.
         backend = corpus_store._backend()
         partial_raw = backend.get_bytes(partial_key)
         if partial_raw is None:
             # Codex P1 round 2 on PR #51: fall back to the legacy
             # `partial-<corpus_id>.index.json` scheme for any job that was
-            # mid-flight when this code shipped. Practically defensive
-            # (no production ever ran the prefix scheme — it was changed
-            # within this same PR before merge), but the cost is trivial
-            # and prevents any stale-deploy edge case from stranding jobs.
+            # mid-flight when this code shipped. Practically defensive —
+            # no production ever ran the prefix scheme — but cheap.
             legacy_key = f"partial-{corpus_id}.index.json"
             partial_raw = backend.get_bytes(legacy_key)
         if partial_raw is None:
@@ -311,6 +318,24 @@ def _advance_one_tick_locked(
                       message=f"partial corpus {partial_key!r} corrupted JSON",
                       retry=True)
             return {"job_id": job_id, "status": "failed", "reason": "partial_corrupted"}
+        resolved_branch_for_chunk = (
+            (partial.get("_meta") or {}).get("source", {}).get("branch")
+            or branch
+        )
+
+        try:
+            chunk = _gh.index_chunk(
+                owner, name, resolved_branch_for_chunk, _resolve_github_token(),
+                candidates,
+                start_idx=next_idx,
+                max_files=TICK_MAX_FILES,
+                time_budget_s=TICK_TIME_BUDGET_S,
+            )
+        except Exception as exc:  # noqa: BLE001
+            jobs.fail(job_id, code="INTERNAL",
+                      message=f"index_chunk failed at idx={next_idx}: {exc}",
+                      retry=True)
+            return {"job_id": job_id, "status": "failed", "reason": "chunk_failed"}
 
         # Codex P1 round 6 on PR #51: dedupe by path on every merge.
         # Failure window: put_bytes(partial) succeeds → cursor save fails

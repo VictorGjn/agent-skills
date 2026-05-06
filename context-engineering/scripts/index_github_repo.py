@@ -322,10 +322,17 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
                *,
                max_files: int = MAX_FILES_TO_FETCH_SYNC,
                extension_priority: str = 'source-first',
-               auto_resolve_branch: bool = True) -> list[dict]:
+               auto_resolve_branch: bool = True) -> tuple[list[dict], str]:
     """Phase 1 of indexing: fetch the GitHub tree, filter to indexable
     files, sort + cap. Pure data — no per-file content fetches yet.
     Idempotent and cheap (~1 GitHub API call). Run ONCE per job.
+
+    Returns a tuple of (candidates, resolved_branch). `resolved_branch` is
+    the same as the input `branch` unless auto_resolve_branch fired (see
+    P2.4 below). Callers MUST use `resolved_branch` when fetching content
+    via `index_chunk` — otherwise content URLs use the wrong ref and every
+    file fetch returns 404 / empty (Codex P1 catch on PR #54: silent empty
+    corpora despite successful tree discovery).
 
     Phase B.2: this is the first of three split functions. The async
     cron worker calls this on the first tick and stores the candidates
@@ -344,17 +351,9 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
 
     P2.4 (v1.2): on 404 / no-tree, `auto_resolve_branch=True` looks up the
     repo's current default_branch via the GitHub repo API and retries once.
-    Caller can disable for stricter handling (e.g. test fixtures where a
-    silent branch substitution would mask a real bug).
-
-    Caveat: when auto-resolution fires, this function returns candidates
-    from the ACTUAL default branch, not the branch the caller asked for.
-    Callers that derive corpus_id (or any other state) from the input
-    `branch` param won't see that substitution. For the production
-    `ce_index_github_repo` handler, this is currently OK because P1's
-    spec.json patches keep bench callers' branch matching upstream. Other
-    callers should pre-resolve via `resolve_default_branch` if they need
-    coherent (branch, corpus_id) bookkeeping.
+    The resolved branch is the second tuple element. Caller can disable
+    for stricter handling (e.g. test fixtures where a silent branch
+    substitution would mask a real bug).
     """
     # P2.2: validate extension_priority eagerly — not only in the cap branch
     # below — so a bogus value fails fast even when the corpus fits the cap.
@@ -432,7 +431,7 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
         candidates = candidates[:max_files]
         print(f'Capped to {max_files} files (priority={extension_priority})', file=sys.stderr)
 
-    return candidates
+    return candidates, branch
 
 
 def index_chunk(owner: str, repo: str, branch: str,
@@ -556,12 +555,17 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
     shape as the pre-Phase-B.2 monolithic version. Used by the local CLI
     and by the synchronous (`async=false`) `ce_index_github_repo` path.
     """
-    candidates = fetch_tree(owner, repo, branch, token)
+    # P2.4 fix (Codex P1 on PR #54): use resolved_branch for downstream
+    # content fetches. fetch_tree may have auto-resolved a 404 to the
+    # repo's actual default_branch; passing the original branch through
+    # to index_chunk would point content URLs at a non-existent ref and
+    # return empty for every file.
+    candidates, resolved_branch = fetch_tree(owner, repo, branch, token)
     files: list[dict] = []
     next_idx = 0
     while next_idx < len(candidates):
         chunk = index_chunk(
-            owner, repo, branch, token, candidates,
+            owner, repo, resolved_branch, token, candidates,
             start_idx=next_idx,
             max_files=MAX_FILES_TO_FETCH,  # no chunking in sync mode
             time_budget_s=999_999,         # no wall-time cap in sync mode
@@ -572,7 +576,9 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
         next_idx = chunk['next_idx']
         if chunk['done']:
             break
-    return finalize(files, owner, repo, branch)
+    # finalize records the source branch in the index manifest — use the
+    # resolved branch so the manifest reflects what was actually indexed.
+    return finalize(files, owner, repo, resolved_branch)
 
 
 # ── Main ──

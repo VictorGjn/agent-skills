@@ -80,7 +80,8 @@ def test_fetch_tree_source_first_keeps_code_when_capped(monkeypatch):
         ("b_src.rs", 100),
     ])
     monkeypatch.setattr(gh, "github_get", lambda url, token=None: fake)
-    cands = gh.fetch_tree("o", "r", "main", max_files=3)  # default source-first
+    # P2.4 fix: fetch_tree returns (candidates, resolved_branch). Unpack.
+    cands, _ = gh.fetch_tree("o", "r", "main", max_files=3)  # default source-first
     paths = [c["path"] for c in cands]
     # Source files take the first 3 slots regardless of alphabetic order
     assert all(p.endswith((".py", ".go", ".rs")) for p in paths), (
@@ -96,7 +97,7 @@ def test_fetch_tree_docs_first_preserves_legacy_priority(monkeypatch):
         ("c_src.go", 100),
     ])
     monkeypatch.setattr(gh, "github_get", lambda url, token=None: fake)
-    cands = gh.fetch_tree("o", "r", "main", max_files=1, extension_priority="docs-first")
+    cands, _ = gh.fetch_tree("o", "r", "main", max_files=1, extension_priority="docs-first")
     assert cands[0]["path"].endswith(".md")
 
 
@@ -124,7 +125,7 @@ def test_fetch_tree_default_max_files_is_sync_cap(monkeypatch):
     # 2050 candidates → cap to 2000 with default args
     paths = [(f"src/file{i}.py", 100) for i in range(2050)]
     monkeypatch.setattr(gh, "github_get", lambda url, token=None: _stub_tree(paths))
-    cands = gh.fetch_tree("o", "r", "main")
+    cands, _ = gh.fetch_tree("o", "r", "main")
     assert len(cands) == 2000
 
 
@@ -132,7 +133,7 @@ def test_fetch_tree_explicit_async_cap_accepts_more(monkeypatch):
     """Passing max_files=MAX_FILES_TO_FETCH_ASYNC accepts up to 10k."""
     paths = [(f"src/file{i}.py", 100) for i in range(5000)]
     monkeypatch.setattr(gh, "github_get", lambda url, token=None: _stub_tree(paths))
-    cands = gh.fetch_tree("o", "r", "main", max_files=gh.MAX_FILES_TO_FETCH_ASYNC)
+    cands, _ = gh.fetch_tree("o", "r", "main", max_files=gh.MAX_FILES_TO_FETCH_ASYNC)
     assert len(cands) == 5000  # under cap, all retained
 
 
@@ -144,7 +145,12 @@ class _Fake404(urllib.error.HTTPError):
 
 
 def test_fetch_tree_auto_resolves_branch_on_404(monkeypatch):
-    """Initial branch returns 404 → auto-resolves to default_branch and retries."""
+    """Initial branch returns 404 → auto-resolves to default_branch and retries.
+
+    Codex P1 fix: returned tuple now includes the resolved branch so the
+    caller can use it for downstream content fetches (was: caller silently
+    used the original branch and got empty corpora).
+    """
     calls = []
 
     def fake_github_get(url, token=None):
@@ -158,11 +164,58 @@ def test_fetch_tree_auto_resolves_branch_on_404(monkeypatch):
         raise AssertionError(f"unexpected url {url}")
 
     monkeypatch.setattr(gh, "github_get", fake_github_get)
-    cands = gh.fetch_tree("o", "r", "main")
+    cands, resolved_branch = gh.fetch_tree("o", "r", "main")
     assert len(cands) == 1
+    assert resolved_branch == "master", (
+        "auto-resolve must propagate the actual branch via the return tuple "
+        "so the caller can fetch content against the right ref"
+    )
     # Confirm the retry path actually fired
     assert any("trees/main" in u for u in calls)
     assert any("trees/master" in u for u in calls)
+
+
+def test_fetch_tree_returns_input_branch_when_no_resolve_needed(monkeypatch):
+    """When the branch exists, the resolved branch in the tuple equals the input."""
+    monkeypatch.setattr(gh, "github_get",
+                         lambda url, token=None: _stub_tree([("a.py", 100)]))
+    cands, resolved = gh.fetch_tree("o", "r", "main")
+    assert resolved == "main"
+
+
+def test_index_github_repo_uses_resolved_branch_for_content_fetch(monkeypatch):
+    """End-to-end: when fetch_tree auto-resolves main → master, the sync
+    wrapper passes master (not main) into index_chunk's content URLs.
+
+    This is the scenario Codex flagged as P1 on PR #54: silent empty
+    corpora when auto-resolve fired but caller used the original branch.
+    """
+    content_urls_seen = []
+
+    def fake_github_get(url, token=None):
+        if "trees/main" in url:
+            raise _Fake404()
+        if "/repos/o/r" in url and "trees/" not in url and "contents/" not in url:
+            return {"default_branch": "master"}
+        if "trees/master" in url:
+            return _stub_tree([("a.py", 100), ("b.py", 100)])
+        raise AssertionError(f"unexpected tree url {url}")
+
+    def fake_github_get_raw(url, token=None):
+        content_urls_seen.append(url)
+        return "print('hello')"
+
+    monkeypatch.setattr(gh, "github_get", fake_github_get)
+    monkeypatch.setattr(gh, "github_get_raw", fake_github_get_raw)
+
+    result = gh.index_github_repo("o", "r", "main", token=None)
+    # Every content URL must use ref=master (the resolved branch), not ref=main
+    assert all("ref=master" in u for u in content_urls_seen), (
+        f"index_chunk must use the resolved branch — saw {content_urls_seen}"
+    )
+    # Final manifest also reflects the resolved branch
+    assert "@master" in result["root"]
+    assert result["totalFiles"] == 2
 
 
 def test_fetch_tree_auto_resolve_disabled_propagates_404(monkeypatch):
