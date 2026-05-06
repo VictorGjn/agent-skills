@@ -373,17 +373,18 @@ def test_async_embed_auto_no_key_still_queues(monkeypatch):
     assert out["status"] == "queued"
 
 
-def test_partial_corpora_hidden_from_list_metas(tmp_path, monkeypatch):
-    """Codex P2: async indexer writes `partial-<corpus_id>.index.json`
-    while a job is in flight. ce_list_corpora must NOT show those —
-    callers shouldn't see half-built indices."""
+def test_partial_corpora_under_different_suffix_dont_appear_in_list_metas(tmp_path, monkeypatch):
+    """Codex P2 on PR #51: previous design used `partial-<id>.index.json`
+    which collided with valid user corpora named `partial-*`. New design
+    stores partials under `<id>.partial.json` (NOT `.index.json`), so
+    list_metas's suffix filter naturally excludes them — AND user
+    corpora named `partial-foo` show up correctly."""
     from _lib import corpus_store
     cd = tmp_path / "cache"
     cd.mkdir()
     monkeypatch.setenv("CE_CORPUS_CACHE_DIR", str(cd))
-    corpus_store.set_backend(None)  # force re-resolve
+    corpus_store.set_backend(None)
 
-    # Plant one real + one partial corpus
     real_obj = {
         "_meta": {"corpus_id": "real-corpus",
                   "source": {"type": "github_repo", "uri": "x"},
@@ -393,11 +394,102 @@ def test_partial_corpora_hidden_from_list_metas(tmp_path, monkeypatch):
                   "last_refresh_completed_at": "2026-05-06T00:00:00Z",
                   "commit_sha": "real", "lifecycle_state": "active"},
         "files": []}
-    partial_obj = {**real_obj, "_meta": {**real_obj["_meta"],
-                                          "corpus_id": "partial-real-corpus"}}
+    partial_named = {**real_obj, "_meta": {**real_obj["_meta"],
+                                            "corpus_id": "partial-foo"}}
+    partial_blob = {**real_obj}
+    # Real corpus + a user corpus legitimately named `partial-foo` + an
+    # in-flight partial blob (different suffix)
     (cd / "real-corpus.index.json").write_text(json.dumps(real_obj))
-    (cd / "partial-real-corpus.index.json").write_text(json.dumps(partial_obj))
+    (cd / "partial-foo.index.json").write_text(json.dumps(partial_named))
+    (cd / "real-corpus.partial.json").write_text(json.dumps(partial_blob))
 
     metas = corpus_store.list_metas()
     ids = sorted(m.corpus_id for m in metas)
-    assert ids == ["real-corpus"], f"partial corpora leaked into list: {ids}"
+    # The user's `partial-foo` corpus should NOT be hidden.
+    # The in-flight `.partial.json` blob should NOT show up.
+    assert ids == ["partial-foo", "real-corpus"], (
+        f"unexpected list_metas output: {ids}"
+    )
+
+
+def test_get_job_status_translates_kv_record_to_spec_wire_shape(monkeypatch):
+    """Codex P1 on PR #51: ce_get_job_status was returning jobs.status()
+    verbatim with internal field names (id, kind, files_indexed,
+    error_code). Spec § 3.7 promises {job_id, corpus_id, status, progress,
+    error, result_commit_sha, started_at, completed_at}. This test pins
+    the translation."""
+    from _lib import jobs
+    from _lib.tools import get_job_status as gjs
+    from _lib.auth import TokenInfo
+
+    backend = jobs.InMemoryJobsBackend()
+    jobs.set_backend(backend)
+
+    # Plant a complete async-indexer job record
+    job_id = jobs.enqueue("index_github_repo",
+                          {"repo": "x/y", "branch": "main",
+                           "corpus_id": "gh-x-y-main",
+                           "data_classification": "public"},
+                          owner="t-1")
+    jobs.claim_next()
+    jobs.complete(job_id, commit_sha="cafebabe1234",
+                  file_count=42, embedded_count=42)
+
+    out = gjs.handle({"job_id": job_id},
+                     TokenInfo(token_id="t", role="admin",
+                               data_classification_max="restricted"))
+    assert "isError" not in out
+    # Wire shape per § 3.7
+    assert out["job_id"] == job_id  # NOT "id"
+    assert out["corpus_id"] == "gh-x-y-main"
+    assert out["status"] == "complete"
+    assert out["progress"]["files_indexed"] == 42
+    assert out["progress"]["files_total"] == 42
+    assert out["progress"]["embedded_count"] == 42
+    assert out["result_commit_sha"] == "cafebabe1234"  # NOT "commit_sha"
+    assert out["error"] is None
+    # Internal field names absent
+    assert "id" not in out
+    assert "kind" not in out
+    assert "files_indexed" not in out
+    assert "error_code" not in out
+
+    jobs.set_backend(None)
+
+
+def test_get_job_status_translates_failed_job_with_error_object(monkeypatch):
+    """A failed job must have error: {code, message}, not flat
+    error_code/error_message."""
+    from _lib import jobs
+    from _lib.tools import get_job_status as gjs
+    from _lib.auth import TokenInfo
+
+    jobs.set_backend(jobs.InMemoryJobsBackend())
+    job_id = jobs.enqueue("index_github_repo", {"repo": "x/y"}, owner="t-1")
+    jobs.claim_next()
+    jobs.fail(job_id, code="SOURCE_NOT_FOUND",
+              message="repo doesn't exist on github")
+
+    out = gjs.handle({"job_id": job_id},
+                     TokenInfo(token_id="t", role="admin",
+                               data_classification_max="restricted"))
+    assert out["status"] == "failed"
+    assert out["error"] == {"code": "SOURCE_NOT_FOUND",
+                            "message": "repo doesn't exist on github"}
+    assert out["result_commit_sha"] is None
+    jobs.set_backend(None)
+
+
+def test_partial_blob_key_safe_for_max_length_corpus_id():
+    """Codex P2 on PR #51: prefix-style `partial-<id>` could push 121+
+    char corpus_ids past the 128-char cap. New suffix-style key
+    `<id>.partial.json` doesn't go through corpus_id validation at all."""
+    from _lib import async_indexer
+    # A 128-char (max-allowed) corpus_id shouldn't fail with the new scheme
+    long_id = "a" + "b" * 127  # 128 chars, valid per § 4.1
+    key = async_indexer._partial_blob_key(long_id)
+    assert key.endswith(".partial.json")
+    # Importantly: the partial KEY (which is NOT a corpus_id) can be any
+    # length the storage backend accepts; we don't run is_valid_corpus_id
+    # on it. So this should work even for max-length corpus_ids.
+    assert len(key) > 128  # would have been rejected by corpus_id regex

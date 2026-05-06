@@ -299,14 +299,23 @@ def fail(job_id: str, *, code: str, message: str, retry: bool = False) -> None:
 
 def status(job_id: str) -> dict | None:
     """Return the public-facing subset of the job record (no internal
-    cursor / args echo). Used by ce_get_job_status."""
+    cursor / queue-only fields). Used by ce_get_job_status — and
+    `tools/get_job_status.py` translates this shape into the SPEC § 3.7
+    wire contract.
+
+    Includes `corpus_id` extracted from args so the caller doesn't have
+    to round-trip the raw record. Excludes args itself (caller-private)
+    and cursor (internal state).
+    """
     backend = _backend()
     record = backend.get(job_id)
     if record is None:
         return None
+    args = record.get("args") or {}
     return {
         "id": record["id"],
         "kind": record["kind"],
+        "corpus_id": args.get("corpus_id"),
         "status": record["status"],
         "files_indexed": record.get("files_indexed", 0),
         "files_total": record.get("files_total"),

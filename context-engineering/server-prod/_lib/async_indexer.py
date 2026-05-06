@@ -50,11 +50,19 @@ def _cursor_key(job_id: str) -> str:
     return f"job:{job_id}:cursor"
 
 
-def _partial_corpus_id(corpus_id: str) -> str:
-    """Where partial-state lives during indexing. Note: corpus_id IDs are
-    `[a-z0-9][a-z0-9-]{0,127}` per § 4.1, so we prefix with `partial-`
-    rather than appending a suffix (which would break the regex)."""
-    return f"partial-{corpus_id}"
+def _partial_blob_key(corpus_id: str) -> str:
+    """Storage-backend key for the in-flight partial corpus during async
+    indexing. NOT a corpus_id — uses a `.partial.json` suffix so it
+    doesn't end in `.index.json` and is naturally invisible to
+    `corpus_store.list_metas()` (which filters on the canonical suffix).
+
+    Codex P2 on PR #51: previously prefixed the corpus_id with `partial-`,
+    which collided with valid user corpora named `partial-*` AND could
+    push 121+ char corpus_ids past the 128-char `is_valid_corpus_id` cap
+    on later ticks. Using a separate key namespace keyed by the original
+    corpus_id avoids both.
+    """
+    return f"{corpus_id}.partial.json"
 
 
 def _ensure_scripts_path() -> None:
@@ -120,7 +128,7 @@ def advance_one_tick(job: dict) -> dict:
 
     owner, name = _split_repo(repo)
     corpus_id = explicit_cid or _slugify_corpus_id(repo, branch)
-    partial_id = _partial_corpus_id(corpus_id)
+    partial_key = _partial_blob_key(corpus_id)
 
     # Codex P2 on PR #52: serialize ticks of the SAME job. Without this,
     # two cron workers picking up the same job_id (LPOP race during fail-
@@ -139,7 +147,7 @@ def advance_one_tick(job: dict) -> dict:
     try:
         return _advance_one_tick_locked(
             job_id, args, repo, branch, classification,
-            corpus_id, partial_id, indexed_paths,
+            corpus_id, partial_key, indexed_paths,
         )
     finally:
         locks.release_corpus_write_lock(f"job-{job_id}", held_job)
@@ -147,7 +155,7 @@ def advance_one_tick(job: dict) -> dict:
 
 def _advance_one_tick_locked(
     job_id: str, args: dict, repo: str, branch: str, classification: str,
-    corpus_id: str, partial_id: str, indexed_paths: list,
+    corpus_id: str, partial_key: str, indexed_paths: list,
 ) -> dict:
     """Per-job-locked body of advance_one_tick. Same semantics, just
     indented to keep the lock try/finally clean in the parent."""
@@ -188,10 +196,13 @@ def _advance_one_tick_locked(
                            "time_total_s": 0.0}, separators=(",", ":")),
                ex_seconds=jobs.JOB_TTL_SECONDS)
 
-        # Initialize empty partial corpus
+        # Initialize empty partial corpus. Stored under a Blob key with
+        # `.partial.json` suffix (NOT a corpus_id) so it can't collide
+        # with user-namespaced corpora and isn't subject to the 128-char
+        # corpus_id cap (Codex P2 on PR #51).
         empty_partial = {
             "_meta": {
-                "corpus_id": partial_id,
+                "corpus_id": corpus_id,  # the eventual corpus, not a partial alias
                 "source": {"type": "github_repo",
                            "uri": f"https://github.com/{repo}",
                            "branch": branch,
@@ -207,8 +218,11 @@ def _advance_one_tick_locked(
             "files": [],
             "embeddings": {},
         }
-        corpus_store.write_corpus(partial_id,
-                                  json.dumps(empty_partial, separators=(",", ":")).encode("utf-8"))
+        backend = corpus_store._backend()
+        backend.put_bytes(
+            partial_key,
+            json.dumps(empty_partial, separators=(",", ":")).encode("utf-8"),
+        )
 
         jobs.update_progress(job_id, cursor=0, files_indexed=0,
                              files_total=len(candidates))
@@ -253,34 +267,43 @@ def _advance_one_tick_locked(
                       retry=True)
             return {"job_id": job_id, "status": "failed", "reason": "chunk_failed"}
 
-        # Merge new files into the partial corpus
-        partial = corpus_store.load_corpus(partial_id)
-        if partial is None:
+        # Merge new files into the partial corpus (read direct via backend
+        # since the partial uses a non-corpus_id key).
+        backend = corpus_store._backend()
+        partial_raw = backend.get_bytes(partial_key)
+        if partial_raw is None:
             jobs.fail(job_id, code="INTERNAL",
-                      message=f"partial corpus {partial_id!r} missing mid-flight",
+                      message=f"partial corpus {partial_key!r} missing mid-flight",
                       retry=True)
             return {"job_id": job_id, "status": "failed", "reason": "partial_missing"}
+        try:
+            partial = json.loads(partial_raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            jobs.fail(job_id, code="INTERNAL",
+                      message=f"partial corpus {partial_key!r} corrupted JSON",
+                      retry=True)
+            return {"job_id": job_id, "status": "failed", "reason": "partial_corrupted"}
 
-        accumulated_files = list(partial.files) + list(chunk["files"])
-
+        accumulated_files = list(partial.get("files") or []) + list(chunk["files"])
+        partial_meta = partial.get("_meta") or {}
         partial_obj = {
             "_meta": {
-                "corpus_id": partial_id,
-                "source": partial.meta.source,
-                "data_classification": partial.meta.data_classification,
-                "embedding": partial.meta.embedding,
+                "corpus_id": corpus_id,
+                "source": partial_meta.get("source"),
+                "data_classification": partial_meta.get("data_classification", classification),
+                "embedding": partial_meta.get("embedding") or {"provider": "none", "model": "n/a", "dims": 0},
                 "file_count": len(accumulated_files),
                 "embedded_count": 0,
-                "version": partial.meta.version,
-                "last_refresh_completed_at": partial.meta.last_refresh_completed_at,
+                "version": partial_meta.get("version", 1),
+                "last_refresh_completed_at": partial_meta.get("last_refresh_completed_at"),
                 "commit_sha": "",
                 "lifecycle_state": "active",
             },
             "files": accumulated_files,
             "embeddings": {},
         }
-        corpus_store.write_corpus(
-            partial_id,
+        backend.put_bytes(
+            partial_key,
             json.dumps(partial_obj, separators=(",", ":")).encode("utf-8"),
         )
 
@@ -328,12 +351,11 @@ def _advance_one_tick_locked(
                 json.dumps(final_obj, separators=(",", ":")).encode("utf-8"),
             )
 
-            # Cleanup KV state + partial corpus
+            # Cleanup KV state + partial corpus blob
             kv.delete(_cursor_key(job_id))
             kv.delete(_candidates_key(job_id))
             try:
-                _backend = corpus_store._backend()
-                _backend.delete(f"{partial_id}.index.json")
+                backend.delete(partial_key)
             except Exception:  # noqa: BLE001 — cleanup best-effort
                 pass
 
