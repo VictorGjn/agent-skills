@@ -27,9 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, embed as embed_lib, errors, job_store
+from .. import corpus_store, embed as embed_lib, errors, job_store, locks
 from ..auth import TokenInfo
-from . import upload_corpus  # reuse _acquire_lock / _release_lock
+from . import upload_corpus  # reuse _acquire_lock / _release_lock for legacy path
 
 
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
@@ -248,13 +248,14 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     cache_dir = corpus_store.cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = corpus_store.index_path_for(corpus_id)
-    lock = target.with_suffix(".lock")
 
-    # Acquire the same lock ce_upload_corpus uses — without this, an upload
-    # racing against an index for the same corpus_id could trample each other
-    # (Codex P1). § 3.4 contract: CORPUS_LOCKED is retryable.
-    if not upload_corpus._acquire_lock(lock):
+    # Phase B (Codex P1 on PR #50): backend-aware lock. LocalBackend gets
+    # the filesystem lock that prevented same-instance concurrent writers.
+    # BlobBackend gets a Vercel KV lock (SET NX EX + EVAL release) that
+    # prevents two Vercel instances from both passing through and racing
+    # each other to overwrite the same Blob key.
+    held = locks.acquire_corpus_write_lock(corpus_id)
+    if held is None:
         return _err("CORPUS_LOCKED",
                     f"corpus {corpus_id!r} is being written by another caller; retry",
                     details={"corpus_id": corpus_id})
@@ -300,9 +301,10 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             "files": files,
             "embeddings": embeddings_map,
         }
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index_obj, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(target)
+        # Phase A (v1.1): write through the storage backend (Blob in prod,
+        # filesystem in tests).
+        body = json.dumps(index_obj, separators=(",", ":")).encode("utf-8")
+        corpus_store.write_corpus(corpus_id, body)
 
         job_store.register_complete(
             corpus_id, commit_sha,
@@ -323,7 +325,7 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
             out["embed_skipped"] = embed_skip_reason
         return out
     finally:
-        upload_corpus._release_lock(lock)
+        locks.release_corpus_write_lock(corpus_id, held)
 
 
 def _resolve_github_token() -> str | None:
