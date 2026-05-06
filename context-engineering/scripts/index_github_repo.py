@@ -346,7 +346,23 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
     repo's current default_branch via the GitHub repo API and retries once.
     Caller can disable for stricter handling (e.g. test fixtures where a
     silent branch substitution would mask a real bug).
+
+    Caveat: when auto-resolution fires, this function returns candidates
+    from the ACTUAL default branch, not the branch the caller asked for.
+    Callers that derive corpus_id (or any other state) from the input
+    `branch` param won't see that substitution. For the production
+    `ce_index_github_repo` handler, this is currently OK because P1's
+    spec.json patches keep bench callers' branch matching upstream. Other
+    callers should pre-resolve via `resolve_default_branch` if they need
+    coherent (branch, corpus_id) bookkeeping.
     """
+    # P2.2: validate extension_priority eagerly — not only in the cap branch
+    # below — so a bogus value fails fast even when the corpus fits the cap.
+    if extension_priority not in ('source-first', 'docs-first'):
+        raise ValueError(
+            f"extension_priority must be 'source-first' or 'docs-first', "
+            f"got {extension_priority!r}"
+        )
     print(f'Fetching tree for {owner}/{repo}@{branch}...', file=sys.stderr)
     tree_url = f'https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1'
     try:
@@ -399,12 +415,11 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
         }
         DOC_EXTS = {'.md', '.mdx', '.txt', '.rst'}
 
+        # extension_priority validated at function entry — only two branches reachable here.
         if extension_priority == 'source-first':
             source_tier, doc_tier = 0, 2
-        elif extension_priority == 'docs-first':
+        else:  # 'docs-first' (validated above)
             source_tier, doc_tier = 2, 0
-        else:
-            raise ValueError(f"extension_priority must be 'source-first' or 'docs-first', got {extension_priority!r}")
 
         def sort_key(item):
             ext = Path(item['path']).suffix.lower()
