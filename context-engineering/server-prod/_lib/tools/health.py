@@ -24,7 +24,6 @@ import time
 import uuid
 from typing import Any
 
-from .. import embed as embed_lib
 from ..auth import TokenInfo
 from ..version import GIT_SHA, SERVER_VERSION
 
@@ -54,34 +53,54 @@ def auth_methods() -> list[str]:
 def _probe_kv() -> dict[str, Any]:
     """SET (TTL=60s) + GET + DEL on a unique key. Returns ok/took_ms or
     `error` with the underlying message. Probe key is 60s-TTL'd so a crash
-    mid-probe doesn't leak permanent state."""
+    mid-probe doesn't leak permanent state.
+
+    Uses time.monotonic() for elapsed-time math (NTP-correction safe).
+    """
     from ..storage import kv  # late import — keeps health import-time cheap
-    start = time.time()
+    start = time.monotonic()
     if not (os.environ.get("KV_REST_API_URL") and os.environ.get("KV_REST_API_TOKEN")):
         return {"ok": False, "took_ms": 0, "error": "KV_REST_API_* env not set"}
     key = f"health:probe:{uuid.uuid4().hex}"
-    val = f"ts={time.time():.6f}"
+    val = f"ts={time.time():.6f}"  # wall-clock value is fine — only the elapsed math uses monotonic
     try:
+        # kv.set defaults to nx=False, so it returns True on every successful
+        # write — no NX collision branch to worry about. We still check the
+        # boolean so a future change to default=nx surfaces here, but the
+        # normal path always sees True.
         if not kv.set(key, val, ex_seconds=60):
-            return {"ok": False, "took_ms": int((time.time() - start) * 1000),
-                    "error": "kv.set returned False (NX collision?)"}
+            return {"ok": False, "took_ms": int((time.monotonic() - start) * 1000),
+                    "error": "kv.set returned False unexpectedly"}
         got = kv.get(key)
         if got != val:
-            return {"ok": False, "took_ms": int((time.time() - start) * 1000),
+            # Always try to clean up before returning, even on mismatch — the
+            # probe key is 60s-TTL'd so this is belt-and-suspenders, not strictly
+            # required, but matches blob's hygiene.
+            try:
+                kv.delete(key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+            return {"ok": False, "took_ms": int((time.monotonic() - start) * 1000),
                     "error": f"read-back mismatch: wrote {val!r}, got {got!r}"}
         kv.delete(key)
     except Exception as e:  # noqa: BLE001 — surface the real failure
-        return {"ok": False, "took_ms": int((time.time() - start) * 1000),
+        return {"ok": False, "took_ms": int((time.monotonic() - start) * 1000),
                 "error": f"{type(e).__name__}: {e}"}
-    return {"ok": True, "took_ms": int((time.time() - start) * 1000)}
+    return {"ok": True, "took_ms": int((time.monotonic() - start) * 1000)}
 
 
 def _probe_blob() -> dict[str, Any]:
     """PUT + GET + DELETE on a unique health/ key. Returns ok/took_ms or
     `error`. Probe blob is small (~30 bytes) so even repeated polling is
-    free against the Pro quota (100 GB)."""
+    free against the Pro quota (100 GB).
+
+    Cleanup invariant: the blob is always deleted on success. On read-back
+    mismatch we attempt cleanup (best-effort) so quota doesn't bleed across
+    repeated mismatches; on PUT/GET exception, no orphan exists yet so
+    nothing to clean.
+    """
     from ..storage import blob  # late import
-    start = time.time()
+    start = time.monotonic()
     if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
         return {"ok": False, "took_ms": 0, "error": "BLOB_READ_WRITE_TOKEN not set"}
     key = f"health/probe-{uuid.uuid4().hex}.txt"
@@ -91,43 +110,64 @@ def _probe_blob() -> dict[str, Any]:
         backend.put_bytes(key, body)
         got = backend.get_bytes(key)
         if got != body:
-            return {"ok": False, "took_ms": int((time.time() - start) * 1000),
+            try:
+                backend.delete(key)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+            return {"ok": False, "took_ms": int((time.monotonic() - start) * 1000),
                     "error": f"read-back mismatch on {key}"}
         backend.delete(key)
     except Exception as e:  # noqa: BLE001 — surface the real failure
-        details: dict[str, Any] = {"error": f"{type(e).__name__}: {e}"}
+        details: dict[str, Any] = {
+            "ok": False,
+            "took_ms": int((time.monotonic() - start) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
         for attr in ("code", "status"):
             v = getattr(e, attr, None)
             if v is not None:
                 details[f"exception_{attr}"] = v
-        details.update(ok=False, took_ms=int((time.time() - start) * 1000))
         return details
-    return {"ok": True, "took_ms": int((time.time() - start) * 1000)}
+    return {"ok": True, "took_ms": int((time.monotonic() - start) * 1000)}
 
 
 def _probe_mistral() -> dict[str, Any]:
-    """1-token embed_query round-trip. Budget-safe: cost ~$0 per probe."""
-    start = time.time()
+    """1-token embed_query round-trip. Budget-safe: cost ~$0 per probe.
+
+    Late-imports embed module to keep health.py's import graph lean —
+    embed pulls Mistral client + retry helpers that aren't needed for
+    shallow liveness probes.
+    """
+    from .. import embed as embed_lib  # late import
+    start = time.monotonic()
     if not os.environ.get("MISTRAL_API_KEY"):
         return {"ok": False, "took_ms": 0, "error": "MISTRAL_API_KEY not set"}
     try:
         v = embed_lib.embed_query("ok")
     except embed_lib.EmbedError as e:
-        return {"ok": False, "took_ms": int((time.time() - start) * 1000),
-                "error": f"{e.code}: {e.message}"}
+        out: dict[str, Any] = {
+            "ok": False,
+            "took_ms": int((time.monotonic() - start) * 1000),
+            "error": f"{e.code}: {e.message}",
+        }
+        # Surface details (e.g. retry_after_seconds, response body snippet)
+        # so callers diagnosing 401/429 don't have to re-call.
+        if e.details:
+            out["details"] = e.details
+        return out
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "took_ms": int((time.time() - start) * 1000),
+        return {"ok": False, "took_ms": int((time.monotonic() - start) * 1000),
                 "error": f"{type(e).__name__}: {e}"}
     return {
         "ok": True,
-        "took_ms": int((time.time() - start) * 1000),
+        "took_ms": int((time.monotonic() - start) * 1000),
         "model": embed_lib.MISTRAL_MODEL,
         "dims": len(v),
     }
 
 
 def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
-    start = time.time()
+    start = time.monotonic()
     response: dict[str, Any] = {
         "ok": True,
         "version": SERVER_VERSION,
@@ -148,5 +188,5 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         response["probes"] = probes
         if not all(p["ok"] for p in probes.values()):
             response["ok"] = False
-    response["took_ms"] = int((time.time() - start) * 1000)
+    response["took_ms"] = int((time.monotonic() - start) * 1000)
     return response
