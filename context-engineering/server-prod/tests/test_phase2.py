@@ -93,9 +93,10 @@ def test_ce_get_health_works():
     assert "bearer" in structured["auth_methods_supported"]
 
 
-def test_phase2_placeholder_async_index_returns_not_implemented():
-    """Phase 4 lands write tools, but async=true is still NOT_IMPLEMENTED in v1
-    (Vercel Cron + queue is v1.1)."""
+def test_async_index_enqueues_job_and_returns_id():
+    """Phase B.3 (v1.1): async=true now enqueues a job and returns
+    {job_id, corpus_id, status: 'queued'} immediately. The Vercel Cron
+    worker advances it. Pre-B.3 this returned NOT_IMPLEMENTED."""
     payload = {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call",
         "params": {"name": "ce_index_github_repo", "arguments": {
@@ -103,11 +104,11 @@ def test_phase2_placeholder_async_index_returns_not_implemented():
         }},
     }
     response, status = dispatch(payload, _admin_token())
-    # § 7.1 tool errors return via result.isError, with HTTP 501
-    assert status == 501
-    result = response["result"]
-    assert result["isError"] is True
-    assert result["structuredContent"]["code"] == "NOT_IMPLEMENTED"
+    assert status == 200
+    structured = response["result"]["structuredContent"]
+    assert structured["status"] == "queued"
+    assert isinstance(structured["job_id"], str) and structured["job_id"]
+    assert structured["corpus_id"] == "gh-x-y-main"
 
 
 def test_alias_resolves_with_deprecated_hint():

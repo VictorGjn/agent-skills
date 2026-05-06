@@ -147,34 +147,6 @@ def _new_content_hash(files: list[dict]) -> str:
     return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
 
 
-def _acquire_lock(lock_path: Path) -> bool:
-    """Try to create lock file exclusively. Returns False if another writer holds it."""
-    try:
-        # O_EXCL ensures we fail if it exists
-        import os as _os
-        fd = _os.open(str(lock_path), _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY)
-        _os.write(fd, str(time.time()).encode())
-        _os.close(fd)
-        return True
-    except FileExistsError:
-        # Stale lock cleanup: if older than 5 min, force-take it.
-        try:
-            age = time.time() - lock_path.stat().st_mtime
-            if age > 300:
-                lock_path.unlink(missing_ok=True)
-                return _acquire_lock(lock_path)
-        except OSError:
-            pass
-        return False
-
-
-def _release_lock(lock_path: Path) -> None:
-    try:
-        lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
 def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     start = time.time()
     err = _validate_args(args)

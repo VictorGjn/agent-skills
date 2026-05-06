@@ -229,7 +229,22 @@ def claim_next() -> dict | None:
             continue
         if record["status"] == "queued":
             record["status"] = "running"
-            record["started_at"] = _now()
+            # Engineer-review P1 on PR #51: clear last-attempt error fields
+            # on the queued→running transition. fail(retry=True) records
+            # error_code/error_message + sets status='queued'; without
+            # clearing on reclaim, a healthy retry would surface in the
+            # wire shape as {status:"running", error:{code,message}} and
+            # any client keying off `error != null` would treat the live
+            # job as broken. Cleared on reclaim — the error is preserved
+            # in the diagnostics window between fail(retry) and the next
+            # tick, but evaporates the moment the worker picks it up.
+            record["error_code"] = None
+            record["error_message"] = None
+            # Set started_at on FIRST claim only — preserve original timestamp
+            # on retry-reclaim so wire-side started_at reflects when work
+            # actually began, not the latest cycle.
+            if record.get("started_at") is None:
+                record["started_at"] = _now()
             backend.put(job_id, record)
         return record
     return None
@@ -278,35 +293,63 @@ def complete(job_id: str, *, commit_sha: str, file_count: int,
 
 
 def fail(job_id: str, *, code: str, message: str, retry: bool = False) -> None:
-    """Mark a job failed. With retry=True the worker will requeue; the
-    record stays in 'failed' state until claimed again, when it transitions
-    back to 'running'.
+    """Mark a job failed (terminal) or queued-for-retry (non-terminal).
+
+    Codex P2 round 3 on PR #51: with retry=True we must NOT set
+    status='failed'. claim_next() only flips queued→running, so a
+    failed-then-requeued record would stay in status='failed' from the
+    client's view (ce_get_job_status returns 'failed') even while the
+    worker is happily retrying. Clients that stop polling on first
+    'failed' would treat recoverable jobs as terminal failures.
+
+    Behavior:
+    - retry=False: status='failed', completed_at set (terminal).
+    - retry=True: status='queued', completed_at NOT set, error_code +
+      error_message recorded as last-attempt diagnostics. Push back to
+      queue. claim_next picks it up and flips queued→running normally.
     """
     backend = _backend()
     record = backend.get(job_id)
     if record is None:
         return
-    record.update({
-        "status": "failed",
-        "error_code": code,
-        "error_message": message,
-        "completed_at": _now(),
-    })
-    backend.put(job_id, record)
     if retry:
+        record.update({
+            "status": "queued",  # non-terminal — claim_next will run() it
+            "error_code": code,
+            "error_message": message,
+            # NOT setting completed_at — job isn't finished
+        })
+        backend.put(job_id, record)
         backend.queue_push(job_id)
+    else:
+        record.update({
+            "status": "failed",
+            "error_code": code,
+            "error_message": message,
+            "completed_at": _now(),
+        })
+        backend.put(job_id, record)
 
 
 def status(job_id: str) -> dict | None:
     """Return the public-facing subset of the job record (no internal
-    cursor / args echo). Used by ce_get_job_status."""
+    cursor / queue-only fields). Used by ce_get_job_status — and
+    `tools/get_job_status.py` translates this shape into the SPEC § 3.7
+    wire contract.
+
+    Includes `corpus_id` extracted from args so the caller doesn't have
+    to round-trip the raw record. Excludes args itself (caller-private)
+    and cursor (internal state).
+    """
     backend = _backend()
     record = backend.get(job_id)
     if record is None:
         return None
+    args = record.get("args") or {}
     return {
         "id": record["id"],
         "kind": record["kind"],
+        "corpus_id": args.get("corpus_id"),
         "status": record["status"],
         "files_indexed": record.get("files_indexed", 0),
         "files_total": record.get("files_total"),

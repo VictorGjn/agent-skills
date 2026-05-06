@@ -3,4 +3,5 @@ __pycache__/
 cache/
 *.json
 !package.json
+!context-engineering/server-prod/vercel.json
 .DS_Store

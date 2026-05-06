@@ -261,8 +261,9 @@ def _initialize(payload: dict, request_id: Any) -> dict:
             "instructions": (
                 "CE MCP server (SPEC-mcp.md " + SPEC_VERSION + "). "
                 "7 tools per § 3 — call tools/list to enumerate. "
-                "All read + write tools are wired in v1; ce_index_github_repo "
-                "with async=true returns NOT_IMPLEMENTED until v1.1."
+                "All read + write tools are wired in v1.1; ce_index_github_repo "
+                "with async=true enqueues a chunked-indexing job — "
+                "poll progress via ce_get_job_status."
             ),
         },
     }

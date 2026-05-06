@@ -27,9 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import corpus_store, embed as embed_lib, errors, job_store, locks
+from .. import corpus_store, embed as embed_lib, errors, job_store, jobs, locks
 from ..auth import TokenInfo
-from . import upload_corpus  # reuse _acquire_lock / _release_lock for legacy path
 
 
 VALID_CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
@@ -131,12 +130,52 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     corpus_id = explicit_cid or derived_cid
 
     if is_async:
-        # v1 has no async backend — Cron + queue is v1.1.
-        return errors.tool_error(
-            "NOT_IMPLEMENTED",
-            "async=true is not implemented in v1; retry with async=false (or wait for v1.1)",
-            details={"phase": "4", "spec_section": "§ 3.4"},
-        )
+        # Phase B.3: enqueue + return job_id immediately. The Vercel Cron
+        # worker (api/cron/index_worker.py) picks the job up next tick and
+        # advances it through async_indexer.advance_one_tick — fetching
+        # the tree on the first tick, then ~50 files per subsequent tick
+        # until done. ce_get_job_status reads the live progress out of KV.
+        # Sync path stays as-is for repos that fit the 300s budget.
+        #
+        # Codex P2 round 4 on PR #51: async path is KEYWORD-ONLY in v1.1.
+        # The async_indexer's done branch unconditionally writes embedding=
+        # {provider:"none",dims:0} + embedded_count=0 (v1.2 will wire
+        # async embedding via a separate worker stage). So `embed=true`
+        # with async=true is always a doomed request — even when
+        # MISTRAL_API_KEY IS set, the corpus comes back keyword-only.
+        # Reject at enqueue with EMBED_NOT_SUPPORTED_ASYNC so callers
+        # don't quietly think they got semantic vectors. Subsumes the
+        # round-1 PROVIDER_UNAVAILABLE check (same outcome — reject
+        # embed=true on async).
+        if embed_request is True:
+            return _err(
+                "EMBED_NOT_SUPPORTED_ASYNC",
+                "async indexing is keyword-only in v1.1 (async embedding lands in v1.2). "
+                "For semantic vectors, use async=false (sync path); to acknowledge keyword-only "
+                "on async, pass embed=false or omit the embed argument.",
+            )
+        job_id = jobs.enqueue("index_github_repo", {
+            "repo": repo, "branch": branch,
+            "data_classification": classification,
+            "corpus_id": corpus_id,
+            "indexed_paths": indexed_paths,
+            "embed": embed_request,
+        }, owner=token.token_id)
+        response: dict[str, Any] = {
+            "job_id": job_id,
+            "corpus_id": corpus_id,
+            "status": "queued",
+            "poll_with": "ce_get_job_status",
+        }
+        # Be explicit when embed=null/auto + key IS set: caller would
+        # reasonably expect embeddings on the sync path, so warn that
+        # async is keyword-only in v1.1. Helps benchmark callers know
+        # not to score the resulting corpus on semantic-only metrics.
+        if embed_request is None and _resolve_mistral_key():
+            response["embed_skipped_reason"] = (
+                "async path is keyword-only in v1.1; async embedding lands in v1.2"
+            )
+        return response
 
     # Idempotency: if existing corpus has same source.commit_sha, no-op.
     # We don't have the source commit_sha until after fetching the tree, so

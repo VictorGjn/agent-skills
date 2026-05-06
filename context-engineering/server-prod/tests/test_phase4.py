@@ -343,14 +343,20 @@ def test_index_github_repo_invalid_repo_format(cache_dir):
     assert response["result"]["structuredContent"]["code"] == "INVALID_ARGUMENT"
 
 
-def test_index_github_repo_async_returns_not_implemented(cache_dir):
+def test_index_github_repo_async_enqueues_job(cache_dir):
+    """Phase B.3: async=true now enqueues a chunked-indexing job and
+    returns {job_id, corpus_id, status='queued'} for the cron worker to
+    pick up. Pre-B.3 this returned NOT_IMPLEMENTED."""
     response, status = _dispatch("ce_index_github_repo", {
         "repo": "owner/repo",
         "data_classification": "public",
         "async": True,
     })
-    assert status == 501
-    assert response["result"]["structuredContent"]["code"] == "NOT_IMPLEMENTED"
+    assert status == 200
+    structured = response["result"]["structuredContent"]
+    assert structured["status"] == "queued"
+    assert structured["corpus_id"] == "gh-owner-repo-main"
+    assert isinstance(structured["job_id"], str) and structured["job_id"]
 
 
 def test_index_github_repo_missing_classification(cache_dir):

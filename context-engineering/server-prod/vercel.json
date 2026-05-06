@@ -1,0 +1,30 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "buildCommand": null,
+  "installCommand": "pip install -r requirements.txt",
+  "outputDirectory": "public",
+  "regions": ["cdg1"],
+  "functions": {
+    "api/*.py": {
+      "runtime": "@vercel/python@4.3.0",
+      "maxDuration": 300
+    },
+    "api/cron/*.py": {
+      "runtime": "@vercel/python@4.3.0",
+      "maxDuration": 300
+    }
+  },
+  "crons": [
+    { "path": "/api/cron/index_worker", "schedule": "* * * * *" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "X-Robots-Tag", "value": "noindex" },
+        { "key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains" }
+      ]
+    }
+  ]
+}
