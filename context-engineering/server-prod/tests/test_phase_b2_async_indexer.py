@@ -344,24 +344,46 @@ def test_async_response_includes_poll_with_per_spec(monkeypatch):
     assert out["corpus_id"] == "gh-x-y-main"
 
 
-def test_async_embed_true_without_key_rejects_at_enqueue(monkeypatch):
-    """Codex P2: explicit embed=true without MISTRAL_API_KEY must error
-    rather than queue a doomed job that silently degrades to keyword."""
+def test_async_embed_true_rejected_regardless_of_key(monkeypatch):
+    """Codex P2 round 4 on PR #51: embed=true on async is ALWAYS rejected
+    in v1.1, even when MISTRAL_API_KEY is set. The async_indexer done
+    branch writes embedding=none + embedded_count=0 unconditionally
+    (async embedding is a v1.2 item), so embed=true would silently
+    produce a keyword-only corpus. Subsumes the round-1
+    PROVIDER_UNAVAILABLE check."""
     from _lib.tools import index_github_repo as _tool
     from _lib.auth import TokenInfo
+
+    # Case A: no key — same outcome as before, but now under
+    # EMBED_NOT_SUPPORTED_ASYNC (more precise error code than
+    # PROVIDER_UNAVAILABLE for this scenario).
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
-    out = _tool.handle({"repo": "x/y", "branch": "main",
-                        "data_classification": "public",
-                        "async": True, "embed": True},
-                       TokenInfo(token_id="t", role="admin",
-                                 data_classification_max="restricted"))
-    assert out.get("isError") is True
-    assert out["structuredContent"]["code"] == "PROVIDER_UNAVAILABLE"
+    out_no_key = _tool.handle(
+        {"repo": "x/y", "branch": "main", "data_classification": "public",
+         "async": True, "embed": True},
+        TokenInfo(token_id="t", role="admin",
+                  data_classification_max="restricted"))
+    assert out_no_key.get("isError") is True
+    assert out_no_key["structuredContent"]["code"] == "EMBED_NOT_SUPPORTED_ASYNC"
+
+    # Case B: key IS set — the regression Codex caught. Round-1 check
+    # would have let this through and silently downgraded to keyword.
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    out_with_key = _tool.handle(
+        {"repo": "x/y", "branch": "main", "data_classification": "public",
+         "async": True, "embed": True},
+        TokenInfo(token_id="t", role="admin",
+                  data_classification_max="restricted"))
+    assert out_with_key.get("isError") is True
+    assert out_with_key["structuredContent"]["code"] == "EMBED_NOT_SUPPORTED_ASYNC", (
+        "embed=true on async must be rejected even when MISTRAL_API_KEY is set "
+        "— async path is keyword-only in v1.1"
+    )
 
 
 def test_async_embed_auto_no_key_still_queues(monkeypatch):
     """embed=null/auto without key is fine — enqueues a keyword-only
-    indexing job (no PROVIDER_UNAVAILABLE since caller didn't insist)."""
+    indexing job (no error since caller didn't insist on embed)."""
     from _lib.tools import index_github_repo as _tool
     from _lib.auth import TokenInfo
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
@@ -371,6 +393,30 @@ def test_async_embed_auto_no_key_still_queues(monkeypatch):
                                  data_classification_max="restricted"))
     assert "isError" not in out
     assert out["status"] == "queued"
+    # No skipped_reason when there's no key — caller never expected embeddings.
+    assert "embed_skipped_reason" not in out
+
+
+def test_async_embed_auto_with_key_signals_skip_in_v1_1(monkeypatch):
+    """Codex P2 round 4 on PR #51: when embed=null/auto AND
+    MISTRAL_API_KEY is set, the caller would reasonably expect
+    embeddings (sync path would deliver them). The async path is
+    keyword-only in v1.1, so signal that explicitly via
+    embed_skipped_reason — bench callers can then avoid scoring the
+    corpus on semantic-only metrics."""
+    from _lib.tools import index_github_repo as _tool
+    from _lib.auth import TokenInfo
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    out = _tool.handle({"repo": "x/y", "branch": "main",
+                        "data_classification": "public", "async": True},
+                       TokenInfo(token_id="t", role="admin",
+                                 data_classification_max="restricted"))
+    assert "isError" not in out
+    assert out["status"] == "queued"
+    assert "embed_skipped_reason" in out, (
+        "auto-mode with key should signal that async path won't embed in v1.1"
+    )
+    assert "v1.1" in out["embed_skipped_reason"]
 
 
 def test_partial_corpora_under_different_suffix_dont_appear_in_list_metas(tmp_path, monkeypatch):
