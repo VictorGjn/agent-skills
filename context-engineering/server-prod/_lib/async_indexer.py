@@ -169,8 +169,13 @@ def _advance_one_tick_locked(
     # ── Branch 1: first tick (no cursor yet) ──
     if cursor_raw is None or candidates_raw is None:
         try:
+            # P2.3 (v1.2): use the async cap (10k) — the chunked indexer
+            # processes ~50 files / tick at 1-min cadence, so a 10k corpus
+            # finishes in ~3.5h of cron ticks. Sync wrapper still defaults
+            # to the smaller 2k cap to fit the 280s function budget.
             candidates = _gh.fetch_tree(owner, name, branch,
-                                         _resolve_github_token())
+                                         _resolve_github_token(),
+                                         max_files=_gh.MAX_FILES_TO_FETCH_ASYNC)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             if "404" in msg or "no tree" in msg:
