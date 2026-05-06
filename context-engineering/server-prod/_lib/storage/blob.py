@@ -40,7 +40,9 @@ DEFAULT_API_VERSION = "12"
 # Vercel Blob's `access` is REQUIRED on writes. Our corpora are not
 # user-shared assets — keep them private (token-gated). Public blobs are
 # served from a different host with no auth, which we don't want.
-DEFAULT_ACCESS = "private"
+# Override with BLOB_ACCESS=public for bench/eval setups that use a
+# public-mode store (created on Hobby plan or for shared eval corpora).
+DEFAULT_ACCESS = os.environ.get("BLOB_ACCESS", "private")
 
 
 class BlobError(Exception):

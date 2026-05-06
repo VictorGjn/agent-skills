@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Implement PolicyAuditLogger for Cilium\n\n## Objective\nCreate a `PolicyAuditLogger` in `pkg/policy/` that provides structured logging of policy\nevaluation decisions for audit and debugging purposes.\n\n## Requirements\n\n1. **Create `pkg/policy/audit_logger.go`** with:\n   - `PolicyAuditLogger` struct with configurable log level and output\n   - `LogDecision(identity, policy, verdict, reason)` method\n   - `LogEvaluation(ctx, policyKey, selectorCache, result)` method\n   - Integration with Cilium's existing logging framework (logrus/scopedLog)\n   - Support for JSON-structured audit log output\n\n2. **Create `pkg/policy/audit_logger_test.go`** with tests\n\n3. **Follow Cilium patterns**:\n   - Use `logfields` package for structured log fields\n   - Follow the `SelectorCache` interaction pattern\n   - Use `lock.Mutex` from `pkg/lock/` for thread safety\n\n## Key Reference Files\n- `pkg/policy/distillery.go` \u2014 policy decision evaluation\n- `pkg/policy/selectorcache.go` \u2014 SelectorCache for identity matching\n- `pkg/policy/types.go` \u2014 policy types and interfaces\n- `pkg/logging/logfields/logfields.go` \u2014 structured log field constants\n- `pkg/lock/lock.go` \u2014 Cilium's lock primitives\n\n## Success Criteria\n- PolicyAuditLogger struct and methods exist\n- Uses Cilium's logging framework (logrus/scopedLog)\n- Has LogDecision method with policy verdict logging\n- Thread-safe implementation\n- Test file exists with test functions\n",
+  "repo": "cilium/cilium",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-cilium-cilium-main",
+  "csb_task_id": "cilium-policy-audit-logger-feat-001"
+}

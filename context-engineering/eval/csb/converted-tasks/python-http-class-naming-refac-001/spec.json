@@ -1,0 +1,8 @@
+{
+  "description": "Standardize HTTP Request class naming across Django, Flask, and requests libraries\n\nThe Python web ecosystem has inconsistent naming for HTTP request classes:\n- Django uses HttpRequest (mixed case)\n- Flask uses Request (generic)\n- requests library uses Request and PreparedRequest\n\nRename the primary request class in each library to HTTPRequest for consistency:\n1. In django/django/http/request.py: rename HttpRequest to HTTPRequest and update all references\n2. In flask/src/flask/wrappers.py: rename Request to HTTPRequest and update all references\n3. In requests/src/requests/models.py: rename Request to HTTPRequest and update all references\n\nApply changes across all three codebases under /csb_sdlc_crossrepo/src/. Update imports, type annotations, and docstrings that reference the old names.\n\n**Output requirement:** When you are done, generate a unified diff of all your changes and save it to `/logs/agent/patch.diff`. You can do this with:\n```bash\ncd /csb_sdlc_crossrepo/src && for d in */; do (cd \"$d\" && git diff HEAD); done > /logs/agent/patch.diff\n```\nIf you prefer, you can also just make your changes directly to the source files \u2014 the evaluator will auto-collect diffs from the git repositories as a fallback.\n",
+  "repo": "sg-evals/django--674eda1c",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-sg-evals-django--674eda1c-main",
+  "csb_task_id": "python-http-class-naming-refac-001"
+}

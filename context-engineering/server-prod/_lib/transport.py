@@ -333,11 +333,22 @@ def _tools_call(payload: dict, token: TokenInfo, request_id: Any) -> tuple[dict,
     try:
         out = handler(args, token)
     except Exception as exc:  # noqa: BLE001 — last-ditch
+        # Diagnostic: include exception message + .code/.status (BlobError /
+        # KVError carry useful context) so callers don't have to dig through
+        # runtime logs to diagnose a transient backend failure.
+        details: dict[str, object] = {"exception_type": type(exc).__name__}
+        msg = str(exc)
+        if msg:
+            details["exception_message"] = msg[:500]
+        for attr in ("code", "status", "body"):
+            v = getattr(exc, attr, None)
+            if v is not None:
+                details[f"exception_{attr}"] = v if not isinstance(v, (bytes, bytearray)) else v[:200].decode("utf-8", "replace")
         err = errors.protocol_error(
             "INTERNAL",
-            f"unhandled exception in tool {name}: {type(exc).__name__}",
+            f"unhandled exception in tool {name}: {type(exc).__name__}: {msg}"[:300],
             request_id=request_id,
-            details={"exception_type": type(exc).__name__},
+            details=details,
         )
         return err, err.pop("_http_status")
 

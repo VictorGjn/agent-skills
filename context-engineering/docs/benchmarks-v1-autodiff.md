@@ -1,0 +1,59 @@
+# Bench diff
+
+_All-tasks view (n=union of task IDs); reachable-only view (n=24 = intersection of non-error task IDs across all 4 runs)._
+
+## Aggregate metrics — all tasks (loose)
+
+| metric | C1 | C2 | C3 | C4 | Δ (vs C1) |
+|---|---|---|---|---|---|
+| file_recall | 0.000 (0.000–0.000) | 0.035 (0.000–0.078) | 0.035 (0.000–0.078) | 0.035 (0.000–0.078) | +0.035 |
+| precision_at_k | 0.000 (0.000–0.000) | 0.020 (0.003–0.046) | 0.020 (0.003–0.046) | 0.020 (0.003–0.046) | +0.020 |
+| recall_at_k | 0.000 (0.000–0.000) | 0.035 (0.000–0.078) | 0.035 (0.000–0.078) | 0.035 (0.000–0.078) | +0.035 |
+| f1_at_k | 0.000 (0.000–0.000) | 0.022 (0.001–0.051) | 0.022 (0.001–0.051) | 0.022 (0.001–0.051) | +0.022 |
+
+## Aggregate metrics — reachable subset (n=24, strict)
+
+| metric | C1 | C2 | C3 | C4 | Δ (vs C1) |
+|---|---|---|---|---|---|
+| file_recall | 0.000 (0.000–0.000) | 0.102 (0.001–0.220) | 0.102 (0.001–0.220) | 0.102 (0.001–0.220) | +0.102 |
+| precision_at_k | 0.000 (0.000–0.000) | 0.058 (0.008–0.125) | 0.058 (0.008–0.125) | 0.058 (0.008–0.125) | +0.058 |
+| recall_at_k | 0.000 (0.000–0.000) | 0.102 (0.001–0.220) | 0.102 (0.001–0.220) | 0.102 (0.001–0.220) | +0.102 |
+| f1_at_k | 0.000 (0.000–0.000) | 0.065 (0.002–0.146) | 0.065 (0.002–0.146) | 0.065 (0.002–0.146) | +0.065 |
+
+## Per-task deltas (top 20 by |Δ file_recall|)
+
+| task_id | C1 | C2 | C3 | C4 | Δ |
+|---|---|---|---|---|---|
+| django-repo-scoped-access-001 | 0.000 | 1.000 | 1.000 | 1.000 | +1.000 |
+| flipt-degraded-context-fix-001 | 0.000 | 0.750 | 0.750 | 0.750 | +0.750 |
+| flipt-repo-scoped-access-001 | 0.000 | 0.667 | 0.667 | 0.667 | +0.667 |
+| flipt-dep-refactor-001 | 0.000 | 0.033 | 0.033 | 0.033 | +0.033 |
+| ansible-abc-imports-fix-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| aspnetcore-code-review-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| beam-pipeline-builder-refac-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| calcom-code-review-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| camel-fix-protocol-feat-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| ceph-rgw-auth-secure-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| cilium-policy-audit-logger-feat-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| cilium-policy-quota-feat-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| curl-http3-priority-feat-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-audit-trail-implement-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-cross-team-boundary-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-legacy-dep-vuln-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-modelchoice-fk-fix-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-rate-limit-middleware-feat-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-role-based-access-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+| django-select-for-update-fix-001 | 0.000 | 0.000 | 0.000 | 0.000 | +0.000 |
+
+## Hypothesis verdicts
+
+_Computed on reachable subset (n=24)_
+
+### H1 — codestral > keyword
+file_recall: C1=0.000, C2=0.102, Δ=+0.102 → **PASS ✓**
+
+### H2-IR — MMR changes top-K composition
+Jaccard<0.7 on 17/24 = 70.8% → **PASS ✓**
+
+### H4 / H7
+Reward + budget-sweep gates require Haiku (Phase 1 / Phase 3 of bench plan). IR-only path can't decide them.

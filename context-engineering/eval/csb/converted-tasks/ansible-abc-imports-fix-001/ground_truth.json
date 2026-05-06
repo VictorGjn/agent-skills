@@ -1,0 +1,4 @@
+[
+  "lib/ansible/module_utils/common/_collections_compat.py",
+  "test/lib/ansible_test/_util/controller/sanity/pylint/plugins/unwanted.py"
+]

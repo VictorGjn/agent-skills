@@ -52,10 +52,37 @@ def pair_by_task(runs: list[list[dict]]) -> dict[str, list[dict | None]]:
     return {tid: [idx.get(tid) for idx in by_run] for tid in sorted(all_ids)}
 
 
-def metric_means(records: list[dict], metric: str = "file_recall") -> float:
+def metric_means(records: list[dict], metric: str = "file_recall",
+                  reachable_ids: set[str] | None = None) -> float:
+    """Mean of a metric across records.
+
+    `reachable_ids`, when provided, restricts the mean to tasks in that set —
+    typically the intersection of non-error task IDs across all runs (see
+    `compute_reachable_ids`). Use this to avoid the all-N denominator pulling
+    means toward zero on bench runs where many tasks have missing corpora.
+    """
     vals = [r["metrics"][metric] for r in records
-             if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0]
+             if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0
+             and (reachable_ids is None or r.get("task_id") in reachable_ids)]
     return statistics.fmean(vals) if vals else 0.0
+
+
+def compute_reachable_ids(runs: list[list[dict]]) -> set[str]:
+    """Intersection of non-error task IDs across every run.
+
+    A task is "reachable" when every config produced a real result (no `error`
+    field in the bench record). Tasks where ANY run errored — typically because
+    the corpus didn't exist or fetch failed — are excluded so config means
+    compare on the same denominator.
+    """
+    if not runs:
+        return set()
+    sets: list[set[str]] = []
+    for run in runs:
+        ok = {r["task_id"] for r in run
+              if "task_id" in r and not r.get("error")}
+        sets.append(ok)
+    return set.intersection(*sets)
 
 
 def jaccard_top_k(a: list[str], b: list[str], k: int = 5) -> float:
@@ -109,8 +136,15 @@ def render_per_task_table(paired: dict, names: list[str], top_n: int | None = No
     return "\n".join(out)
 
 
-def render_aggregate_table(runs: list[list[dict]], names: list[str]) -> str:
-    """Aggregate file_recall + P@5 + F1@5 means across runs, with bootstrap CIs."""
+def render_aggregate_table(runs: list[list[dict]], names: list[str],
+                            reachable_ids: set[str] | None = None) -> str:
+    """Aggregate file_recall + P@5 + F1@5 means across runs, with bootstrap CIs.
+
+    When `reachable_ids` is provided, means are computed only over those task
+    IDs (the intersection of non-error tasks across runs). This is the
+    bench-honest reading — without it, missing-corpus errors dilute means
+    by counting zero-result tasks as bench failures rather than excluding them.
+    """
     metrics = ["file_recall", "precision_at_k", "recall_at_k", "f1_at_k"]
     out = ["| metric | " + " | ".join(names) + " | Δ (vs " + names[0] + ") |",
            "|---|" + ("---|" * (len(names) + 1))]
@@ -119,7 +153,8 @@ def render_aggregate_table(runs: list[list[dict]], names: list[str]) -> str:
         cells = []
         for i, run in enumerate(runs):
             vals = [r["metrics"][m] for r in run
-                     if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0]
+                     if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0
+                     and (reachable_ids is None or r.get("task_id") in reachable_ids)]
             mean = statistics.fmean(vals) if vals else 0.0
             ci = bootstrap_ci(vals)
             cells.append(f"{mean:.3f} ({ci[0]:.3f}–{ci[1]:.3f})")
@@ -128,7 +163,8 @@ def render_aggregate_table(runs: list[list[dict]], names: list[str]) -> str:
         # Delta vs baseline (rightmost only — single most useful summary).
         # Codex P2 fix: guard against empty filtered list — fmean([]) raises.
         last_vals = [r["metrics"][m] for r in runs[-1]
-                      if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0]
+                      if r.get("metrics") and r["metrics"].get("n_truth", 0) > 0
+                      and (reachable_ids is None or r.get("task_id") in reachable_ids)]
         last_mean = statistics.fmean(last_vals) if last_vals else 0.0
         delta = last_mean - base_means[m]
         cells.append(f"{delta:+.3f}")
@@ -136,7 +172,8 @@ def render_aggregate_table(runs: list[list[dict]], names: list[str]) -> str:
     return "\n".join(out)
 
 
-def evaluate_hypotheses(runs: list[list[dict]], names: list[str]) -> str:
+def evaluate_hypotheses(runs: list[list[dict]], names: list[str],
+                         reachable_ids: set[str] | None = None) -> str:
     """Spit out per-hypothesis verdict from plan/codescalebench-bench-plan.md.
 
     H1: codestral > keyword on file recall. Pass: ≥+10% absolute (≥+0.10).
@@ -146,16 +183,23 @@ def evaluate_hypotheses(runs: list[list[dict]], names: list[str]) -> str:
 
     Configs are inferred from `names`: we try to identify {C1, C2, C3, C4} by
     convention (run files named accordingly).
+
+    When `reachable_ids` is provided, H1 means and H2-IR Jaccard fractions are
+    computed only on the reachable subset. Without this, missing-corpus
+    failures dilute means and inflate denominators against the documented
+    bench plan gates.
     """
     by_name = {n: r for n, r in zip(names, runs)}
 
     out = ["## Hypothesis verdicts\n"]
+    if reachable_ids is not None:
+        out.append(f"_Computed on reachable subset (n={len(reachable_ids)})_\n")
 
     # H1: ce-codestral (C2) vs ce-keyword (C1) → Δ file_recall ≥ +0.10
     if "C1" in by_name and "C2" in by_name:
         c1, c2 = by_name["C1"], by_name["C2"]
-        c1_mean = metric_means(c1)
-        c2_mean = metric_means(c2)
+        c1_mean = metric_means(c1, reachable_ids=reachable_ids)
+        c2_mean = metric_means(c2, reachable_ids=reachable_ids)
         delta = c2_mean - c1_mean
         verdict = "PASS ✓" if delta >= 0.10 else f"FAIL ✗ (Δ={delta:+.3f}, gate ≥+0.10)"
         out.append(f"### H1 — codestral > keyword\nfile_recall: C1={c1_mean:.3f}, C2={c2_mean:.3f}, Δ={delta:+.3f} → **{verdict}**\n")
@@ -165,8 +209,10 @@ def evaluate_hypotheses(runs: list[list[dict]], names: list[str]) -> str:
         paired = pair_by_task([by_name["C2"], by_name["C3"]])
         rolled = 0
         total = 0
-        for _tid, recs in paired.items():
+        for tid, recs in paired.items():
             if recs[0] is None or recs[1] is None:
+                continue
+            if reachable_ids is not None and tid not in reachable_ids:
                 continue
             j = jaccard_top_k(recs[0].get("retrieved", []), recs[1].get("retrieved", []), k=5)
             if j < 0.7:
@@ -190,10 +236,22 @@ def main() -> int:
     p.add_argument("--output", type=Path, default=Path("bench-report.md"))
     p.add_argument("--top-n", type=int, default=20,
                    help="Top-N tasks by abs delta to include in per-task table")
+    p.add_argument("--reachable-only", action="store_true",
+                   help="Restrict aggregate means + H1/H2 verdicts to the "
+                        "intersection of non-error task IDs across all runs. "
+                        "Recommended when bench runs include tasks whose "
+                        "corpus failed to fetch — without this, missing-corpus "
+                        "errors dilute means and produce contradictory verdicts.")
+    p.add_argument("--both-views", action="store_true",
+                   help="Emit both the all-tasks view (loose, dilutes by missing) "
+                        "and the reachable-only view (strict, bench-honest) in the "
+                        "same report. Useful when reviewers want to see both readings.")
     args = p.parse_args()
 
     if len(args.runs) != len(args.names):
         p.error("--runs and --names must have equal length")
+    if args.reachable_only and args.both_views:
+        p.error("--reachable-only and --both-views are mutually exclusive")
 
     runs: list[list[dict]] = []
     summaries: list[dict] = []
@@ -203,15 +261,36 @@ def main() -> int:
         summaries.append(summary)
 
     paired = pair_by_task(runs)
+    reachable = compute_reachable_ids(runs)
+    total = sum(len(set(r["task_id"] for r in run if "task_id" in r)) for run in runs) // max(len(runs), 1)
 
-    md = ["# Bench diff", "", "## Aggregate metrics", ""]
-    md.append(render_aggregate_table(runs, args.names))
-    md.append("")
+    md = ["# Bench diff", ""]
+    if args.both_views:
+        md.append(f"_All-tasks view (n=union of task IDs); reachable-only view (n={len(reachable)} = intersection of non-error task IDs across all {len(runs)} runs)._")
+        md.append("")
+        md.append("## Aggregate metrics — all tasks (loose)")
+        md.append("")
+        md.append(render_aggregate_table(runs, args.names))
+        md.append("")
+        md.append(f"## Aggregate metrics — reachable subset (n={len(reachable)}, strict)")
+        md.append("")
+        md.append(render_aggregate_table(runs, args.names, reachable_ids=reachable))
+        md.append("")
+    else:
+        view_label = f"reachable subset (n={len(reachable)})" if args.reachable_only else "all tasks"
+        md.append(f"_Aggregate view: {view_label}._")
+        md.append("")
+        md.append("## Aggregate metrics")
+        md.append("")
+        rids = reachable if args.reachable_only else None
+        md.append(render_aggregate_table(runs, args.names, reachable_ids=rids))
+        md.append("")
     md.append(f"## Per-task deltas (top {args.top_n} by |Δ file_recall|)")
     md.append("")
     md.append(render_per_task_table(paired, args.names, top_n=args.top_n))
     md.append("")
-    md.append(evaluate_hypotheses(runs, args.names))
+    rids_for_hyp = reachable if (args.reachable_only or args.both_views) else None
+    md.append(evaluate_hypotheses(runs, args.names, reachable_ids=rids_for_hyp))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(md), encoding="utf-8")

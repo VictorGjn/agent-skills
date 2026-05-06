@@ -1,0 +1,8 @@
+[
+  "src/components/views/right_panel/RoomHeaderButtons.tsx",
+  "src/components/views/right_panel/PinnedMessagesCard.tsx",
+  "src/settings/SettingsStore.ts",
+  "src/stores/notifications/ThreadsRoomNotificationState.ts",
+  "src/stores/notifications/NotificationColor.ts",
+  "src/stores/right-panel/RightPanelStore.ts"
+]
