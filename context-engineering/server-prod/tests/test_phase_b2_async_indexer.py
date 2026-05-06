@@ -526,6 +526,65 @@ def test_get_job_status_translates_failed_job_with_error_object(monkeypatch):
     jobs.set_backend(None)
 
 
+def test_done_tick_marks_complete_even_when_cleanup_fails(
+    vendor_indexer, fake_kv, cache_dir, monkeypatch,
+):
+    """Engineer-review P1 on PR #51: done branch must call jobs.complete
+    BEFORE the kv.delete cleanup. Previously cleanup ran first; if any
+    kv.delete raised (Upstash 5xx), the exception propagated past
+    jobs.complete, the cron worker's outer except called fail(retry=True),
+    and the next tick re-entered branch 2 with a deleted partial blob —
+    infinite retry while the durable corpus existed.
+
+    Fix: complete first, then per-call try/except on each cleanup step.
+    """
+    from _lib import async_indexer
+    from _lib.storage import kv as kv_module
+
+    # Force cursor cleanup to fail. The done tick must STILL mark complete.
+    real_delete = kv_module.delete
+    delete_calls = {"n": 0}
+
+    def boom_on_cursor_cleanup(key):
+        delete_calls["n"] += 1
+        if "cursor" in key:
+            raise RuntimeError("simulated upstash 503 during cleanup")
+        return real_delete(key)
+
+    job_id = jobs.enqueue("index_github_repo",
+                          {"repo": "x/y", "branch": "main",
+                           "data_classification": "public"},
+                          owner="t-1")
+    # Tick 1: plant state
+    job = jobs.claim_next()
+    r1 = async_indexer.advance_one_tick(job)
+    assert r1["status"] == "advanced"
+
+    # Tick 2: arm the boom on cleanup, then run done branch
+    monkeypatch.setattr(kv_module, "delete", boom_on_cursor_cleanup)
+    job = jobs.claim_next()
+    r2 = async_indexer.advance_one_tick(job)
+
+    # Job must be complete despite the cleanup failure
+    assert r2["status"] == "complete", (
+        f"done tick must mark complete even when cleanup throws. got: {r2}"
+    )
+    rec = jobs.status(job_id)
+    assert rec is not None
+    assert rec["status"] == "complete"
+    assert rec["commit_sha"] is not None
+
+    # Final corpus durable
+    final = corpus_store.load_corpus("gh-x-y-main")
+    assert final is not None
+    assert final.meta.file_count == 3
+
+    # candidates was cleaned up (didn't fail), cursor leaked (TTLs in 7d) —
+    # acceptable; the success criterion is that the durable corpus +
+    # complete-state are atomic from the client's view.
+    monkeypatch.setattr(kv_module, "delete", real_delete)
+
+
 def test_first_tick_partial_blob_failure_leaves_no_orphan_kv_state(
     vendor_indexer, fake_kv, cache_dir, monkeypatch,
 ):

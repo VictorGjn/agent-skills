@@ -229,7 +229,22 @@ def claim_next() -> dict | None:
             continue
         if record["status"] == "queued":
             record["status"] = "running"
-            record["started_at"] = _now()
+            # Engineer-review P1 on PR #51: clear last-attempt error fields
+            # on the queued→running transition. fail(retry=True) records
+            # error_code/error_message + sets status='queued'; without
+            # clearing on reclaim, a healthy retry would surface in the
+            # wire shape as {status:"running", error:{code,message}} and
+            # any client keying off `error != null` would treat the live
+            # job as broken. Cleared on reclaim — the error is preserved
+            # in the diagnostics window between fail(retry) and the next
+            # tick, but evaporates the moment the worker picks it up.
+            record["error_code"] = None
+            record["error_message"] = None
+            # Set started_at on FIRST claim only — preserve original timestamp
+            # on retry-reclaim so wire-side started_at reflects when work
+            # actually began, not the latest cycle.
+            if record.get("started_at") is None:
+                record["started_at"] = _now()
             backend.put(job_id, record)
         return record
     return None

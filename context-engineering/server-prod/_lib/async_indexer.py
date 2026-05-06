@@ -249,7 +249,13 @@ def _advance_one_tick_locked(
     time_total = cursor.get("time_total_s", 0.0)
 
     # Cross-instance write lock — same primitive that upload_corpus uses.
-    held = locks.acquire_corpus_write_lock(corpus_id)
+    # Engineer-review P1 on PR #51: TTL must cover the full tick budget
+    # (220s) plus headroom for partial-blob round-trip. Default 90s is
+    # too short — a slow GitHub fetch could let the lock TTL expire mid-
+    # tick, allowing a concurrent ce_upload_corpus on the same corpus_id
+    # to legitimately acquire the lock and start writing while we still
+    # hold our (now-released) reference. Match the per-job lock at 300s.
+    held = locks.acquire_corpus_write_lock(corpus_id, ttl_seconds=300)
     if held is None:
         # Another instance is currently writing. Re-queue and try again
         # next tick. (Shouldn't happen in practice — workers serialize via
@@ -368,17 +374,33 @@ def _advance_one_tick_locked(
                 json.dumps(final_obj, separators=(",", ":")).encode("utf-8"),
             )
 
-            # Cleanup KV state + partial corpus blob
-            kv.delete(_cursor_key(job_id))
-            kv.delete(_candidates_key(job_id))
-            try:
-                backend.delete(partial_key)
-            except Exception:  # noqa: BLE001 — cleanup best-effort
-                pass
-
+            # Engineer-review P1 on PR #51: complete the job FIRST
+            # (durable corpus is the success criterion), THEN clean up.
+            # Previously cleanup ran first; if any kv.delete raised
+            # (Upstash 5xx) the exception unwound past jobs.complete,
+            # the cron worker's outer except called fail(retry=True),
+            # next tick saw cursor+candidates still in KV → entered
+            # branch 2 → partial_key already deleted → infinite retry
+            # loop while the durable corpus existed.
             jobs.complete(job_id, commit_sha=commit_sha,
                           file_count=manifest["totalFiles"],
                           embedded_count=0)
+
+            # Cleanup is best-effort. Each call individually try/except'd
+            # so a single Upstash/Blob hiccup doesn't strand the others.
+            # Anything left behind TTLs out at JOB_TTL_SECONDS (7 days).
+            try:
+                kv.delete(_cursor_key(job_id))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                kv.delete(_candidates_key(job_id))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                backend.delete(partial_key)
+            except Exception:  # noqa: BLE001
+                pass
             return {
                 "job_id": job_id, "status": "complete",
                 "corpus_id": corpus_id, "commit_sha": commit_sha,

@@ -15,6 +15,7 @@ could drain the queue.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -42,7 +43,12 @@ def _authenticate(headers) -> bool:
     if not expected:
         return False
     auth = headers.get("Authorization", "")
-    return auth == f"Bearer {expected}"
+    # Engineer-review P2 on PR #51: hmac.compare_digest is constant-time;
+    # a vanilla `==` leaks token length / prefix-match position via
+    # timing differences. The endpoint is public-routable, so any
+    # publicly-observable timing oracle is exploitable in principle.
+    return hmac.compare_digest(auth.encode("utf-8"),
+                                f"Bearer {expected}".encode("utf-8"))
 
 
 def _process_one() -> dict:
