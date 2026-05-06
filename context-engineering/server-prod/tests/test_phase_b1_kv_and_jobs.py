@@ -328,21 +328,29 @@ def test_jobs_fail_without_retry_does_not_requeue(_isolate_jobs_backend):
     assert state["error_code"] == "SOURCE_NOT_FOUND"
 
 
-def test_jobs_fail_with_retry_requeues(_isolate_jobs_backend):
+def test_jobs_fail_with_retry_requeues_as_queued(_isolate_jobs_backend):
+    """Codex P2 round 3 on PR #51: retry=True must NOT terminalize the
+    record (status='failed'). claim_next only flips queued→running, so
+    a 'failed'-status record would stay 'failed' from the wire view —
+    clients polling ce_get_job_status would see a terminal failure for
+    a job the worker is happily retrying. Fix: retry=True records error
+    diagnostics but keeps status='queued', no completed_at."""
     job_id = jobs.enqueue("index_github_repo", {"repo": "x/y"}, owner="t-1")
     jobs.claim_next()
     jobs.fail(job_id, code="EMBED_HTTP", message="Mistral 503", retry=True)
     assert _isolate_jobs_backend.queue_len() == 1
-    # Status reflects the failure so far; next claim resets to running
     state = jobs.status(job_id)
     assert state is not None
-    assert state["status"] == "failed"
-    # Reclaim — the retry runs
+    assert state["status"] == "queued", "retry=True must not terminalize"
+    assert state["error_code"] == "EMBED_HTTP"
+    assert state["error_message"] == "Mistral 503"
+    assert state["completed_at"] is None, "retry=True must not set completed_at"
+    # Reclaim — claim_next flips queued→running, retry continues normally
     re_claimed = jobs.claim_next()
     assert re_claimed is not None
-    # Note: claim_next currently only re-marks running when status == queued.
-    # For retry-claimed jobs, it returns the existing record without state change.
-    # Worker can detect retry via error_code presence + status='failed'.
+    assert re_claimed["status"] == "running"
+    # The error fields are still attached as last-attempt diagnostics —
+    # they get cleared on next successful complete()/update_progress().
 
 
 def test_jobs_status_returns_none_for_unknown_id(_isolate_jobs_backend):

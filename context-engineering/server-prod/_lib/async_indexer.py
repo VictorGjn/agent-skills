@@ -187,19 +187,13 @@ def _advance_one_tick_locked(
             candidates = [c for c in candidates
                           if any(c.get("path", "").startswith(p) for p in indexed_paths)]
 
-        kv.set(_candidates_key(job_id),
-               json.dumps(candidates, separators=(",", ":")),
-               ex_seconds=jobs.JOB_TTL_SECONDS)
-        kv.set(_cursor_key(job_id),
-               json.dumps({"next_idx": 0, "files_indexed_so_far": 0,
-                           "candidates_count": len(candidates),
-                           "time_total_s": 0.0}, separators=(",", ":")),
-               ex_seconds=jobs.JOB_TTL_SECONDS)
-
-        # Initialize empty partial corpus. Stored under a Blob key with
-        # `.partial.json` suffix (NOT a corpus_id) so it can't collide
-        # with user-namespaced corpora and isn't subject to the 128-char
-        # corpus_id cap (Codex P2 on PR #51).
+        # Codex P1 round 3 on PR #51: write the partial-corpus Blob FIRST,
+        # then the KV cursor + candidates. If put_bytes throws (transient
+        # Blob failure), neither cursor nor candidates land in KV, so the
+        # next tick re-enters first-tick cleanly and retries fetch_tree +
+        # blob init. The previous order set durable cursor state pointing
+        # at a non-existent partial — every subsequent tick would skip
+        # initialization and fail with `partial_missing` until KV TTL.
         empty_partial = {
             "_meta": {
                 "corpus_id": corpus_id,  # the eventual corpus, not a partial alias
@@ -223,6 +217,20 @@ def _advance_one_tick_locked(
             partial_key,
             json.dumps(empty_partial, separators=(",", ":")).encode("utf-8"),
         )
+
+        # Now that the partial blob is durable, plant cursor + candidates.
+        # Order matters: candidates first (cheap), cursor last — cursor
+        # presence is what flips a job into the chunk-processing branch,
+        # so it must be the final write so we never see cursor without
+        # candidates.
+        kv.set(_candidates_key(job_id),
+               json.dumps(candidates, separators=(",", ":")),
+               ex_seconds=jobs.JOB_TTL_SECONDS)
+        kv.set(_cursor_key(job_id),
+               json.dumps({"next_idx": 0, "files_indexed_so_far": 0,
+                           "candidates_count": len(candidates),
+                           "time_total_s": 0.0}, separators=(",", ":")),
+               ex_seconds=jobs.JOB_TTL_SECONDS)
 
         jobs.update_progress(job_id, cursor=0, files_indexed=0,
                              files_total=len(candidates))

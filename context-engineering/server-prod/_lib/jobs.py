@@ -278,23 +278,42 @@ def complete(job_id: str, *, commit_sha: str, file_count: int,
 
 
 def fail(job_id: str, *, code: str, message: str, retry: bool = False) -> None:
-    """Mark a job failed. With retry=True the worker will requeue; the
-    record stays in 'failed' state until claimed again, when it transitions
-    back to 'running'.
+    """Mark a job failed (terminal) or queued-for-retry (non-terminal).
+
+    Codex P2 round 3 on PR #51: with retry=True we must NOT set
+    status='failed'. claim_next() only flips queued→running, so a
+    failed-then-requeued record would stay in status='failed' from the
+    client's view (ce_get_job_status returns 'failed') even while the
+    worker is happily retrying. Clients that stop polling on first
+    'failed' would treat recoverable jobs as terminal failures.
+
+    Behavior:
+    - retry=False: status='failed', completed_at set (terminal).
+    - retry=True: status='queued', completed_at NOT set, error_code +
+      error_message recorded as last-attempt diagnostics. Push back to
+      queue. claim_next picks it up and flips queued→running normally.
     """
     backend = _backend()
     record = backend.get(job_id)
     if record is None:
         return
-    record.update({
-        "status": "failed",
-        "error_code": code,
-        "error_message": message,
-        "completed_at": _now(),
-    })
-    backend.put(job_id, record)
     if retry:
+        record.update({
+            "status": "queued",  # non-terminal — claim_next will run() it
+            "error_code": code,
+            "error_message": message,
+            # NOT setting completed_at — job isn't finished
+        })
+        backend.put(job_id, record)
         backend.queue_push(job_id)
+    else:
+        record.update({
+            "status": "failed",
+            "error_code": code,
+            "error_message": message,
+            "completed_at": _now(),
+        })
+        backend.put(job_id, record)
 
 
 def status(job_id: str) -> dict | None:

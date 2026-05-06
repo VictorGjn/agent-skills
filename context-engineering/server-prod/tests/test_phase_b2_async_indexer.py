@@ -480,6 +480,59 @@ def test_get_job_status_translates_failed_job_with_error_object(monkeypatch):
     jobs.set_backend(None)
 
 
+def test_first_tick_partial_blob_failure_leaves_no_orphan_kv_state(
+    vendor_indexer, fake_kv, cache_dir, monkeypatch,
+):
+    """Codex P1 round 3 on PR #51: order matters — write partial blob
+    BEFORE saving cursor + candidates to KV. If put_bytes throws (e.g.
+    transient Blob 5xx), neither cursor nor candidates should land,
+    so the next tick re-enters first-tick cleanly. The previous order
+    (KV first, blob last) would persist a cursor pointing at a
+    non-existent partial — every subsequent tick would skip
+    initialization and fail with `partial_missing` until KV TTL."""
+    from _lib import async_indexer
+
+    # Force corpus_store backend put_bytes to fail
+    backend = corpus_store._backend()
+    boom_count = {"n": 0}
+    real_put_bytes = backend.put_bytes
+
+    def boom(key, data):
+        boom_count["n"] += 1
+        raise RuntimeError("simulated transient blob 502")
+
+    monkeypatch.setattr(backend, "put_bytes", boom)
+
+    job_id = jobs.enqueue("index_github_repo",
+                          {"repo": "x/y", "branch": "main",
+                           "data_classification": "public"},
+                          owner="t-1")
+    job = jobs.claim_next()
+    with pytest.raises(RuntimeError, match="simulated transient blob"):
+        async_indexer.advance_one_tick(job)
+
+    # NEITHER cursor NOR candidates should be in KV — first-tick must
+    # re-enter cleanly on retry, not get stuck in chunk-processing branch.
+    store, _ = fake_kv
+    assert async_indexer._candidates_key(job_id) not in store, (
+        "candidates leaked into KV despite blob-write failure"
+    )
+    assert async_indexer._cursor_key(job_id) not in store, (
+        "cursor leaked into KV despite blob-write failure — next tick "
+        "would skip first-tick init and fail with partial_missing forever"
+    )
+
+    # Restore + retry should now succeed (blob write goes through, KV
+    # state plants normally).
+    monkeypatch.setattr(backend, "put_bytes", real_put_bytes)
+    jobs.requeue(job_id)
+    job2 = jobs.claim_next()
+    result = async_indexer.advance_one_tick(job2)
+    assert result["status"] == "advanced"
+    assert async_indexer._candidates_key(job_id) in store
+    assert async_indexer._cursor_key(job_id) in store
+
+
 def test_partial_blob_key_safe_for_max_length_corpus_id():
     """Codex P2 on PR #51: prefix-style `partial-<id>` could push 121+
     char corpus_ids past the 128-char cap. New suffix-style key
