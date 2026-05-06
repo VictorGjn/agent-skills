@@ -205,6 +205,49 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
 
 **For SPEC readers**: §3.1–§3.7 describe the production v1 target. The stub implements §3.1 / §3.5 / §3.6 only. The local stdio MCP implements a parallel surface (different names, larger scope) called out in §10b.
 
+### 3.0.5 Coverage transparency (cross-cutting response field)
+
+**Why this exists**: a recall@5 of 0.30 means very different things when the
+corpus had embeddings for 30% vs 100% of its files. Consumers building
+benchmarks, dashboards, or quality alerts can't distinguish "we found 30%
+of the right files" from "we only had retrieval signal for 30% of the
+corpus and found everything we could." Pattern adopted from scix-agent's
+typed-edge tools, where every response carries a `coverage` block.
+
+**Contract**: read tools (`ce_pack_context`, `ce_find_relevant_files`,
+and any future read tool) MUST include a top-level `coverage` object on
+the response when ranking actually ran (i.e. on success, not on errors
+that short-circuit before the engine).
+
+```json
+"coverage": {
+  "corpus_size_files": 300,           // _meta.file_count for the corpus
+  "ranked_with": "semantic",          // mode actually used by the engine
+  "ranked_with_lane": "live",         // 'live' | 'static' | 'fallback' (see § 11.5)
+  "files_eligible_for_mode": 300,     // had embeddings (semantic) or any tokens (keyword)
+  "files_skipped_unembedded": 0,      // for semantic on a partial-embedding corpus
+  "fallback_to_keyword": false,       // true when mode=semantic but engine ran keyword
+  "trace_id": "<request-uuid>"        // server-assigned; useful for log lookup
+}
+```
+
+In multi-corpus mode, `coverage` aggregates: `corpus_size_files` is the
+total across all corpora; `files_eligible_for_mode` is the union; per-
+corpus breakdown is available in the `_per_corpus` sub-object when
+`why: true`.
+
+**Wire compatibility**: `coverage` is a NEW optional top-level field;
+clients that don't read it are unaffected. v1 servers SHOULD emit it as
+soon as they have the data (Phase A / B of v1.1 plan); v1.0-rc4 servers
+that skip it remain spec-conformant for the read shape but consumers
+won't be able to compute "eligible recall" against them.
+
+**Bench harness implication**: `eligible_recall = correct_files_found /
+min(top_k, files_eligible_for_mode)` is the comparable cross-config
+metric. Today's `file_recall` over-estimates configs with full coverage
+relative to partial-coverage configs (or vice-versa); coverage closes
+the gap.
+
 ### 3.1 `ce_pack_context` (alias: `pack_context`)
 
 **Purpose**: Given a query and a corpus, return a depth-packed markdown bundle of relevant files sized to a token budget. The headline tool — 90% of consumer calls go here.
@@ -237,6 +280,7 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
   "trace": "string | null (present if why=true)",
   "corpus_commit_sha": "string (single-corpus mode) | null (multi-corpus — see corpus_commit_shas)",
   "corpus_commit_shas": "object { [corpus_id]: sha } (multi-corpus mode) | null (single-corpus)",
+  "coverage": "object — see § 3.0.5",
   "took_ms": "integer"
 }
 ```
@@ -260,6 +304,7 @@ The §3 catalog describes the **production v1 target** for the deployed MCP. Thr
   "trace": "string | null",
   "corpus_commit_sha": "string | null",
   "corpus_commit_shas": "object | null",
+  "coverage": "object — see § 3.0.5",
   "took_ms": "integer"
 }
 ```
@@ -325,6 +370,7 @@ ETag canonicalization: input fields serialized via RFC 8785 (JSON Canonicalizati
   ],
   "corpus_commit_sha": "string | null",
   "corpus_commit_shas": "object | null",
+  "coverage": "object — see § 3.0.5",
   "took_ms": "integer"
 }
 ```
@@ -987,6 +1033,102 @@ The five tools accept either bare refs (`auth-middleware`, `auth-middleware#OAut
 - **`audit.broken_refs` telemetry**: every `lat_check` run emits the event in § 9 with `ref_count_total`, `ref_count_broken`, and `exit_strict (boolean)`.
 
 Naming convention: `lat.*` and `wiki.*` dot-notation is **local-stdio-only** namespace shorthand. The deployed MCP uses the `ce_*` snake_case prefix per § 3.0.2; when these families promote to deployed (v2 candidates), they adopt `ce_lat_*` and `ce_wiki_*`. The `lat.*` divergence is preserved on the local stdio for parity with lat.md upstream verb names; `wiki.*` is purely a CE-native namespace convenience. New `lat.*` tools require a backing CE primitive.
+
+---
+
+## 10c. Future cross-cutting patterns (non-normative, v1.2+)
+
+CE today is stateless, returns flat lists with bare relevance scores, and treats provider degradation as silent fallback. Five patterns from peer scientific-MCP servers (notably **scix-agent**, which ships stateful + typed-edge + provenance-aware MCP for academic literature) belong on the v1.2+ roadmap. They are non-normative until v1.2 lands; servers MAY emit them earlier as long as the wire shape doesn't conflict with v1 fields.
+
+### 10c.1 Stateful sessions — server-side focused-set fall-through
+
+Today every read call is a cold lookup. An agent debugging iteratively does `pack({query: "auth bug"})` → reads → `pack({query: "test setup"})` and the server has no idea the second call relates to the first.
+
+**Contract sketch**:
+- Server keeps `SessionState` keyed by `session_id` in KV (sliding 1-hour TTL).
+- Each successful read updates a focused-set (FIFO, capped 500): paths returned, queries asked, mode used, corpus_id touched.
+- Read tools accept optional `session_id` + new mode `"continuation"`. With `mode: continuation`, server defaults to "expand around the recent focused set" when `query` is sparse.
+- Inspired by scix-agent's `_session_fallthrough_bibcodes` resolver (`mcp_server.py:3759`).
+
+**v1 forward-compatibility**: clients that pass no `session_id` get the existing stateless behavior. v1.0 servers MUST ignore `session_id`/`continuation` rather than erroring on them — clients can opt in incrementally.
+
+### 10c.2 Typed graph edges (over current `imports`-only)
+
+The local stdio MCP exposes graph traversal through the import graph (PR #4 + Graphify). Edges today are either "imports" (default) or whatever Graphify classified them as (call_graph, inheritance, cross_language, doc_to_code). The wire shape doesn't expose this typing.
+
+**Contract sketch**: when `mode: graph` (or `mode: semantic+graph`), each entry in `files[]` MAY include `via: { edge_type: "imports"|"calls"|"extends"|"references"|"tests"|"documents"|"configures", weight: number }`. Aggregate edge type set is enumerated; servers MAY emit a sub-set (`imports` is the floor).
+
+**v1 forward-compat**: `via` is an optional new field; clients that don't read it are unaffected. v2.0 will likely PROMOTE this to required when graph mode actually ships server-side.
+
+### 10c.3 Chain-shaped trace (typed walks, not flat ranks)
+
+Today `pack`/`find` return `[{path, relevance, score}]`. scix-agent returns a `Hop[]` chain — every step labeled with intent, weight, context snippet, section. The agent gets a typed walk, not a soup of paths.
+
+**Contract sketch**: when `why: true`, `trace` becomes a structured object instead of a string:
+```json
+"trace": {
+  "hops": [
+    {"from": "<query>", "to": "login.test.ts", "edge": "semantic", "weight": 0.91},
+    {"from": "login.test.ts", "to": "auth.py", "edge": "imports", "weight": 1.0},
+    {"from": "auth.py", "to": "session.py", "edge": "calls", "weight": 0.6}
+  ],
+  "weights": {"intent": 0.4, "graph": 0.3, "semantic": 0.3},
+  "rationale_text": "<the v1 string-form trace, kept for back-compat>"
+}
+```
+
+**v1 forward-compat**: existing clients reading `trace` as a string keep working — they read `trace.rationale_text` instead, OR servers MAY return a string when an `accept_trace_format: "string"` hint is set. Default: structured object once v1.2 ships; v1.0/v1.1 keep string.
+
+### 10c.4 ZFC scaffolding mode — outline-shaped output
+
+scix's `synthesize_findings` bins working-set bibcodes into named sections by intent + community-share thresholds, then returns a labeled outline the agent fills with prose. Inverse of standard RAG: server emits *structure*, agent emits content.
+
+**Contract sketch**: new `output_mode` on `ce_pack_context`:
+```
+output_mode: "chunks" (default; current behavior — depth-banded chunks)
+output_mode: "outline" (new; section-shaped scaffold for the agent to fill)
+```
+
+`outline` response shape:
+```json
+{
+  "outline": {
+    "task_inferred": "fix",
+    "sections": [
+      {"name": "What's broken", "files": [...], "rationale": "..."},
+      {"name": "How it's tested", "files": [...], "rationale": "..."},
+      {"name": "What it depends on", "files": [...], "rationale": "..."}
+    ],
+    "skipped_for_budget": [...]
+  },
+  "coverage": {...},
+  "took_ms": ...
+}
+```
+
+Section templates derive from the existing `task` enum (fix / review / explain / build / document / research). `code_graph.py`'s task taxonomy already exists locally — the server work is exposing it via this mode.
+
+**Bench rationale**: agents on CSB H4 (Haiku reward) given `output_mode: outline` should produce more coherent answers than agents given equivalent-token chunk dumps. v1.2 introduces a separate bench cell to measure this.
+
+### 10c.5 Degrading-lane resolver with canary
+
+Today CE soft-falls-back when semantic embedding is unavailable (no key, Mistral 5xx, etc.) — silently. scix routes per-document calls across lanes (`live LLM` / `local model` / `static sentinel`) with a JIT bulkhead (400ms budget) and a 5% canary deliberately routed to the local lane to keep regression signal alive.
+
+**Contract sketch**:
+- Three lanes for embedding: `live` (Mistral codestral-embed), `local` (BGE-small bundled, v1.2), `static` (deterministic hash projection — never throws, never hits the network).
+- Lane choice surfaces in `coverage.ranked_with_lane` (already in § 3.0.5).
+- Canary rate configurable via `CE_CANARY_RATE` env (default 0.05). Canary requests carry `coverage.canary: true` so observability can split metrics.
+
+**v1.1 lane partial**: the `static` lane lands in v1.1 as the safety net under `live`. The `local` lane (bundled model) is v1.2.
+
+### Why these are deferred (load-bearing context)
+
+CE's v1 wire surface MUST stabilize before v1.2 changes layer onto it. Pattern 6 (coverage transparency, § 3.0.5) is the only one of the six promoted to v1 because:
+- It's purely additive (new field, ignorable by old clients).
+- It's bench-blocking — the v1 final numbers depend on `eligible_recall` to compare configs honestly.
+- The data already exists server-side; threading it into the response is a 1-day landing.
+
+The other four patterns (sessions, typed edges, chain trace, outline mode, degrading lanes) all interact with each other and with `p4-cross-corpus-pack.md`'s new graph primitives. Locking them into v1 would force premature decisions. Specifying them here as v1.2 contracts keeps the door open without bending v1's wire.
 
 ---
 

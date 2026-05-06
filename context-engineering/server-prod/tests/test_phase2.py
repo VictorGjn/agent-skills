@@ -93,9 +93,10 @@ def test_ce_get_health_works():
     assert "bearer" in structured["auth_methods_supported"]
 
 
-def test_phase2_placeholder_async_index_returns_not_implemented():
-    """Phase 4 lands write tools, but async=true is still NOT_IMPLEMENTED in v1
-    (Vercel Cron + queue is v1.1)."""
+def test_async_index_enqueues_job_and_returns_id():
+    """Phase B.3 (v1.1): async=true now enqueues a job and returns
+    {job_id, corpus_id, status: 'queued'} immediately. The Vercel Cron
+    worker advances it. Pre-B.3 this returned NOT_IMPLEMENTED."""
     payload = {
         "jsonrpc": "2.0", "id": 5, "method": "tools/call",
         "params": {"name": "ce_index_github_repo", "arguments": {
@@ -103,11 +104,11 @@ def test_phase2_placeholder_async_index_returns_not_implemented():
         }},
     }
     response, status = dispatch(payload, _admin_token())
-    # § 7.1 tool errors return via result.isError, with HTTP 501
-    assert status == 501
-    result = response["result"]
-    assert result["isError"] is True
-    assert result["structuredContent"]["code"] == "NOT_IMPLEMENTED"
+    assert status == 200
+    structured = response["result"]["structuredContent"]
+    assert structured["status"] == "queued"
+    assert isinstance(structured["job_id"], str) and structured["job_id"]
+    assert structured["corpus_id"] == "gh-x-y-main"
 
 
 def test_alias_resolves_with_deprecated_hint():
@@ -181,6 +182,23 @@ def test_missing_method_field_returns_invalid_request():
     response, status = dispatch(payload, _admin_token())
     assert status == 200
     assert response["error"]["code"] == errors.JSONRPC_INVALID_REQUEST
+
+
+def test_tools_call_non_object_params_returns_invalid_params():
+    """Non-object `params` must produce a -32602 envelope, not a 500/AttributeError."""
+    for bad in ([], [1, 2, 3], "x", 7, True):
+        payload = {"jsonrpc": "2.0", "id": 200, "method": "tools/call", "params": bad}
+        response, status = dispatch(payload, _admin_token())
+        assert status == 200, f"params={bad!r}"
+        assert response["error"]["code"] == errors.JSONRPC_INVALID_PARAMS, f"params={bad!r}"
+
+
+def test_tool_error_unknown_code_falls_back_safely():
+    """Unknown code in tool_error() must fall back to INTERNAL without KeyError."""
+    env = errors.tool_error("NOT_A_REAL_CODE", "boom")
+    assert env["isError"] is True
+    assert env["structuredContent"]["code"] == "INTERNAL"
+    assert env["_http_status"] == 500
 
 
 def test_authenticate_case_sensitive_bearer_scheme():

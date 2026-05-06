@@ -21,13 +21,15 @@ import json
 import time
 from typing import Any
 
-from .. import corpus_access, corpus_store, engine, errors
+from .. import corpus_access, corpus_store, embed, engine, errors
 from ..auth import TokenInfo
 
 
 VALID_MODES = {"auto", "keyword", "semantic", "graph", "deep", "wide"}
 VALID_TASKS = {"fix", "review", "explain", "build", "document", "research"}
 VALID_RESPONSE_FORMATS = {"markdown", "structured", "both"}
+VALID_RERANK = {None, "mmr"}
+MMR_LAMBDA = 0.7
 
 DEFAULT_BUDGET = 32000
 MIN_BUDGET = 1000
@@ -126,6 +128,19 @@ def _validate_args(args: dict) -> dict | None:
         return errors.tool_error("INVALID_ARGUMENT", f"unknown response_format: {rf!r}",
                                  details={"valid": sorted(VALID_RESPONSE_FORMATS)})
 
+    rerank = args.get("rerank")
+    if rerank not in VALID_RERANK:
+        return errors.tool_error(
+            "INVALID_ARGUMENT", f"unknown rerank: {rerank!r}",
+            details={"valid_rerank": sorted(x for x in VALID_RERANK if x is not None)},
+        )
+    if rerank == "mmr" and mode != "semantic":
+        return errors.tool_error(
+            "INVALID_ARGUMENT",
+            "rerank='mmr' requires mode='semantic' (MMR diversifies cosine results)",
+            details={"got_mode": mode, "got_rerank": rerank},
+        )
+
     budget = args.get("budget")
     if budget is not None and (not isinstance(budget, int) or isinstance(budget, bool)):
         return errors.tool_error("INVALID_ARGUMENT", "budget must be an integer")
@@ -160,9 +175,33 @@ def _check_budget(budget: int) -> dict | None:
 
 
 def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
-                 prefix: str | None) -> list[dict]:
-    """Score → pack one corpus. Returns packed items annotated with corpus_id + prefixed path."""
-    scored = engine.score_corpus(query, loaded.files, top=100)
+                 prefix: str | None,
+                 mode: str = "auto",
+                 query_embedding: list[float] | None = None,
+                 rerank: str | None = None) -> tuple[list[dict], bool]:
+    """Score → pack one corpus. Returns (packed_items, ran_semantic).
+
+    Phase 5.5: when mode=="semantic" and corpus has embeddings, rank via cosine
+    against `query_embedding` (and MMR-rerank if `rerank=="mmr"`). Otherwise
+    falls back to keyword scoring. The returned `ran_semantic` flag lets
+    handle() build the SPEC § 3.0.5 coverage block accurately.
+    """
+    use_semantic = (
+        mode == "semantic"
+        and query_embedding is not None
+        and bool(loaded.embeddings)
+    )
+    if use_semantic:
+        scored = engine.score_corpus_semantic(
+            query_embedding, loaded.files, loaded.embeddings, top=400,
+        )
+        if rerank == "mmr" and scored:
+            scored = engine.mmr_rerank(
+                scored, query_embedding, loaded.embeddings,
+                lambda_=MMR_LAMBDA,
+            )
+    else:
+        scored = engine.score_corpus(query, loaded.files, top=100)
     packed = engine.pack(scored, budget) if scored else []
     out = []
     for item in packed:
@@ -177,7 +216,7 @@ def _pack_single(loaded: corpus_store.LoadedCorpus, query: str, budget: int,
             "_engine": item,  # internal — kept for markdown rendering, stripped before return
             "corpus_id": loaded.meta.corpus_id,
         })
-    return out
+    return out, use_semantic
 
 
 def _merge_with_quota(per_corpus: list[list[dict]], total_budget: int) -> list[dict]:
@@ -272,10 +311,24 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     query: str = args["query"].strip()
     mode: str = args.get("mode", "auto")
+    rerank: str | None = args.get("rerank")
     task = args.get("task")
     why = bool(args.get("why", False))
     response_format = args.get("response_format", "markdown")
     budget = _scale_budget(args.get("budget"), args.get("model_context"))
+
+    # SPEC § 3.0.5: trace_id is server-assigned uuid for log correlation.
+    import uuid
+    trace_id = uuid.uuid4().hex
+
+    query_embedding: list[float] | None = None
+    embed_failed = False
+    if mode == "semantic":
+        try:
+            query_embedding = embed.embed_query(query)
+        except embed.EmbedError:
+            query_embedding = None
+            embed_failed = True
 
     err = _check_budget(budget)
     if err:
@@ -293,12 +346,27 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
-        packed = _pack_single(loaded, query, budget, prefix=None)
+        if mode == "semantic":
+            err = corpus_access.check_embeddings_loaded([loaded])
+            if err:
+                return err
+        packed, ran_semantic = _pack_single(
+            loaded, query, budget, prefix=None,
+            mode=mode, query_embedding=query_embedding, rerank=rerank,
+        )
         trace = _build_trace(why, mode, task, query, [loaded], budget) if why else None
         out = _build_output(
             packed, budget, response_format, query, mode, multi=False,
             single_sha=loaded.meta.commit_sha or None, multi_shas=None,
             trace=trace, took_ms=int((time.time() - start) * 1000),
+        )
+        out["coverage"] = corpus_access.build_coverage(
+            [loaded],
+            mode_requested=mode,
+            mode_used="semantic" if ran_semantic else "keyword",
+            fell_back=(mode == "semantic" and not ran_semantic),
+            trace_id=trace_id,
+            lane="fallback" if (mode == "semantic" and embed_failed) else "live",
         )
         # Codex P1: fall back to content fingerprint when commit_sha is missing
         # — a constant placeholder would make ETag content-blind.
@@ -316,6 +384,9 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         err = corpus_access.check_embedding_parity(loaded_list)
         if err:
             return err
+        err = corpus_access.check_embeddings_loaded(loaded_list)
+        if err:
+            return err
 
     err = corpus_access.detect_prefix_collisions(loaded_list)
     if err:
@@ -324,10 +395,13 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     # Per-corpus pack with quota allocation, then global merge.
     use_quota = args.get("corpus_quota", True)
     per_corpus_budget = _allocate_quota(budget, len(loaded_list)) if use_quota else budget
-    per_corpus_packed = [
-        _pack_single(c, query, per_corpus_budget, prefix=c.meta.corpus_id)
+    per_corpus_results = [
+        _pack_single(c, query, per_corpus_budget, prefix=c.meta.corpus_id,
+                     mode=mode, query_embedding=query_embedding, rerank=rerank)
         for c in loaded_list
     ]
+    per_corpus_packed = [items for items, _ran in per_corpus_results]
+    all_semantic = mode == "semantic" and all(ran for _items, ran in per_corpus_results)
     if use_quota:
         packed = _merge_with_quota(per_corpus_packed, budget)
     else:
@@ -354,6 +428,14 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         packed, budget, response_format, query, mode, multi=True,
         single_sha=None, multi_shas=multi_shas,
         trace=trace, took_ms=int((time.time() - start) * 1000),
+    )
+    out["coverage"] = corpus_access.build_coverage(
+        loaded_list,
+        mode_requested=mode,
+        mode_used="semantic" if all_semantic else "keyword",
+        fell_back=(mode == "semantic" and not all_semantic),
+        trace_id=trace_id,
+        lane="fallback" if (mode == "semantic" and embed_failed) else "live",
     )
     # § 3.1: multi-corpus ETag uses the lex-sorted '<corpus_id>:<sha>' concatenation.
     # Per-corpus key falls back to content fingerprint when commit_sha missing.

@@ -81,6 +81,44 @@ def check_embedding_parity(corpora: list[corpus_store.LoadedCorpus]) -> dict | N
     return None
 
 
+def check_embeddings_loaded(corpora: list[corpus_store.LoadedCorpus]) -> dict | None:
+    """When the caller asks for `mode: semantic` and a corpus declares
+    `embedding.dims > 0` but its `embeddings` payload map is empty, the
+    server has no vectors to cosine against — the cause is a hand-built or
+    partially-migrated index, not "this corpus is keyword-only by design"
+    (which is `dims == 0`).
+
+    Without this check, `_rank_one`/`_pack_single` would silently keyword-
+    fallback for a corpus that LOOKS semantic-eligible per metadata, and
+    the response would mix cosine scores from semantic-eligible corpora
+    with keyword scores from broken ones — meaningless ordering. Stricter
+    than `check_embedding_parity`, which only inspects the metadata triple.
+
+    Caller controls the gate: only call when `mode == "semantic"`. For
+    `mode == "auto"` etc. the keyword fallback is intentional and silent.
+
+    Returns EMBEDDING_PROVIDER_MISMATCH envelope (with `empty_corpora` in
+    details) if any corpus is in this broken state, else None.
+    """
+    broken = []
+    for c in corpora:
+        declared_dims = int(c.meta.embedding.get("dims", 0) or 0)
+        if declared_dims > 0 and not c.embeddings:
+            broken.append({
+                "corpus_id": c.meta.corpus_id,
+                "declared_dims": declared_dims,
+                "embeddings_payload": "empty",
+            })
+    if broken:
+        return errors.tool_error(
+            "EMBEDDING_PROVIDER_MISMATCH",
+            "corpus declares embedding dims>0 but has no embeddings payload; "
+            "re-upload with vectors or query with mode != 'semantic'",
+            details={"empty_corpora": broken},
+        )
+    return None
+
+
 def detect_prefix_collisions(corpora: list[corpus_store.LoadedCorpus]) -> dict | None:
     """§ 3.1: paths under `<corpus_id>:<path>` must not produce ambiguous addressing.
 
@@ -102,6 +140,50 @@ def detect_prefix_collisions(corpora: list[corpus_store.LoadedCorpus]) -> dict |
             details={"colliding_corpora": colliders},
         )
     return None
+
+
+def build_coverage(
+    corpora: list[corpus_store.LoadedCorpus],
+    *,
+    mode_requested: str,
+    mode_used: str,
+    fell_back: bool,
+    trace_id: str,
+    lane: str = "live",
+) -> dict[str, Any]:
+    """Build the SPEC § 3.0.5 `coverage` block for a read-tool response.
+
+    `mode_requested` is what the caller asked for (`auto`/`keyword`/`semantic`/...).
+    `mode_used` is what the engine actually executed (may differ when soft-
+    fallback fires, e.g. semantic→keyword on no embeddings).
+
+    `lane` is the resolver lane that ran (per SPEC § 10c.5 future-pattern).
+    v1.1 emits "live" when Mistral fired and "fallback" when degraded; the
+    "static"/"local" enum values are reserved for v1.2.
+
+    For `keyword` (or `auto`/`deep`/`wide` which run keyword today), all
+    files are eligible. For `semantic`, only files with embeddings are.
+    Multi-corpus aggregates: file_count is summed; eligible is the union.
+    """
+    corpus_size_files = sum(c.meta.file_count for c in corpora)
+
+    is_semantic = mode_used == "semantic"
+    if is_semantic:
+        eligible = sum(len(c.embeddings or {}) for c in corpora)
+    else:
+        eligible = corpus_size_files
+
+    skipped = max(0, corpus_size_files - eligible) if is_semantic else 0
+
+    return {
+        "corpus_size_files": corpus_size_files,
+        "ranked_with": mode_used,
+        "ranked_with_lane": lane,
+        "files_eligible_for_mode": eligible,
+        "files_skipped_unembedded": skipped,
+        "fallback_to_keyword": fell_back,
+        "trace_id": trace_id,
+    }
 
 
 def aggregate_load(corpus_ids: list[str], classification_max: str

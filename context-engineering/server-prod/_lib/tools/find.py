@@ -9,17 +9,19 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .. import corpus_access, corpus_store, engine, errors  # noqa: F401 — corpus_store kept for type clarity
+from .. import corpus_access, corpus_store, embed, engine, errors  # noqa: F401 — corpus_store kept for type clarity
 from ..auth import TokenInfo
 from . import pack as _pack  # validators only — keeps mode/task enums in sync
 
 
 VALID_MODES = _pack.VALID_MODES
 VALID_TASKS = _pack.VALID_TASKS
+VALID_RERANK = {None, "mmr"}
 
 DEFAULT_TOP_K = 20
 MIN_TOP_K = 1
 MAX_TOP_K = 200
+MMR_LAMBDA = 0.7  # PR #35 default — relevance-leaning
 
 
 def _validate_args(args: dict) -> dict | None:
@@ -70,29 +72,88 @@ def _validate_args(args: dict) -> dict | None:
             details={"got": top_k},
         )
 
+    rerank = args.get("rerank")
+    if rerank not in VALID_RERANK:
+        return errors.tool_error(
+            "INVALID_ARGUMENT",
+            f"unknown rerank: {rerank!r}",
+            details={"valid_rerank": sorted(x for x in VALID_RERANK if x is not None)},
+        )
+    if rerank == "mmr" and mode != "semantic":
+        return errors.tool_error(
+            "INVALID_ARGUMENT",
+            "rerank='mmr' requires mode='semantic' (MMR diversifies cosine results)",
+            details={"got_mode": mode, "got_rerank": rerank},
+        )
+
     return None
 
 
 def _rank_one(loaded: corpus_store.LoadedCorpus, query: str, top_k: int,
-              mode: str, prefix: str | None) -> list[dict]:
-    scored = engine.score_corpus(query, loaded.files, top=top_k)
+              mode: str, prefix: str | None,
+              query_embedding: list[float] | None = None,
+              rerank: str | None = None) -> tuple[list[dict], bool]:
+    """Rank a single corpus's files for `query`.
+
+    Returns (ranked_files, ran_semantic). `ran_semantic` is True when the
+    engine actually executed cosine ranking; False when it fell back to
+    keyword (no embeddings, query embed failed, mode != semantic). Caller
+    uses the flag to build the SPEC § 3.0.5 coverage block.
+
+    Phase 5.5 dispatch:
+    - mode == "semantic" + query_embedding present + corpus has embeddings:
+      cosine-rank against stored vectors. `rerank == "mmr"` applies MMR
+      diversity rerank (lambda=0.7).
+    - All other paths fall through to keyword scoring (engine.score_corpus).
+      A corpus that requested semantic but has no embeddings logs a "fellback
+      to keyword" note in the per-file reason.
+    """
+    use_semantic = (
+        mode == "semantic"
+        and query_embedding is not None
+        and bool(loaded.embeddings)
+    )
+
+    if use_semantic:
+        scored = engine.score_corpus_semantic(
+            query_embedding, loaded.files, loaded.embeddings, top=top_k * 4
+        )
+        if rerank == "mmr" and scored:
+            scored = engine.mmr_rerank(
+                scored, query_embedding, loaded.embeddings,
+                lambda_=MMR_LAMBDA, k=top_k,
+            )
+        else:
+            scored = scored[:top_k]
+    else:
+        scored = engine.score_corpus(query, loaded.files, top=top_k)
+
     out = []
     for s in scored:
         path = s["path"]
         if prefix:
             path = f"{prefix}:{path}"
-        # v1 engine is keyword-only; semantic/graph scores will populate when those modes ship.
-        kw = round(s["relevance"], 4)
+        rel = round(s["relevance"], 4)
+        if use_semantic:
+            sem = rel
+            kw = 0.0
+            tag = f"mmr (lambda={MMR_LAMBDA})" if rerank == "mmr" else "cosine"
+            reason = f"matched {sem:.3f} via {tag} (mode={mode!r})"
+        else:
+            sem = 0.0
+            kw = rel
+            note = "" if mode in {"auto", "keyword"} else f" — fellback from {mode!r}"
+            reason = f"matched {kw:.3f} via keyword{note}"
         out.append({
             "path": path,
-            "relevance": kw,
+            "relevance": rel,
             "keyword_score": kw,
-            "semantic_score": 0.0,
+            "semantic_score": sem,
             "graph_score": 0.0,
-            "reason": f"matched {kw:.3f} via keyword (mode={mode!r})",
+            "reason": reason,
             "corpus_id": loaded.meta.corpus_id,
         })
-    return out
+    return out, use_semantic
 
 
 def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
@@ -104,6 +165,7 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
     query: str = args["query"].strip()
     mode: str = args.get("mode", "auto")
     top_k: int = args.get("top_k", DEFAULT_TOP_K)
+    rerank: str | None = args.get("rerank")
 
     cid = args.get("corpus_id")
     cids = args.get("corpus_ids")
@@ -111,15 +173,45 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     canonical = {k: v for k, v in args.items() if v is not None}
 
+    # SPEC § 3.0.5: trace_id is server-assigned uuid for log correlation.
+    import uuid
+    trace_id = uuid.uuid4().hex
+
+    query_embedding: list[float] | None = None
+    embed_failed = False
+    if mode == "semantic":
+        try:
+            query_embedding = embed.embed_query(query)
+        except embed.EmbedError as e:
+            # PROVIDER_UNAVAILABLE / EMBED_HTTP / EMBED_DIM_MISMATCH — let the
+            # rank path fall back to keyword. Caller can inspect `reason` to
+            # see what happened. We don't fail the whole request on this.
+            query_embedding = None
+            embed_failed = True
+            _embed_error = e  # noqa: F841 — kept for future telemetry hook
+
     # ── Single-corpus ──
     if cid:
         loaded, err = corpus_access.load_or_error(cid, token.data_classification_max)
         if err:
             return err
-        ranked = _rank_one(loaded, query, top_k, mode, prefix=None)
+        if mode == "semantic":
+            err = corpus_access.check_embeddings_loaded([loaded])
+            if err:
+                return err
+        ranked, ran_semantic = _rank_one(loaded, query, top_k, mode, prefix=None,
+                                          query_embedding=query_embedding, rerank=rerank)
         out = _wire(ranked, multi=False,
                     single_sha=loaded.meta.commit_sha or None, multi_shas=None,
                     took_ms=int((time.time() - start) * 1000), keep_corpus_id=False)
+        out["coverage"] = corpus_access.build_coverage(
+            [loaded],
+            mode_requested=mode,
+            mode_used="semantic" if ran_semantic else "keyword",
+            fell_back=(mode == "semantic" and not ran_semantic),
+            trace_id=trace_id,
+            lane="fallback" if (mode == "semantic" and embed_failed) else "live",
+        )
         out["_x_etag"] = _pack._compute_etag(canonical, corpus_store.commit_key(loaded))
         out["_x_cache_control"] = _pack._cache_control_for([loaded.meta.data_classification])
         return out
@@ -133,6 +225,9 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
         err = corpus_access.check_embedding_parity(loaded_list)
         if err:
             return err
+        err = corpus_access.check_embeddings_loaded(loaded_list)
+        if err:
+            return err
 
     err = corpus_access.detect_prefix_collisions(loaded_list)
     if err:
@@ -140,8 +235,19 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     per_corpus_topk = max(1, top_k // max(len(loaded_list), 1) + 1)
     flat: list[dict] = []
+    # In multi-corpus mode, parity (check_embedding_parity +
+    # check_embeddings_loaded) guarantees all corpora are semantic-eligible
+    # together — so either all run semantic or all fall back to keyword
+    # (e.g. when the query embed fails). all_semantic captures that
+    # consensus state for coverage reporting.
+    all_semantic = mode == "semantic"
     for c in loaded_list:
-        flat.extend(_rank_one(c, query, per_corpus_topk, mode, prefix=c.meta.corpus_id))
+        per_ranked, ran_sem = _rank_one(
+            c, query, per_corpus_topk, mode, prefix=c.meta.corpus_id,
+            query_embedding=query_embedding, rerank=rerank,
+        )
+        flat.extend(per_ranked)
+        all_semantic = all_semantic and ran_sem
     flat.sort(key=lambda x: -x["relevance"])
     flat = flat[:top_k]
 
@@ -150,6 +256,18 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
     out = _wire(flat, multi=True, single_sha=None, multi_shas=multi_shas,
                 took_ms=int((time.time() - start) * 1000), keep_corpus_id=True)
+    out["coverage"] = corpus_access.build_coverage(
+        loaded_list,
+        mode_requested=mode,
+        # In multi-corpus mode treat "semantic" as accurate only when ALL
+        # corpora ran semantic; if any fell back, consumers should know
+        # the result is mixed-grade (parity check normally prevents this,
+        # but keep the signal honest).
+        mode_used="semantic" if all_semantic else "keyword",
+        fell_back=(mode == "semantic" and not all_semantic),
+        trace_id=trace_id,
+        lane="fallback" if (mode == "semantic" and embed_failed) else "live",
+    )
     by_id = {c.meta.corpus_id: c for c in loaded_list}
     commit_key = "|".join(
         f"{cid}:{corpus_store.commit_key(by_id[cid])}" for cid in multi_shas

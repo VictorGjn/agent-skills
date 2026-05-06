@@ -34,6 +34,11 @@ TOOL_ERROR_CODES = {
     "PAYLOAD_TOO_LARGE": (413, False),
     "RATE_LIMITED": (429, True),
     "NOT_IMPLEMENTED": (501, False),  # Phase 2 placeholder for tools landing in Phase 3/4
+    "PROVIDER_UNAVAILABLE": (503, False),  # missing config (e.g. MISTRAL_API_KEY for embed=true)
+    "EMBED_NOT_SUPPORTED_ASYNC": (400, False),  # async path is keyword-only in v1.1; v1.2 wires async embed
+    # Last-resort fallback used by tool_error() when an unknown code is passed in.
+    # Without this entry the fallback path itself raises KeyError on the lookup below.
+    "INTERNAL": (500, True),
 }
 
 # § 7.2 protocol errors — emitted as JSON-RPC `error`

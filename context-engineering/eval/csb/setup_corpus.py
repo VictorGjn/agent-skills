@@ -77,15 +77,67 @@ def index_via_server(mcp_url: str, token: str, repo: str, branch: str,
     return cid
 
 
+def _embed_files_mistral(workspace: str, files: list[dict]
+                         ) -> tuple[list[dict], list[list[float]]]:
+    """Read each file's content from disk and call Mistral codestral-embed in batches.
+
+    Returns (kept_files, kept_vectors) — drops files that can't be embedded
+    (empty content, OSError, contains null bytes after replace-decode) from
+    BOTH lists in lockstep so callers can build a payload where len(files) ==
+    len(vectors) and every vector has the right dim. Sending `[]` placeholders
+    would fail server-side EMBEDDING_MISMATCH validation (dims=1536 vs len=0).
+    """
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    server_lib = here.parent.parent.parent / "server-prod" / "_lib"
+    if str(server_lib.parent) not in sys.path:
+        sys.path.insert(0, str(server_lib.parent))
+    from _lib import embed as _embed  # type: ignore
+
+    ws = Path(workspace)
+    kept_files: list[dict] = []
+    kept_texts: list[str] = []
+    skipped = 0
+    for f in files:
+        path = ws / f["path"]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            skipped += 1
+            continue
+        if not text.strip() or "\x00" in text:
+            skipped += 1
+            continue
+        kept_files.append(f)
+        kept_texts.append(text)
+
+    if skipped:
+        print(f"  skipped {skipped} unembeddable files (empty/binary/unreadable)",
+              file=sys.stderr)
+    print(f"  embedding {len(kept_texts)} files via Mistral codestral-embed…",
+          file=sys.stderr)
+    vectors = _embed.embed_batch(kept_texts) if kept_texts else []
+    return kept_files, vectors
+
+
 def upload_via_local_index(mcp_url: str, token: str, workspace: str,
-                           corpus_id: str, classification: str) -> str:
+                           corpus_id: str, classification: str,
+                           embed_provider: str = "auto") -> str:
     """Index a local workspace via scripts/index_workspace.scan_directory, then ce_upload_corpus.
+
+    `embed_provider`:
+    - `"auto"` (default): use Mistral codestral-embed when MISTRAL_API_KEY is
+      set in the local env, else upload with no vectors (keyword-only corpus).
+    - `"mistral"`: require MISTRAL_API_KEY; fail fast if missing.
+    - `"none"`: skip embedding entirely (cheap, keyword-only).
 
     In-process import is cleaner than subprocess: index_workspace.py's main
     block writes to a hardcoded `cache/workspace-index.json` path with no
     --output flag, so the prior subprocess approach failed (Codex P1). The
     underlying scan_directory function returns the index dict directly.
     """
+    import os
     from pathlib import Path
 
     here = Path(__file__).resolve()
@@ -101,6 +153,23 @@ def upload_via_local_index(mcp_url: str, token: str, workspace: str,
         if "contentHash" not in f and "hash" in f:
             f["contentHash"] = f["hash"]
 
+    # ── Embeddings ──
+    use_mistral = embed_provider == "mistral" or (
+        embed_provider == "auto" and os.environ.get("MISTRAL_API_KEY")
+    )
+    if embed_provider == "mistral" and not os.environ.get("MISTRAL_API_KEY"):
+        raise RuntimeError("--embed-provider=mistral requires MISTRAL_API_KEY in env")
+
+    if use_mistral:
+        embedding_meta = {"provider": "mistral", "model": "codestral-embed", "dims": 1536}
+        # Filter files to only those we successfully embedded — server rejects
+        # any zero-length vector when dims>0, so payload arrays must be aligned
+        # (same length, same indices, same files).
+        files, vectors = _embed_files_mistral(workspace, files)
+    else:
+        embedding_meta = {"provider": "none", "model": "n/a", "dims": 0}
+        vectors = [[] for _ in files]
+
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {
@@ -109,13 +178,13 @@ def upload_via_local_index(mcp_url: str, token: str, workspace: str,
                 "corpus_id": corpus_id,
                 "source": {"type": "local_workspace", "uri": workspace},
                 "data_classification": classification,
-                "embedding": {"provider": "none", "model": "n/a", "dims": 0},
+                "embedding": embedding_meta,
                 "files": files,
                 "embeddings": {
                     "format": "json",
                     "paths": [f["path"] for f in files],
                     "hashes": [f.get("contentHash", "") for f in files],
-                    "vectors": [[] for _ in files],
+                    "vectors": vectors,
                 },
             },
         },
@@ -148,6 +217,8 @@ def main() -> int:
     p.add_argument("--branch", default="main", help="Branch (server-side index only)")
     p.add_argument("--workspace", help="Path to local workspace (--upload mode only)")
     p.add_argument("--corpus-id", help="Explicit corpus_id (defaults to server-derived)")
+    p.add_argument("--embed-provider", choices=["auto", "mistral", "none"], default="auto",
+                   help="Embedding provider for --upload mode. auto = Mistral if MISTRAL_API_KEY set, else none.")
 
     args = p.parse_args()
 
@@ -158,7 +229,8 @@ def main() -> int:
             if not args.workspace:
                 p.error("--upload requires --workspace")
             cid = args.corpus_id or "local-csb-task"
-            cid = upload_via_local_index(args.mcp_url, args.token, args.workspace, cid, args.classification)
+            cid = upload_via_local_index(args.mcp_url, args.token, args.workspace, cid,
+                                         args.classification, embed_provider=args.embed_provider)
     except Exception as e:
         print(f"setup_corpus FAILED: {e}", file=sys.stderr)
         return 2

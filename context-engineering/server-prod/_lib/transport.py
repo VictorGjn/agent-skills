@@ -99,6 +99,8 @@ _INPUT_SCHEMAS: dict[str, dict] = {
             "model_context": {"type": ["integer", "null"], "minimum": 1, "default": None},
             "why": {"type": "boolean", "default": False},
             "response_format": {"type": "string", "enum": ["markdown", "structured", "both"], "default": "markdown"},
+            "rerank": {"type": ["string", "null"], "enum": ["mmr", None], "default": None,
+                       "description": "Optional rerank step. 'mmr' = Maximal Marginal Relevance (lambda=0.7) on top of semantic results. Requires mode='semantic'."},
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -117,6 +119,8 @@ _INPUT_SCHEMAS: dict[str, dict] = {
             "task": {"type": ["string", "null"],
                      "enum": ["fix", "review", "explain", "build", "document", "research", None],
                      "default": None},
+            "rerank": {"type": ["string", "null"], "enum": ["mmr", None], "default": None,
+                       "description": "Optional rerank. 'mmr' applies Maximal Marginal Relevance (lambda=0.7) to semantic results. Requires mode='semantic'."},
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -188,6 +192,8 @@ _INPUT_SCHEMAS: dict[str, dict] = {
             "data_classification": {"type": "string", "enum": ["public", "internal", "confidential", "restricted"]},
             "indexed_paths": {"type": "array", "items": {"type": "string"}, "default": []},
             "async": {"type": "boolean", "default": False},
+            "embed": {"type": ["boolean", "null"], "default": None,
+                      "description": "Server-side embedding via Mistral codestral-embed. null = auto (embed when MISTRAL_API_KEY is set and timing fits the 50s sync budget); true = require; false = skip. Repos that exceed the budget return embed_skipped in the response — caller should retry via ce_upload_corpus."},
         },
         "required": ["repo", "data_classification"],
     },
@@ -255,8 +261,9 @@ def _initialize(payload: dict, request_id: Any) -> dict:
             "instructions": (
                 "CE MCP server (SPEC-mcp.md " + SPEC_VERSION + "). "
                 "7 tools per § 3 — call tools/list to enumerate. "
-                "All read + write tools are wired in v1; ce_index_github_repo "
-                "with async=true returns NOT_IMPLEMENTED until v1.1."
+                "All read + write tools are wired in v1.1; ce_index_github_repo "
+                "with async=true enqueues a chunked-indexing job — "
+                "poll progress via ce_get_job_status."
             ),
         },
     }
@@ -272,7 +279,24 @@ def _tools_list(request_id: Any) -> dict:
 
 
 def _tools_call(payload: dict, token: TokenInfo, request_id: Any) -> tuple[dict, int]:
-    params = payload.get("params") or {}
+    raw_params = payload.get("params")
+    # JSON-RPC permits omitting params, but when present they must be structured
+    # (object or array). MCP tools/call is always object-shaped; reject anything
+    # else as INVALID_PARAMS so a non-dict (e.g. `[]`, `7`, `"x"`) doesn't escape
+    # as a 500 via AttributeError on params.get(...).
+    if raw_params is None:
+        params: dict = {}
+    elif isinstance(raw_params, dict):
+        params = raw_params
+    else:
+        err = {
+            "jsonrpc": "2.0", "id": request_id,
+            "error": {
+                "code": errors.JSONRPC_INVALID_PARAMS,
+                "message": "tools/call params must be an object",
+            },
+        }
+        return err, 200
     raw_name = params.get("name", "")
     args = params.get("arguments") or {}
 
