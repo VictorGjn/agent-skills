@@ -250,7 +250,11 @@ the customer entity AND every competitor it mentions.
 
 ## Event schema example
 
-For meeting "Syroco / Anthony Veder" (2026-04-24):
+> **Scope is run-level, not event-level.** CE applies scope at consolidation time via `wiki_init.write_wiki(scope=...)` — the `wiki.add` payload accepts no per-event `scope` field, and any `scope` key inside an event is silently dropped. To route events into different scopes, the scribe groups events by intended scope and makes ONE `wiki.add` call per scope group, followed by one consolidation pass per scope. The `default_scope` config and per-meeting scope rules above describe **how the scribe groups events** before pushing — they do NOT add a per-event scope field.
+
+For meeting "Syroco / Anthony Veder" (2026-04-24), grouped into two `wiki.add` invocations — first the `prospects` group, then the `competitors` group:
+
+**Group 1 — `wiki.add(events=[…], scope="prospects")`:**
 
 ```json
 [
@@ -261,8 +265,7 @@ For meeting "Syroco / Anthony Veder" (2026-04-24):
     "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4",
     "file_id": "granola-f5a6d76a",
     "claim": "Anthony Veder ran a Syroco / Anthony Veder call (Victor + Andrew + Chloe + Lsopar). 25-vessel North Sea/Baltic gas tanker fleet; currently uses Napa, dissatisfied; interested in digital twin for hull performance and contractual margin understanding; niche needs include controllable pitch propellers and ice conditions.",
-    "entity_hint": "anthony-veder",
-    "scope": "prospects"
+    "entity_hint": "anthony-veder"
   },
   {
     "schema_version": "1.0",
@@ -271,18 +274,7 @@ For meeting "Syroco / Anthony Veder" (2026-04-24):
     "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4#turn-12",
     "file_id": "granola-f5a6d76a-t12",
     "claim": "Anthony Veder uses Napa for digital logbook + MRV validation; trialed Napa's performance tool, found it not satisfactory; in discussion with Napa about a new tool.",
-    "entity_hint": "anthony-veder",
-    "scope": "prospects"
-  },
-  {
-    "schema_version": "1.0",
-    "ts": 1714128300,
-    "source_type": "granola",
-    "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4#turn-12",
-    "file_id": "granola-f5a6d76a-t12-napa",
-    "claim": "Napa (competitor): Anthony Veder reports Napa's performance tool was not satisfactory; Napa is working on a new model.",
-    "entity_hint": "napa",
-    "scope": "competitors"
+    "entity_hint": "anthony-veder"
   },
   {
     "schema_version": "1.0",
@@ -291,8 +283,7 @@ For meeting "Syroco / Anthony Veder" (2026-04-24):
     "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4#turn-25",
     "file_id": "granola-f5a6d76a-t25",
     "claim": "Anthony Veder operates 25 vessels in North Sea/Baltic; gas tanker fleet uses shaft generator with fixed RPM (legacy variable frequency drive constraint); ~9 vessels have shaft power sensors but no fuel sensors.",
-    "entity_hint": "anthony-veder",
-    "scope": "prospects"
+    "entity_hint": "anthony-veder"
   },
   {
     "schema_version": "1.0",
@@ -301,14 +292,28 @@ For meeting "Syroco / Anthony Veder" (2026-04-24):
     "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4#turn-43",
     "file_id": "granola-f5a6d76a-t43",
     "claim": "Anthony Veder asks Syroco for spectral resolution detail on weather data, controllable pitch propeller modeling capability, and ice condition data exclusion. Andrew (Syroco) commits to share slides and follow up on CPP modeling with the Naval team.",
-    "entity_hint": "anthony-veder",
-    "scope": "prospects"
+    "entity_hint": "anthony-veder"
   }
 ]
 ```
 
-5 events from one meeting at T1. T0 would emit just the first one
-(summary only).
+**Group 2 — `wiki.add(events=[…], scope="competitors")`:**
+
+```json
+[
+  {
+    "schema_version": "1.0",
+    "ts": 1714128300,
+    "source_type": "granola",
+    "source_ref": "granola://meeting/f5a6d76a-5a80-4c35-8e48-8733a152dbb4#turn-12",
+    "file_id": "granola-f5a6d76a-t12-napa",
+    "claim": "Napa (competitor): Anthony Veder reports Napa's performance tool was not satisfactory; Napa is working on a new model.",
+    "entity_hint": "napa"
+  }
+]
+```
+
+5 events from one meeting at T1, split across 2 scope groups. T0 would emit just the first event of group 1 (summary only).
 
 ## Configuration
 

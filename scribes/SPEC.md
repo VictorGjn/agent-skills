@@ -106,10 +106,12 @@ Scribes push via `wiki.add` MCP, not by writing the events log directly:
 
 ### Idempotency
 
-Re-running a scribe MUST NOT duplicate events. Two valid implementations:
+Re-running a scribe MUST NOT duplicate events. **CE does not deduplicate events downstream** — `wiki.add` / `EventStreamSource.emit_events` appends every event it receives, and `wiki_init.consolidate()` only groups by `entity_hint` (not by `file_id`). Source-side dedup is the scribe's responsibility.
 
-1. **State-file dedup** (preferred for unbounded streams): scribe persists a `state.json` with the last processed upstream cursor (`last_processed_at`, `last_meeting_id`, etc.) and only fetches newer artifacts on re-run.
-2. **Content-hash dedup** (preferred for bounded universes): scribe enumerates the full source each run but uses `file_id = sha256(<connector-id>:<content-hash>)`. Already-emitted events have the same `file_id` and `wiki_init.consolidate()` deduplicates downstream.
+Two valid implementations:
+
+1. **State-file dedup** (preferred for unbounded streams): scribe persists a `state.json` with the last processed upstream cursor (`last_processed_at`, `last_meeting_id`, etc.) and only fetches newer artifacts on re-run. Recommended default.
+2. **Content-hash dedup with source-side filtering** (for bounded universes): scribe enumerates the full source each run, computes `file_id = sha256(<connector-id>:<content-hash>)`, then **reads the existing events log and skips any `file_id` already emitted** before calling `wiki.add`. Without that read-before-emit step, re-runs WILL bloat entity pages with duplicate claims.
 
 State files live at `~/.claude/scribes/<scribe-name>/state.json` by default; configurable.
 
