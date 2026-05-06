@@ -307,7 +307,23 @@ def _advance_one_tick_locked(
                       retry=True)
             return {"job_id": job_id, "status": "failed", "reason": "partial_corrupted"}
 
-        accumulated_files = list(partial.get("files") or []) + list(chunk["files"])
+        # Codex P1 round 6 on PR #51: dedupe by path on every merge.
+        # Failure window: put_bytes(partial) succeeds → cursor save fails
+        # (KV outage) → cron worker outer except calls fail(retry=True) →
+        # next tick reads stale cursor + already-appended partial → fetches
+        # the SAME chunk from GitHub → appends those files AGAIN → finalize
+        # doesn't dedupe → final corpus has duplicate rows + inflated
+        # totalFiles/token counts. Dedupe here is the simplest fix: dict
+        # preserves insertion order, last-write-wins per path so a replay
+        # updates to the latest fetch (stable across retries since SDLC
+        # repos are sha-pinned per candidate). Also catches any other
+        # path-collision pathology in the partial state.
+        file_map: dict[str, dict] = {}
+        for f in list(partial.get("files") or []) + list(chunk["files"]):
+            p = f.get("path")
+            if p:
+                file_map[p] = f
+        accumulated_files = list(file_map.values())
         partial_meta = partial.get("_meta") or {}
         partial_obj = {
             "_meta": {

@@ -526,6 +526,86 @@ def test_get_job_status_translates_failed_job_with_error_object(monkeypatch):
     jobs.set_backend(None)
 
 
+def test_chunk_replay_does_not_duplicate_files_in_partial(
+    vendor_indexer, fake_kv, cache_dir, monkeypatch,
+):
+    """Codex P1 round 6 on PR #51: cursor advancement can lag a successful
+    partial-blob put_bytes (KV outage between blob write and cursor
+    save). The cron retry path then re-runs the same next_idx chunk
+    against an already-appended partial corpus, and finalize() doesn't
+    dedupe — without the merge-time dedupe in advance_one_tick, the
+    final corpus would have duplicate rows + inflated totalFiles.
+
+    Simulate the exact failure window: succeed put_bytes, fail kv.set
+    on cursor, replay the same tick. Final corpus must contain each
+    path exactly once.
+    """
+    from _lib import async_indexer
+    from _lib.storage import kv as kv_module
+
+    # Force multi-tick by capping max_files to 2 (3-file repo → 2 ticks).
+    # The non-done branch is what saves cursor; the done branch deletes it.
+    monkeypatch.setattr(async_indexer, "TICK_MAX_FILES", 2)
+
+    job_id = jobs.enqueue("index_github_repo",
+                          {"repo": "x/y", "branch": "main",
+                           "data_classification": "public"},
+                          owner="t-1")
+
+    # Tick 1: plant state cleanly
+    job = jobs.claim_next()
+    r1 = async_indexer.advance_one_tick(job)
+    assert r1["status"] == "advanced"
+    assert r1["files_indexed"] == 0  # first tick is just fetch_tree
+
+    # Tick 2: arm a "cursor save fails AFTER partial write succeeds"
+    # failure mode. Lower-level: kv.set on the cursor key throws, but
+    # only on advancement (not the first-tick plant which already happened).
+    real_set = kv_module.set
+
+    def boom_on_cursor_save(key, value, *, ex_seconds=None):
+        if "cursor" in key:
+            raise RuntimeError("simulated upstash 503 on cursor save")
+        return real_set(key, value, ex_seconds=ex_seconds)
+
+    monkeypatch.setattr(kv_module, "set", boom_on_cursor_save)
+    job = jobs.claim_next()
+    try:
+        async_indexer.advance_one_tick(job)
+    except RuntimeError:
+        # The cron worker would catch this via its outer except and call
+        # fail(retry=True). Simulate that path.
+        jobs.fail(job_id, code="INTERNAL", message="cursor save failed", retry=True)
+
+    # At this point: partial blob has the first 2 files appended; cursor
+    # in KV still says next_idx=0 (was never advanced). Replay reads
+    # stale cursor, fetches the SAME 2 files again. Without dedupe, the
+    # partial would now contain 4 file rows (2 original + 2 dupes).
+    monkeypatch.setattr(kv_module, "set", real_set)
+
+    # Tick 3 (replay): re-run the same 2-file chunk
+    job = jobs.claim_next()
+    r3 = async_indexer.advance_one_tick(job)
+    assert r3["status"] == "advanced"
+
+    # Tick 4: pick up the remaining file → done branch
+    job = jobs.claim_next()
+    r4 = async_indexer.advance_one_tick(job)
+    assert r4["status"] == "complete", f"expected complete, got {r4}"
+
+    final = corpus_store.load_corpus("gh-x-y-main")
+    assert final is not None
+    paths = [f.get("path") for f in final.files]
+    # Each path appears EXACTLY once — replay didn't duplicate
+    assert len(paths) == len(set(paths)), (
+        f"chunk replay produced duplicate files in final corpus: {paths}"
+    )
+    assert final.meta.file_count == 3, (
+        f"file_count must reflect deduped count (3), not raw append (5+); "
+        f"got {final.meta.file_count}"
+    )
+
+
 def test_done_tick_marks_complete_even_when_cleanup_fails(
     vendor_indexer, fake_kv, cache_dir, monkeypatch,
 ):
