@@ -56,11 +56,18 @@ def fetch_live_default_branch(repo: str, gh_token: str | None) -> str | None:
         return None
 
 
-def verify_live(gh_token: str | None) -> int:
+def verify_live(gh_token: str | None, allow_unreachable: bool = False) -> int:
     """Compare DEFAULT_BRANCH_MAP against GitHub's current state.
 
-    Returns nonzero exit code if any drift is detected — useful as a CI
-    pre-check before bench launches that depend on the static map.
+    Returns nonzero exit code on drift OR on unreachable lookups (the
+    latter unless `allow_unreachable=True`). Codex P2 fix on PR #52: an
+    unreachable lookup means the audit didn't actually verify that repo,
+    so passing 0 with unverified state was a false-green. CI pre-checks
+    using `--verify-live` should treat that as a hard fail by default.
+
+    The `allow_unreachable` escape hatch is for unauthenticated runs where
+    rate-limit hits are expected and acceptable (e.g. local sanity checks
+    where the operator will re-run with a token).
     """
     drift = []
     unreachable = []
@@ -79,7 +86,14 @@ def verify_live(gh_token: str | None) -> int:
         print(f"\nDrift detected on {len(drift)} repo(s). Update DEFAULT_BRANCH_MAP and re-run patch.")
     if unreachable:
         print(f"\n{len(unreachable)} repo(s) unreachable; verify auth or rate limits.")
-    return 1 if drift else 0
+        if not allow_unreachable:
+            print("Treating unreachable lookups as audit failure. Pass --allow-unreachable "
+                  "to override (e.g. unauthenticated local runs).")
+    if drift:
+        return 1
+    if unreachable and not allow_unreachable:
+        return 1
+    return 0
 
 
 def patch_specs() -> tuple[int, int]:
@@ -117,14 +131,21 @@ def main() -> int:
     p.add_argument("--verify-live", action="store_true",
                    help="Audit DEFAULT_BRANCH_MAP against GitHub's current "
                         "default_branch for each mapped repo. Read-only; no "
-                        "spec.jsons modified. Nonzero exit on drift.")
+                        "spec.jsons modified. Nonzero exit on drift OR "
+                        "unreachable lookup (override the latter with "
+                        "--allow-unreachable).")
+    p.add_argument("--allow-unreachable", action="store_true",
+                   help="When --verify-live, downgrade unreachable lookups "
+                        "(rate-limit / no-token) to warnings instead of audit "
+                        "failures. Use only when the operator accepts the "
+                        "audit isn't actually verifying those repos.")
     args = p.parse_args()
 
     if args.verify_live:
         gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         if not gh_token:
             print("WARN: no GITHUB_TOKEN/GH_TOKEN; live lookups may be rate-limited.", file=sys.stderr)
-        return verify_live(gh_token)
+        return verify_live(gh_token, allow_unreachable=args.allow_unreachable)
 
     patched, skipped = patch_specs()
     print(f"\nDone. patched={patched} skipped={skipped} (already correct)")

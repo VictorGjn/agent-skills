@@ -48,16 +48,26 @@ def index_one(mcp_url: str, token: str, repo: str, branch: str) -> dict:
         record["error"] = out["error"].get("message", "")[:300]
         record["details"] = out["error"].get("data", {}).get("details", {})
     elif "result" in out:
-        sc = out["result"].get("structuredContent", {})
-        if "stats" in sc:
+        # Codex P2 fix on PR #52: MCP tool errors are flagged on
+        # `result.isError` (top-level), NOT inside structuredContent —
+        # see SPEC § 3.3. When isError=True, structuredContent carries
+        # the error envelope ({code, message, details}). The previous
+        # shape silently misclassified SOURCE_NOT_FOUND / SOURCE_FORBIDDEN
+        # as "unknown" and dropped the error message, breaking downstream
+        # recovery logic and the bench's reach-classification step.
+        result = out["result"] or {}
+        sc = result.get("structuredContent") or {}
+        if result.get("isError") is True:
+            record["status"] = "tool_error"
+            record["error_code"] = sc.get("code")
+            record["error"] = sc.get("message") or ""
+            record["details"] = sc.get("details", {})
+        elif "stats" in sc:
             record["status"] = "ok"
             record["corpus_id"] = sc.get("corpus_id")
             record["commit_sha"] = sc.get("commit_sha")
             record["file_count"] = sc["stats"].get("file_count")
             record["embedded_count"] = sc["stats"].get("embedded_count")
-        elif sc.get("isError"):
-            record["status"] = "tool_error"
-            record["error"] = sc.get("error_message", "")
         else:
             record["status"] = "unknown"
             record["raw"] = sc
