@@ -170,31 +170,64 @@ def _coerce_meta(raw: dict, size_bytes: int) -> CorpusMeta:
     )
 
 
+def _warm_cache_ttl_s() -> float:
+    """How long to trust a warm `/tmp` cache hit before re-validating Blob.
+
+    Multi-instance Vercel: instance A writes a fresh corpus to Blob; instance
+    B has a stale `/tmp` from a prior request. Without a TTL, B serves stale
+    content forever (Codex P1 on PR #50). 60s is the default — a handful of
+    cache hits per cold-write window, then we re-check Blob.
+
+    Override via `CE_WARM_CACHE_TTL_S` (set to `0` to disable warm cache
+    entirely; never use stale, every read goes to Blob).
+    """
+    raw = os.environ.get("CE_WARM_CACHE_TTL_S")
+    if raw is None:
+        return 60.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
 def _read_bytes(corpus_id: str) -> bytes | None:
     """Backend read with a per-instance /tmp warm cache.
 
     Order of operations:
-    1. Check the warm cache (current cache_dir) — fast path on warm instances.
+    1. Check the warm cache (current cache_dir) — fast path on warm instances,
+       BUT only when the cache file's mtime is within the warm-cache TTL.
+       Beyond that, treat as miss and re-fetch (Codex P1: stale-cache gap).
     2. Fall back to the configured backend (Blob in production).
-    3. On Blob hit, populate the warm cache so subsequent reads in the same
-       instance skip the round-trip.
+    3. On Blob hit, populate the warm cache (atomic temp+rename) so
+       subsequent reads in the same instance skip the round-trip.
 
-    The warm cache is bounded by /tmp's natural size + the function's life.
+    The warm cache is bounded by /tmp's natural size + the function's life
+    + the configurable TTL.
     """
+    import time as _time
     key = _key_for(corpus_id)
     backend = _backend()
 
     # When the active backend IS LocalBackend on the same path, the warm-cache
-    # check is the same lookup as the backend read. Skip the duplicate work.
+    # check is the same lookup as the backend read. Skip the duplicate work
+    # AND the TTL revalidation (filesystem reads are authoritative there).
     from .storage import local as _local
     is_local = isinstance(backend, _local.LocalBackend)
     if not is_local:
         warm = cache_dir() / key
         if warm.exists():
-            try:
-                return warm.read_bytes()
-            except OSError:
-                pass
+            ttl = _warm_cache_ttl_s()
+            if ttl > 0:
+                try:
+                    age = _time.time() - warm.stat().st_mtime
+                    if age <= ttl:
+                        return warm.read_bytes()
+                    # Stale: fall through to backend fetch. Don't unlink
+                    # eagerly — the next put will atomically replace it.
+                except OSError:
+                    pass
+            # ttl == 0 → bypass cache entirely; ttl > 0 + age > ttl →
+            # bypass this hit. Either way: re-fetch from Blob below.
 
     body = backend.get_bytes(key)
     if body is None:
