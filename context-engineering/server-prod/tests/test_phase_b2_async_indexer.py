@@ -74,13 +74,16 @@ def vendor_indexer(monkeypatch):
 
 
 def test_fetch_tree_returns_filtered_candidates(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    # P2.4 fix: fetch_tree now returns (candidates, resolved_branch). On the
+    # happy path resolved_branch == input branch.
+    candidates, branch = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     paths = sorted(c["path"] for c in candidates)
     assert paths == ["README.md", "src/auth.py", "src/login.py"]
+    assert branch == "main"
 
 
 def test_index_chunk_processes_slice_returns_done_when_exhausted(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=10, time_budget_s=999,
@@ -94,7 +97,7 @@ def test_index_chunk_processes_slice_returns_done_when_exhausted(vendor_indexer)
 
 
 def test_index_chunk_partial_returns_not_done_with_next_idx(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=2, time_budget_s=999,
@@ -105,7 +108,7 @@ def test_index_chunk_partial_returns_not_done_with_next_idx(vendor_indexer):
 
 
 def test_finalize_builds_manifest_with_kt_distribution_and_dirs(vendor_indexer):
-    candidates = vendor_indexer.fetch_tree("x", "y", "main", token=None)
+    candidates, _ = vendor_indexer.fetch_tree("x", "y", "main", token=None)
     chunk = vendor_indexer.index_chunk(
         "x", "y", "main", None, candidates,
         start_idx=0, max_files=10, time_budget_s=999,
@@ -259,6 +262,75 @@ def test_advance_one_tick_runs_to_completion_across_two_ticks(
     assert rec["files_indexed"] == 3
 
 
+def test_advance_one_tick_persists_resolved_branch_when_auto_resolve_fires(
+    fake_kv, cache_dir, monkeypatch,
+):
+    """Codex P1 regression on PR #54 (async path): when fetch_tree returns a
+    resolved branch different from the input, advance_one_tick must:
+      - persist resolved branch into the partial blob's _meta.source.branch
+        on first tick, AND
+      - read that value back on subsequent tick and pass it as the index_chunk
+        ref (NOT the original branch from job args).
+
+    Without both, content URLs on subsequent ticks point at the wrong ref
+    and every file fetch returns empty.
+    """
+    vendor = _HERE.parent.parent / "_lib" / "vendor"
+    sys.path.insert(0, str(vendor))
+    import index_github_repo as _gh  # type: ignore
+
+    # Stub fetch_tree: caller passed branch="main", we return resolved="master"
+    chunks_seen_branch: list[str] = []
+
+    def fake_fetch_tree(owner, name, branch, token, **kwargs):
+        # P2.4: return tuple. The "real" auto-resolve happened upstream;
+        # here we just simulate the signature contract.
+        return [{"path": "src/auth.py", "type": "blob", "size": 100, "sha": "a1"}], "master"
+
+    def fake_index_chunk(owner, name, branch, token, candidates, **kwargs):
+        chunks_seen_branch.append(branch)
+        return {
+            "files": [{"path": "src/auth.py", "language": "python",
+                       "tokens": 10, "totalTokens": 10,
+                       "tree": {"text": "x", "title": "auth", "tokens": 10,
+                                "totalTokens": 10, "children": [], "depth": 0},
+                       "knowledge_type": "code", "contentHash": "h1"}],
+            "next_idx": len(candidates),
+            "done": True,
+            "time_used_s": 1.0,
+        }
+
+    monkeypatch.setattr(_gh, "fetch_tree", fake_fetch_tree)
+    monkeypatch.setattr(_gh, "index_chunk", fake_index_chunk)
+
+    job_id = jobs.enqueue("index_github_repo",
+                          {"repo": "x/y", "branch": "main",  # caller's wrong branch
+                           "data_classification": "public"},
+                          owner="t-1")
+
+    # Tick 1: should write partial with _meta.source.branch="master" (resolved)
+    job = jobs.claim_next()
+    r1 = async_indexer.advance_one_tick(job)
+    assert r1["status"] == "advanced"
+
+    backend = corpus_store._backend()
+    partial_raw = backend.get_bytes("gh-x-y-main.partial.json")
+    assert partial_raw is not None, "first tick must write partial blob"
+    partial = json.loads(partial_raw.decode("utf-8"))
+    assert partial["_meta"]["source"]["branch"] == "master", (
+        "first tick must persist the RESOLVED branch (master) into partial._meta.source.branch, "
+        "not the input branch (main) — otherwise subsequent ticks fetch with the wrong ref"
+    )
+
+    # Tick 2: should call index_chunk with branch="master", not "main"
+    job = jobs.claim_next()
+    r2 = async_indexer.advance_one_tick(job)
+    assert r2["status"] == "complete", r2
+    assert chunks_seen_branch == ["master"], (
+        f"index_chunk must use the resolved branch (master) — saw {chunks_seen_branch}"
+    )
+
+
 def test_advance_one_tick_tree_fetch_404_marks_job_failed(fake_kv, cache_dir, monkeypatch):
     """fetch_tree raises with '404' in message → job failed with
     SOURCE_NOT_FOUND, no retry."""
@@ -266,7 +338,9 @@ def test_advance_one_tick_tree_fetch_404_marks_job_failed(fake_kv, cache_dir, mo
     sys.path.insert(0, str(vendor))
     import index_github_repo as _gh  # type: ignore
 
-    def boom(owner, name, branch, token):
+    def boom(owner, name, branch, token, **kwargs):
+        # **kwargs absorbs the keyword-only args (max_files, etc.) async_indexer
+        # passes through after the P2.3 split-cap change.
         raise RuntimeError("HTTP 404 Not Found")
     monkeypatch.setattr(_gh, "fetch_tree", boom)
 
