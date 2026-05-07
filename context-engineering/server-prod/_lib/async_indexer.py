@@ -74,7 +74,9 @@ def _ensure_scripts_path() -> None:
 
 
 def _resolve_github_token() -> str | None:
-    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    # Shared App-first / PAT-fallback resolver. See _lib/github_auth.py.
+    from . import github_auth
+    return github_auth.resolve_github_token()
 
 
 def _split_repo(repo: str) -> tuple[str, str]:
