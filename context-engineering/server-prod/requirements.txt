@@ -1,3 +1,7 @@
 # Runtime deps for Vercel Functions deployment.
 # Phase 2 baseline — kept minimal until tools wire up real CE engine.
 requests>=2.31
+# GitHub App auth: PyJWT + cryptography (RS256). Pulls a ~15 MB wheel
+# but unlocks fresh per-install rate-limit budgets vs. the operator's
+# personal PAT. See _lib/github_auth.py.
+pyjwt[crypto]>=2.8
