@@ -1,0 +1,6 @@
+[
+  "internal/terraform/evaluate.go",
+  "internal/terraform/eval_variable.go",
+  "internal/terraform/context_apply.go",
+  "internal/terraform/hook.go"
+]

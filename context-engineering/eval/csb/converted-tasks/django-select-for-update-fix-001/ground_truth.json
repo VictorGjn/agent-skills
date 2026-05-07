@@ -1,0 +1,11 @@
+[
+  "django/db/models/sql/compiler.py",
+  "django/db/models/query.py",
+  "django/db/models/sql/query.py",
+  "django/db/models/expressions.py",
+  "django/db/backends/base/operations.py",
+  "django/db/backends/postgresql/operations.py",
+  "tests/select_for_update/tests.py",
+  "tests/annotations/tests.py",
+  "tests/queries/tests.py"
+]

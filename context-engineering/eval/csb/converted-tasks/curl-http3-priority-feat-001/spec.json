@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Implement HTTP/3 Extensible Priorities (RFC 9218) for curl\n\n## Objective\nAdd HTTP/3 stream priority support to curl, implementing RFC 9218 Extensible Priorities\nwith urgency (0-7) and incremental (boolean) parameters.\n\n## Requirements\n\n1. **Add new curl option** `CURLOPT_H3_STREAM_PRIORITY`:\n   - Define in `include/curl/curl.h` as a new CURLOPT\n   - Implement in `lib/setopt.c` to store urgency + incremental values\n   - Add to `lib/urldata.h` in the UserDefined struct\n\n2. **Implement in HTTP/3 backend** (`lib/vquic/`):\n   - Send PRIORITY_UPDATE frames via ngtcp2/nghttp3 API\n   - Set stream priority during request setup\n   - Handle priority for both initial request and subsequent updates\n\n3. **Add CLI option** `--h3-priority`:\n   - Parse in `src/tool_getparam.c`\n   - Wire to CURLOPT in `src/tool_operate.c`\n   - Format: `--h3-priority u=N[,i]` (urgency=N, incremental flag)\n\n4. **Create test** `tests/unit/unit_h3_priority.c` or integration test\n\n## Key Reference Files\n- `include/curl/curl.h` \u2014 CURLOPT definitions\n- `lib/setopt.c` \u2014 option handling\n- `lib/urldata.h` \u2014 UserDefined struct (line ~1242 has RFC 9218 TODO)\n- `lib/vquic/curl_ngtcp2.c` \u2014 ngtcp2 HTTP/3 backend\n- `src/tool_getparam.c` \u2014 CLI argument parsing\n- `src/tool_operate.c` \u2014 option wiring\n\n## Success Criteria\n- CURLOPT_H3_STREAM_PRIORITY defined in curl.h\n- Priority fields added to urldata.h UserDefined struct\n- Backend code references priority/urgency/incremental\n- CLI option parsing exists\n- Test file exists\n",
+  "repo": "curl/curl",
+  "branch": "master",
+  "commit_sha": null,
+  "corpus_id": "gh-curl-curl-master",
+  "csb_task_id": "curl-http3-priority-feat-001"
+}

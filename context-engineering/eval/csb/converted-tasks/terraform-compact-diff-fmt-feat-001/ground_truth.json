@@ -1,0 +1,4 @@
+[
+  "internal/command/format/compact.go",
+  "internal/command/format/compact_test.go"
+]

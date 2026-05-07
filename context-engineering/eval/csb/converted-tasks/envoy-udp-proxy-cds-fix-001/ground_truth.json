@@ -1,0 +1,5 @@
+[
+  "source/extensions/filters/udp/udp_proxy/udp_proxy_filter.cc",
+  "test/extensions/filters/udp/udp_proxy/udp_proxy_filter_test.cc",
+  "changelogs/current.yaml"
+]

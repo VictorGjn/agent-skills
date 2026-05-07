@@ -1,0 +1,9 @@
+[
+  "lib/auth/grpcserver.go",
+  "lib/auth/auth.go",
+  "api/constants/constants.go",
+  "api/types/authentication.go",
+  "api/trail/trail.go",
+  "lib/services/local/users.go",
+  "lib/auth/auth_with_roles.go"
+]

@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Debug Query Plan Regression in TiDB Cost-Based Optimizer\n\n## Background\nA user reports that after upgrading TiDB, a query that previously used an index scan is now doing a full table scan. The query involves a JOIN between two tables with a WHERE clause on an indexed column.\n\n## Objective\nInvestigate the cost model in TiDB's query optimizer to identify which component could cause a plan regression where an IndexScan is replaced by a TableFullScan.\n\n## Steps\n1. Find the cost model implementation in `pkg/planner/core/` that computes the cost of IndexScan vs TableFullScan\n2. Identify the `Stats` struct and how row count estimates feed into the cost calculation\n3. Locate where the optimizer compares candidate plans and selects the cheapest\n4. Create a file `debug_report.md` in `/workspace/` documenting:\n   - The file paths and functions responsible for cost calculation of IndexScan\n   - The file paths and functions responsible for cost calculation of TableFullScan\n   - The comparison logic that picks the final plan\n   - A hypothesis for what parameter change could cause the regression\n\n## Key Reference Files\n- `pkg/planner/core/` \u2014 optimizer core\n- `pkg/planner/cardinality/` \u2014 cardinality estimation\n- `pkg/statistics/` \u2014 statistics framework\n\n## Success Criteria\n- debug_report.md exists and contains the relevant file paths\n- Report identifies cost model functions for both scan types\n- Report includes a plausible regression hypothesis\n",
+  "repo": "pingcap/tidb",
+  "branch": "master",
+  "commit_sha": null,
+  "corpus_id": "gh-pingcap-tidb-master",
+  "csb_task_id": "tidb-query-plan-regression-debug-001"
+}

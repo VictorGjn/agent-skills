@@ -1,0 +1,15 @@
+[
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaComponent.java",
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaEndpoint.java",
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaConsumer.java",
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaProducer.java",
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaConfiguration.java",
+  "components/camel-kafka/src/main/java/org/apache/camel/component/kafka/KafkaConstants.java",
+  "components/camel-kafka/pom.xml",
+  "components/camel-netty/src/main/java/org/apache/camel/component/netty/NettyComponent.java",
+  "components/camel-netty/src/main/java/org/apache/camel/component/netty/NettyEndpoint.java",
+  "components/camel-netty/src/main/java/org/apache/camel/component/netty/NettyConfiguration.java",
+  "components/camel-netty/src/main/java/org/apache/camel/component/netty/NettyConstants.java",
+  "components/camel-netty/pom.xml",
+  "components/pom.xml"
+]

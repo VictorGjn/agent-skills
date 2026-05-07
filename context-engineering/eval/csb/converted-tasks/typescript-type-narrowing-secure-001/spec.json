@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Security Review of TypeScript Type Narrowing\n\n## Objective\nReview the TypeScript compiler's type narrowing implementation for patterns that could lead to unsound type assertions, enabling developers to bypass type safety unknowingly.\n\n## Steps\n1. Find the type narrowing implementation in `src/compiler/checker.ts`\n2. Identify the narrowing functions (narrowType, narrowTypeByGuard, narrowTypeByTypeof, etc.)\n3. Analyze potential unsoundness in:\n   - typeof narrowing with user-defined type guards\n   - Discriminated union narrowing edge cases\n   - Control flow analysis across function boundaries\n   - Type assertion vs type narrowing interaction\n4. Create `security_review.md` in `/workspace/` documenting:\n   - Overview of the narrowing architecture (file paths and functions)\n   - At least 3 patterns where narrowing could produce unsound types\n   - TypeScript code examples demonstrating each pattern\n   - Severity assessment for each finding\n   - Recommendations for stricter narrowing\n\n## Key Reference Files\n- `src/compiler/checker.ts` \u2014 main type checker with narrowing\n- `src/compiler/types.ts` \u2014 type system definitions\n- `src/compiler/utilities.ts` \u2014 helper functions\n\n## Success Criteria\n- security_review.md exists\n- Identifies specific narrowing functions\n- Documents at least 3 unsound patterns\n- Includes TypeScript code examples\n",
+  "repo": "microsoft/TypeScript",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-microsoft-typescript-main",
+  "csb_task_id": "typescript-type-narrowing-secure-001"
+}

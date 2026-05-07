@@ -1,0 +1,6 @@
+[
+  "internal/server/evaluation/evaluation.go",
+  "internal/server/evaluation/eval_error.go",
+  "internal/server/evaluation/legacy_evaluator.go",
+  "internal/server/evaluation/server.go"
+]
