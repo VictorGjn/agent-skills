@@ -74,6 +74,21 @@ Every call is logged to `cache/usage.jsonl` (metadata only — query length, mod
 
 Override anything with explicit flags (`--mode`, `--task`, `--graph`, `--semantic`, etc. — all still work).
 
+For experimental reasoning scaffolds around the packed output, see `--cognitive-tool=<name>` and [`cognitive_tools/README.md`](./cognitive_tools/README.md). Unmeasured uplift, ships as scaffolding only.
+
+## Learn the engine
+
+If you want a guided walk from one query to a multi-corpus brain, [`docs/learn/`](./docs/learn/README.md) is a six-step stepladder — one runnable command and one concept per step. Under an hour on a real repo, no theory homework.
+
+| # | Step | Take-away |
+|---|------|-----------|
+| 0 | [Pack one query](./docs/learn/00-pack-one-query.md) | One file, one budget, one packed answer |
+| 1 | [Budget and depth](./docs/learn/01-budget-and-depth.md) | Five depth levels, not one chunk size |
+| 2 | [Index a workspace](./docs/learn/02-index-a-workspace.md) | The brain's short-term memory |
+| 3 | [Graph and multi-hop](./docs/learn/03-graph-and-multi-hop.md) | Linked reasoning, not flat keyword fan-out |
+| 4 | [Add a source](./docs/learn/04-add-a-source.md) | Code is one Source; transcripts/notes/CRM are others |
+| 5 | [EntityStore and wiki](./docs/learn/05-entitystore-and-wiki.md) | Compounding memory with full provenance |
+
 ## How it works
 
 ```
