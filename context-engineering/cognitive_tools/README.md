@@ -37,7 +37,7 @@ Per the skill's own value-over-proof posture (see `feedback_value_over_proof` in
 ## Adding a new tool
 
 1. Drop a markdown file in this directory.
-2. Use `{query}` and `{packed_context}` placeholders. Optionally `{depth_levels}` for a per-level summary.
+2. Use `{query}` and `{packed_context}` placeholders. The loader substitutes `{query}` and splits on `{packed_context}` — exactly two placeholders, no others.
 3. Call `pack_context.py --cognitive-tool=<filename-without-md>`.
 
 No code change needed for new templates.

@@ -107,6 +107,7 @@ The append-only events log under `brain/events/*.jsonl` is the brain's raw layer
 If you already have structured events from somewhere else (a webhook handler, a Slack bot, a Granola transcript scribe), use `EventStreamSource` directly:
 
 ```python
+from pathlib import Path
 from scripts.wiki.source_adapter import EventStreamSource
 
 src = EventStreamSource(events_dir=Path("brain/events"))
