@@ -368,8 +368,12 @@ def handle(args: dict, token: TokenInfo) -> dict[str, Any]:
 
 
 def _resolve_github_token() -> str | None:
-    import os
-    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    # GitHub App-first, PAT fallback. See `_lib/github_auth.py` for why:
+    # short version is the bench previously inherited the operator's
+    # personal-PAT 5K/hr budget and exhausted it; install tokens get a
+    # fresh decoupled budget per installation.
+    from .. import github_auth
+    return github_auth.resolve_github_token()
 
 
 def _resolve_mistral_key() -> str | None:
