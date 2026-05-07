@@ -166,6 +166,65 @@ def test_app_mint_failure_does_not_poison_cache(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_refresh_failure_returns_still_valid_cached_token(monkeypatch):
+    """When the cached token is in the 5-min slack window AND a refresh
+    attempt fails, return the cached token (not None / not the PAT) as
+    long as it hasn't actually expired. Once env-side PATs are pulled
+    after App rollout, falling through on a transient GH blip would
+    cause avoidable SOURCE_FORBIDDEN/rate-limit failures despite a
+    still-usable token in memory. Codex P1 round-5 on PR #60.
+    """
+    monkeypatch.setenv("GH_APP_ID", "12345")
+    monkeypatch.setenv("GH_APP_INSTALLATION_ID", "67890")
+    monkeypatch.setenv("GH_APP_PRIVATE_KEY", _TEST_PEM)
+    # PAT explicitly absent — this is the "fully App, no fallback" steady state.
+
+    near_expiry = time.time() + 2 * 60  # 2 min — inside slack, but still valid
+
+    calls = {"n": 0}
+
+    def _fake(jwt_str, install_id, timeout_s=20):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ("first_install_token", near_expiry)
+        # Subsequent refresh attempts fail (transient GH-side blip).
+        raise RuntimeError("github 502")
+
+    with mock.patch.object(github_auth, "_exchange_for_install_token",
+                           side_effect=_fake):
+        first = github_auth.resolve_github_token()  # mints, caches
+        second = github_auth.resolve_github_token()  # within slack, refresh fails
+    assert first == "first_install_token"
+    assert second == "first_install_token", (
+        "should return cached token while refresh fails AND cache is still valid"
+    )
+    assert calls["n"] == 2  # mint + refresh attempt
+
+
+def test_refresh_failure_falls_through_when_cache_expired(monkeypatch):
+    """If the cached token has truly expired (not just within slack),
+    refresh failure must NOT keep returning the dead token — it falls
+    through to PAT (or None)."""
+    monkeypatch.setenv("GH_APP_ID", "12345")
+    monkeypatch.setenv("GH_APP_INSTALLATION_ID", "67890")
+    monkeypatch.setenv("GH_APP_PRIVATE_KEY", _TEST_PEM)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_pat_safety_net")
+
+    expired = time.time() - 30  # already 30s past expiry
+
+    # Pre-seed an expired cache without going through mint.
+    github_auth._INSTALL_TOKEN_CACHE = {
+        "token": "stale_token", "expires_at": expired,
+    }
+
+    with mock.patch.object(github_auth, "_exchange_for_install_token",
+                           side_effect=RuntimeError("github 502")):
+        out = github_auth.resolve_github_token()
+    assert out == "ghp_pat_safety_net", (
+        "expired cache must NOT be returned even on refresh failure"
+    )
+
+
 # ── PEM normalization ─────────────────────────────────────────────────────────
 
 def test_pem_with_literal_backslash_n_is_normalized(monkeypatch):

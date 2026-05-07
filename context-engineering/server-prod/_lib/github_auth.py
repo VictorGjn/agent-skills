@@ -126,9 +126,20 @@ def resolve_github_token() -> Optional[str]:
             _INSTALL_TOKEN_CACHE = {"token": tok, "expires_at": exp}
             return tok
         except Exception:
-            # Don't poison the cache. Fall through to the PAT path so a
-            # transient GH-side blip on the App flow (or a partial misconfig)
-            # doesn't take the bench down when GITHUB_TOKEN is also set.
+            # Refresh failed. If we have a cached token that's still
+            # actually valid (under the 5-min slack window but not yet
+            # past its real expiry), keep using it — better than falling
+            # through to None / PAT and hitting SOURCE_FORBIDDEN on a
+            # transient GH-side blip. Codex P1 round-5 on PR #60.
+            if (
+                _INSTALL_TOKEN_CACHE is not None
+                and isinstance(_INSTALL_TOKEN_CACHE.get("expires_at"), float)
+                and _INSTALL_TOKEN_CACHE["expires_at"] > _now()
+            ):
+                return _INSTALL_TOKEN_CACHE["token"]  # type: ignore[return-value]
+            # Cache is empty or genuinely expired — fall through to PAT
+            # so a partial App misconfig doesn't take indexing down when
+            # GITHUB_TOKEN is also set.
             pass
 
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
