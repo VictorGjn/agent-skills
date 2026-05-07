@@ -142,3 +142,52 @@ def test_preflight_allow_unreachable_returns_zero(tmp_path, monkeypatch, capsys)
     ])
     rc = preflight.main()
     assert rc == 0
+
+
+def test_preflight_fails_on_stale_corpus_id(tmp_path, monkeypatch, capsys):
+    """A spec.json with corpus_id that doesn't match its repo+branch is a hard
+    failure: indexing is branch-driven but IR lookup uses spec.corpus_id, so
+    a stale value silently invalidates the bench."""
+    import preflight
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    d = tasks / "stale"
+    d.mkdir()
+    (d / "spec.json").write_text(json.dumps({
+        "repo": "owner/repo",
+        "branch": "main",
+        # Stale: derived from owner/repo@main is "gh-owner-repo-main"
+        "corpus_id": "gh-owner-repo-someotherbranch",
+    }), encoding="utf-8")
+    (d / "ground_truth.json").write_text(json.dumps(["src/file.py"]), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["preflight.py", "--tasks-dir", str(tasks)])
+    rc = preflight.main()
+    out = capsys.readouterr().out
+    assert "Corpus_id coherence" in out
+    assert "spec='gh-owner-repo-someotherbranch'" in out
+    assert "expected='gh-owner-repo-main'" in out
+    assert rc == 1
+
+
+def test_preflight_allow_stale_corpus_id_returns_zero(tmp_path, monkeypatch, capsys):
+    """--allow-stale-corpus-id downgrades the corpus_id mismatch to a warning."""
+    import preflight
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    d = tasks / "stale"
+    d.mkdir()
+    (d / "spec.json").write_text(json.dumps({
+        "repo": "owner/repo",
+        "branch": "main",
+        "corpus_id": "gh-owner-repo-someotherbranch",
+    }), encoding="utf-8")
+    (d / "ground_truth.json").write_text(json.dumps(["src/file.py"]), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", [
+        "preflight.py", "--tasks-dir", str(tasks), "--allow-stale-corpus-id",
+    ])
+    rc = preflight.main()
+    assert rc == 0

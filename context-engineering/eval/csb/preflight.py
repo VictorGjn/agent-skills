@@ -93,6 +93,12 @@ def main() -> int:
     p.add_argument("--allow-missing-branches", action="store_true",
                    help="Don't fail when GitHub branch lookups return 404. Useful "
                         "when v1.2 indexer auto-resolves the right branch at index time.")
+    p.add_argument("--allow-stale-corpus-id", action="store_true",
+                   help="Don't fail when spec.json's corpus_id doesn't match what the "
+                        "indexer would derive. By default this is a HARD failure: "
+                        "indexing is branch-driven but IR lookup uses spec.corpus_id, "
+                        "so a mismatch silently invalidates the bench (CORPUS_NOT_FOUND "
+                        "or wrong-corpus retrieval).")
     args = p.parse_args()
 
     if not args.tasks_dir.is_dir():
@@ -102,6 +108,7 @@ def main() -> int:
     fully_unreachable: list[tuple[str, list[str]]] = []
     partial_reach: list[tuple[str, int, int]] = []
     fully_reachable = 0
+    corpus_id_mismatches: list[tuple[str, str, str]] = []
     repo_branches: dict[tuple[str, str], list[str]] = defaultdict(list)
 
     for task_dir in sorted(args.tasks_dir.iterdir()):
@@ -137,7 +144,7 @@ def main() -> int:
             expected = slug(f"gh-{owner}-{name}-{branch}")
             actual = spec.get("corpus_id", "")
             if expected != actual:
-                print(f"[X] {task_dir.name}: corpus_id={actual!r}, expected={expected!r}")
+                corpus_id_mismatches.append((task_dir.name, actual, expected))
 
     print()
     print("# Pre-flight report")
@@ -164,8 +171,23 @@ def main() -> int:
             print(f"  ... and {len(partial_reach) - 10} more")
         print()
 
+    if corpus_id_mismatches:
+        print(f"## Corpus_id coherence ({len(corpus_id_mismatches)} mismatch(es))")
+        print()
+        print("Indexing is branch-driven (corpus_id derived at index time) but IR")
+        print("lookup uses spec.corpus_id verbatim. Mismatches cause CORPUS_NOT_FOUND")
+        print("or wrong-corpus retrieval and silently invalidate the bench.")
+        print()
+        for tid, actual, expected in corpus_id_mismatches[:20]:
+            print(f"  [X] {tid}: spec={actual!r}, expected={expected!r}")
+        if len(corpus_id_mismatches) > 20:
+            print(f"  ... and {len(corpus_id_mismatches) - 20} more")
+        print()
+
     failures = 0
     if fully_unreachable and not args.allow_unreachable:
+        failures += 1
+    if corpus_id_mismatches and not args.allow_stale_corpus_id:
         failures += 1
 
     if args.check_branches:
@@ -191,7 +213,7 @@ def main() -> int:
 
     if failures:
         print(f"\nPRE-FLIGHT FAILED ({failures} block(s)). Pass --allow-unreachable / "
-              "--allow-missing-branches to override.")
+              "--allow-missing-branches / --allow-stale-corpus-id to override.")
         return 1
     print("\nPre-flight OK.")
     return 0

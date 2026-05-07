@@ -81,16 +81,22 @@ def main() -> int:
         run(cmd)
 
     # ── Step 2: Index 44 repos ──
+    # On --resume, we always re-invoke the indexer with --skip-existing rather
+    # than short-circuiting on file existence: index_all_repos.py writes
+    # incrementally, so a failed mid-run leaves a partial JSONL (some repos
+    # OK, some errored, some never tried). --skip-existing reads OK rows out
+    # and re-tries the rest, leaving the bench correct against the full set
+    # instead of scoring against missing corpora.
     index_jsonl = run_dir / f"index-{args.tag}.jsonl"
-    if not (args.resume and index_jsonl.exists()):
-        run([py, f"{csb}/index_all_repos.py",
-             "--tasks-dir", str(args.tasks_dir),
-             "--token-file", str(args.token_file),
-             "--mcp-url", args.mcp_url,
-             "--output", str(index_jsonl),
-             "--parallel", str(args.parallel)])
-    else:
-        print(f"[skip] {index_jsonl} exists (--resume).")
+    cmd = [py, f"{csb}/index_all_repos.py",
+           "--tasks-dir", str(args.tasks_dir),
+           "--token-file", str(args.token_file),
+           "--mcp-url", args.mcp_url,
+           "--output", str(index_jsonl),
+           "--parallel", str(args.parallel)]
+    if args.resume and index_jsonl.exists():
+        cmd.append("--skip-existing")
+    run(cmd)
 
     # ── Step 3: IR sweep × 4 configs ──
     ir_jsonls = []
