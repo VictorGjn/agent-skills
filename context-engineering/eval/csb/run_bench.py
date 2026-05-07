@@ -152,8 +152,10 @@ def main() -> int:
     # On --resume, only skip a config if its JSONL is COMPLETE (last line is
     # the run_ir_bench `_summary` sentinel). Truncated files from a crash get
     # re-run rather than diffed-as-if-complete.
+    # Pass the token via --token-file rather than --token: argv is logged by
+    # run() and visible to `ps`, so a long-lived bearer would leak into stdout
+    # plus process listings on every IR sweep iteration.
     ir_jsonls = []
-    token = args.token_file.read_text(encoding="utf-8-sig").strip()
     for cfg in CONFIGS:
         out = run_dir / f"ir-{cfg}-{args.tag}.jsonl"
         ir_jsonls.append(out)
@@ -165,7 +167,7 @@ def main() -> int:
         run([py, f"{csb}/run_ir_bench.py",
              "--tasks-dir", str(args.tasks_dir),
              "--mcp-url", args.mcp_url,
-             "--token", token,
+             "--token-file", str(args.token_file),
              "--config", cfg,
              "--top-k", "5",
              "--output", str(out)])

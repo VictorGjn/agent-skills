@@ -87,3 +87,59 @@ def test_ir_jsonl_complete_handles_large_file(tmp_path):
     rows.append({"_summary": {"recall": 0.5}})
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     assert run_bench.ir_jsonl_complete(p) is True
+
+
+# ── Token must NOT appear in argv (Codex round-4 finding) ─────────────────────
+
+def test_run_ir_bench_accepts_token_file(tmp_path, monkeypatch, capsys):
+    """run_ir_bench.py reads the bearer from --token-file, not --token, so
+    the secret never lands on the command line / `ps` listing."""
+    import importlib
+
+    token_file = tmp_path / "tok.txt"
+    token_file.write_text("secret-bearer-xyz\n", encoding="utf-8")
+
+    # Empty tasks dir → main() exits early without making MCP calls.
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    out = tmp_path / "ir.jsonl"
+
+    sys.argv = [
+        "run_ir_bench.py",
+        "--tasks-dir", str(tasks),
+        "--mcp-url", "https://example.invalid",
+        "--token-file", str(token_file),
+        "--config", "ce-keyword",
+        "--output", str(out),
+    ]
+    rib = importlib.import_module("run_ir_bench")
+    # Empty tasks → exits 1 with "no tasks found", which is fine; we just
+    # need to confirm argparse accepts --token-file (it would exit 2 otherwise).
+    rc = rib.main()
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "no tasks found" in captured.err
+    # argv must not contain the token literal.
+    assert "secret-bearer-xyz" not in " ".join(sys.argv)
+
+
+def test_run_ir_bench_errors_without_any_token(tmp_path, monkeypatch, capsys):
+    """Neither --token nor --token-file is a clean error, not a crash."""
+    import importlib
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    out = tmp_path / "ir.jsonl"
+
+    sys.argv = [
+        "run_ir_bench.py",
+        "--tasks-dir", str(tasks),
+        "--mcp-url", "https://example.invalid",
+        "--config", "ce-keyword",
+        "--output", str(out),
+    ]
+    rib = importlib.import_module("run_ir_bench")
+    rc = rib.main()
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "--token-file" in captured.err
