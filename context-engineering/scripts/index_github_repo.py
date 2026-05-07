@@ -17,6 +17,7 @@ import re
 import hashlib
 import time
 import argparse
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -41,6 +42,15 @@ INDEXABLE_EXTENSIONS = {
     '.proto',
     '.env.example', '.env.sample',
     'Dockerfile', 'Makefile',
+    # P2.1 (v1.2): broaden source coverage for the IR bench. .c/.cc/.cpp/.h
+    # cover the C/C++ tier (linux, ceph, postgres, kafka native bindings).
+    # .cs covers .NET (aspnetcore, roslyn). .scala covers Strata. .j2 covers
+    # ansible Jinja templates. 11/70 CSB SDLC tasks were unreachable on
+    # v1.0 because their GT files lived in these extensions.
+    '.c', '.cc', '.cpp', '.h', '.hpp',
+    '.cs',
+    '.scala',
+    '.j2',
 }
 
 SKIP_PATTERNS = [
@@ -53,7 +63,17 @@ SKIP_PATTERNS = [
 ]
 
 MAX_FILE_SIZE = 80_000  # 80KB
-MAX_FILES_TO_FETCH = 300  # rate limit safety
+
+# P2.3 (v1.2): split caps by indexing path. Sync indexer is bounded by
+# Vercel's 280s function budget — at ~200ms/file, 2000 files is the
+# upper limit before BUDGET_EXCEEDED becomes likely. Async path uses
+# chunked fetching (Phase B.2) and can scale to 10k candidates without
+# bumping into per-tick budget. The legacy MAX_FILES_TO_FETCH alias
+# stays at the sync value for any external callers that imported it
+# pre-v1.2 (the codebase calls it via fetch_tree's max_files arg).
+MAX_FILES_TO_FETCH_SYNC = 2000
+MAX_FILES_TO_FETCH_ASYNC = 10_000
+MAX_FILES_TO_FETCH = MAX_FILES_TO_FETCH_SYNC  # legacy alias
 
 # ── GitHub API ──
 
@@ -90,6 +110,39 @@ def github_get_raw(url: str, token: str = None) -> str:
         if e.code == 404:
             return ''
         raise
+
+
+def encode_path(path: str) -> str:
+    """URL-encode a path for use in GitHub `/contents/<path>` URLs.
+
+    P2.5 (v1.2): path components may contain spaces or other characters that
+    `urllib.request.urlopen` rejects with `InvalidURL`. `microsoft/vscode` and
+    `dotnet/roslyn` both have files at paths with literal spaces — these
+    raised at fetch time on v1.0 with no graceful degradation. `safe='/'`
+    preserves the directory separators while encoding spaces and other
+    reserved characters.
+    """
+    return urllib.parse.quote(path, safe='/')
+
+
+def resolve_default_branch(owner: str, repo: str, token: str = None) -> str | None:
+    """Look up the repo's current default_branch via the GitHub repo API.
+
+    P2.4 (v1.2): `fetch_tree` originally raised `RuntimeError` when the
+    caller-provided branch didn't exist on the upstream — costing 13/70 CSB
+    tasks on the v1.0 bench (apache/beam=master, ansible=devel, kafka=trunk,
+    etc., all baked branch=main in their spec). This helper lets the caller
+    auto-resolve once on 404 without hardcoding a static map.
+
+    Returns None on lookup failure (rate-limited, repo missing, etc.) so the
+    caller can decide whether to surface the original error.
+    """
+    url = f'https://api.github.com/repos/{owner}/{repo}'
+    try:
+        data = github_get(url, token)
+    except HTTPError:
+        return None
+    return data.get('default_branch')
 
 
 def should_index(path: str) -> bool:
@@ -265,18 +318,67 @@ def detect_language(path: str) -> str:
 # ── Main indexer ──
 
 def fetch_tree(owner: str, repo: str, branch: str = 'main',
-               token: str = None) -> list[dict]:
+               token: str = None,
+               *,
+               max_files: int = MAX_FILES_TO_FETCH_SYNC,
+               extension_priority: str = 'source-first',
+               auto_resolve_branch: bool = True) -> tuple[list[dict], str]:
     """Phase 1 of indexing: fetch the GitHub tree, filter to indexable
     files, sort + cap. Pure data — no per-file content fetches yet.
     Idempotent and cheap (~1 GitHub API call). Run ONCE per job.
 
+    Returns a tuple of (candidates, resolved_branch). `resolved_branch` is
+    the same as the input `branch` unless auto_resolve_branch fired (see
+    P2.4 below). Callers MUST use `resolved_branch` when fetching content
+    via `index_chunk` — otherwise content URLs use the wrong ref and every
+    file fetch returns 404 / empty (Codex P1 catch on PR #54: silent empty
+    corpora despite successful tree discovery).
+
     Phase B.2: this is the first of three split functions. The async
     cron worker calls this on the first tick and stores the candidates
     list in KV; subsequent ticks call index_chunk on slices of it.
+
+    P2.2 (v1.2): `extension_priority` controls cap-time sort order.
+    'source-first' (default): source code (.py/.ts/.go/.rs/.c/.cpp/.cs/etc.)
+    appears first; markdown/docs after. This is the bench-honest priority —
+    the v1.0 sort had .md first, which on multi-thousand-file repos filled
+    the cap with READMEs before any source code was reached. 'docs-first'
+    preserves the legacy behavior for callers that explicitly want it.
+
+    P2.3 (v1.2): `max_files` is now a parameter (default = sync cap of 2000).
+    Async callers should pass `max_files=MAX_FILES_TO_FETCH_ASYNC` (10k);
+    the chunked indexer can scale beyond the sync 280s function budget.
+
+    P2.4 (v1.2): on 404 / no-tree, `auto_resolve_branch=True` looks up the
+    repo's current default_branch via the GitHub repo API and retries once.
+    The resolved branch is the second tuple element. Caller can disable
+    for stricter handling (e.g. test fixtures where a silent branch
+    substitution would mask a real bug).
     """
+    # P2.2: validate extension_priority eagerly — not only in the cap branch
+    # below — so a bogus value fails fast even when the corpus fits the cap.
+    if extension_priority not in ('source-first', 'docs-first'):
+        raise ValueError(
+            f"extension_priority must be 'source-first' or 'docs-first', "
+            f"got {extension_priority!r}"
+        )
     print(f'Fetching tree for {owner}/{repo}@{branch}...', file=sys.stderr)
     tree_url = f'https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1'
-    tree_data = github_get(tree_url, token)
+    try:
+        tree_data = github_get(tree_url, token)
+    except HTTPError as e:
+        if e.code == 404 and auto_resolve_branch:
+            real = resolve_default_branch(owner, repo, token)
+            if real and real != branch:
+                print(f'Branch {branch!r} not found; auto-resolved to default_branch={real!r}',
+                      file=sys.stderr)
+                tree_url = f'https://api.github.com/repos/{owner}/{repo}/git/trees/{real}?recursive=1'
+                tree_data = github_get(tree_url, token)
+                branch = real  # for the SystemExit log below
+            else:
+                raise
+        else:
+            raise
 
     if 'tree' not in tree_data:
         # SystemExit (from sys.exit) is BaseException — escapes tool
@@ -298,17 +400,38 @@ def fetch_tree(owner: str, repo: str, branch: str = 'main',
 
     print(f'Found {len(candidates)} indexable files (of {len(tree_data["tree"])} total)', file=sys.stderr)
 
-    if len(candidates) > MAX_FILES_TO_FETCH:
+    if len(candidates) > max_files:
+        # P2.2: source-first puts code in the first slot, docs in the third.
+        # docs-first inverts. Anything outside the explicit tiers lands in
+        # the middle to preserve relative ordering.
+        SOURCE_EXTS = {
+            '.py', '.pyi',
+            '.ts', '.tsx', '.js', '.jsx', '.mjs',
+            '.go', '.rs', '.java', '.kt', '.swift', '.rb',
+            '.c', '.cc', '.cpp', '.h', '.hpp',
+            '.cs', '.scala',
+            '.vue', '.svelte', '.astro',
+        }
+        DOC_EXTS = {'.md', '.mdx', '.txt', '.rst'}
+
+        # extension_priority validated at function entry — only two branches reachable here.
+        if extension_priority == 'source-first':
+            source_tier, doc_tier = 0, 2
+        else:  # 'docs-first' (validated above)
+            source_tier, doc_tier = 2, 0
+
         def sort_key(item):
             ext = Path(item['path']).suffix.lower()
-            if ext in ('.md', '.mdx'): return (0, item['path'])
-            if ext in ('.ts', '.tsx', '.py', '.rs', '.go'): return (1, item['path'])
-            return (2, item['path'])
+            if ext in SOURCE_EXTS:
+                return (source_tier, item['path'])
+            if ext in DOC_EXTS:
+                return (doc_tier, item['path'])
+            return (1, item['path'])
         candidates.sort(key=sort_key)
-        candidates = candidates[:MAX_FILES_TO_FETCH]
-        print(f'Capped to {MAX_FILES_TO_FETCH} files', file=sys.stderr)
+        candidates = candidates[:max_files]
+        print(f'Capped to {max_files} files (priority={extension_priority})', file=sys.stderr)
 
-    return candidates
+    return candidates, branch
 
 
 def index_chunk(owner: str, repo: str, branch: str,
@@ -346,7 +469,11 @@ def index_chunk(owner: str, repo: str, branch: str,
         path = item['path']
         language = detect_language(path)
 
-        content_url = f'https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}'
+        # P2.5 (v1.2): URL-encode path so files like
+        # 'extensions/markdown-language-features/test-workspace/sub with space/file.md'
+        # don't raise InvalidURL inside urllib. safe='/' preserves the
+        # directory separators while encoding spaces and other reserved chars.
+        content_url = f'https://api.github.com/repos/{owner}/{repo}/contents/{encode_path(path)}?ref={urllib.parse.quote(branch, safe="")}'
         content = github_get_raw(content_url, token)
         cur += 1
 
@@ -428,12 +555,17 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
     shape as the pre-Phase-B.2 monolithic version. Used by the local CLI
     and by the synchronous (`async=false`) `ce_index_github_repo` path.
     """
-    candidates = fetch_tree(owner, repo, branch, token)
+    # P2.4 fix (Codex P1 on PR #54): use resolved_branch for downstream
+    # content fetches. fetch_tree may have auto-resolved a 404 to the
+    # repo's actual default_branch; passing the original branch through
+    # to index_chunk would point content URLs at a non-existent ref and
+    # return empty for every file.
+    candidates, resolved_branch = fetch_tree(owner, repo, branch, token)
     files: list[dict] = []
     next_idx = 0
     while next_idx < len(candidates):
         chunk = index_chunk(
-            owner, repo, branch, token, candidates,
+            owner, repo, resolved_branch, token, candidates,
             start_idx=next_idx,
             max_files=MAX_FILES_TO_FETCH,  # no chunking in sync mode
             time_budget_s=999_999,         # no wall-time cap in sync mode
@@ -444,7 +576,9 @@ def index_github_repo(owner: str, repo: str, branch: str = 'main',
         next_idx = chunk['next_idx']
         if chunk['done']:
             break
-    return finalize(files, owner, repo, branch)
+    # finalize records the source branch in the index manifest — use the
+    # resolved branch so the manifest reflects what was actually indexed.
+    return finalize(files, owner, repo, resolved_branch)
 
 
 # ── Main ──
