@@ -1,0 +1,10 @@
+[
+  "extensions/typescript-language-features/src/languageFeatures/diagnostics.ts",
+  "extensions/typescript-language-features/src/typescriptServiceClient.ts",
+  "extensions/typescript-language-features/src/tsServer/spawner.ts",
+  "src/vs/workbench/contrib/files/browser/fileCommands.ts",
+  "src/vs/workbench/api/common/extHostDiagnostics.ts",
+  "src/vs/workbench/contrib/markers/browser/markersView.ts",
+  "src/vs/editor/contrib/gotoError/browser/gotoError.ts",
+  "src/vs/platform/files/common/files.ts"
+]

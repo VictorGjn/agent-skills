@@ -1,0 +1,11 @@
+[
+  "clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java",
+  "clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java",
+  "clients/src/main/java/org/apache/kafka/clients/producer/internals/BufferPool.java",
+  "clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerBatch.java",
+  "clients/src/main/java/org/apache/kafka/clients/producer/internals/Sender.java",
+  "clients/src/main/java/org/apache/kafka/clients/NetworkClient.java",
+  "clients/src/main/java/org/apache/kafka/clients/InFlightRequests.java",
+  "clients/src/main/java/org/apache/kafka/common/requests/ProduceRequest.java",
+  "clients/src/main/java/org/apache/kafka/clients/producer/internals/IncompleteBatches.java"
+]

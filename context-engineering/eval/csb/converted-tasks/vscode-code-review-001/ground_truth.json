@@ -1,0 +1,7 @@
+[
+  "src/vs/editor/common/core/range.ts",
+  "src/vs/base/common/strings.ts",
+  "src/vs/editor/common/model/textModelSearch.ts",
+  "src/vs/editor/common/languageFeatureRegistry.ts",
+  "src/vs/editor/common/core/position.ts"
+]

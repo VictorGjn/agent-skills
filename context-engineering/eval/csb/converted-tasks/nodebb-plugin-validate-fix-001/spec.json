@@ -1,0 +1,8 @@
+{
+  "description": "# Add Validation for Plugin Identifiers in Plugin Activation\n\n**Repository:** NodeBB/NodeBB\n**Language:** JavaScript\n**Difficulty:** hard\n\n## Problem\n\nNodeBB's plugin activation system processes malformed plugin identifiers without proper validation. Any string is accepted as a plugin identifier, including names with whitespace, special characters, or incorrect formats. Administrators receive no feedback when providing incorrect plugin names, making it difficult to identify errors and potentially causing unexpected behavior.\n\n## Key Components\n\n- Plugin management/activation code \u2014 where plugin identifiers are processed\n- Plugin naming conventions and expected patterns (e.g., `nodebb-plugin-*`, `nodebb-widget-*`)\n\n## Task\n\n1. Locate the plugin activation code path in NodeBB\n2. Add validation that checks plugin identifiers against established naming patterns\n3. Reject invalid identifiers (whitespace, special characters, incorrect format) with clear error messages\n4. Ensure administrators receive immediate feedback when providing malformed plugin names\n5. Run existing tests to ensure no regressions\n\n## Success Criteria\n\n- Plugin activation rejects malformed identifiers with clear error messages\n- Valid plugin identifiers (matching expected naming patterns) are accepted as before\n- Administrators receive immediate feedback on invalid input\n- All existing tests pass\n\n",
+  "repo": "NodeBB/NodeBB",
+  "branch": "master",
+  "commit_sha": "a3e1a666b876e0b3ccbb5284dd826c8c90c113b4",
+  "corpus_id": "gh-nodebb-nodebb-master",
+  "csb_task_id": "nodebb-plugin-validate-fix-001"
+}

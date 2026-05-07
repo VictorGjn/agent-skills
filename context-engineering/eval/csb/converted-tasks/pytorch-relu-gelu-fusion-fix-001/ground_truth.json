@@ -1,0 +1,8 @@
+[
+  "torch/_inductor/fx_passes/post_grad.py",
+  "torch/_inductor/lowering.py",
+  "test/inductor/test_pattern_matcher.py",
+  "torchgen/fuse/gen_patterns.py",
+  "torch/_inductor/fx_passes/serialized_patterns/addmm_relu_pattern.py",
+  "torch/_inductor/fx_passes/serialized_patterns/addmm_gelu_pattern.py"
+]

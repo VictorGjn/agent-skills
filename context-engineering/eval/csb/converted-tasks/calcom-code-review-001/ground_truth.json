@@ -1,0 +1,5 @@
+[
+  "packages/features/feature-opt-in/services/FeatureOptInService.ts",
+  "packages/features/feature-opt-in/config.ts",
+  "packages/trpc/server/routers/viewer/featureOptIn/_router.ts"
+]

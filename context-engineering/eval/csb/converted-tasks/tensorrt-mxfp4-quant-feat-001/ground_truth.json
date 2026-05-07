@@ -1,0 +1,8 @@
+[
+  "cpp/include/tensorrt_llm/common/quantization.h",
+  "tensorrt_llm/quantization/mode.py",
+  "tensorrt_llm/_torch/modules/fused_moe/fused_moe_trtllm_gen.py",
+  "tensorrt_llm/_torch/modules/fused_moe/interface.py",
+  "tensorrt_llm/_torch/modules/fused_moe/fused_moe_cutlass.py",
+  "tensorrt_llm/quantization/utils/fp4_utils.py"
+]

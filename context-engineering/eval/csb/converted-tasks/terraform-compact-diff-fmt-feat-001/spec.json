@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Implement CompactDiffFormatter for Terraform\n\n## Objective\nCreate a `CompactDiffFormatter` in `internal/command/format/` that produces a condensed,\nsummary-style diff output for `terraform plan`, showing only resource-level changes\nwithout attribute-level detail.\n\n## Requirements\n\n1. **Create `internal/command/format/compact.go`** with:\n   - `CompactDiffFormatter` struct implementing a plan formatter\n   - `Format(plan *plans.Plan, schemas *terraform.Schemas)` method returning string\n   - Outputs one line per resource change: `[action] resource_type.name`\n   - Groups changes by action type (create/update/delete/replace)\n   - Shows summary counts at the end\n\n2. **Create `internal/command/format/compact_test.go`** with tests\n\n3. **Follow Terraform patterns**:\n   - Study the existing `DiffFormatter` in the format package\n   - Use `plans.Action` constants (Create, Update, Delete, etc.)\n   - Use `addrs.AbsResourceInstance` for resource addressing\n\n## Key Reference Files\n- `internal/command/format/diff.go` \u2014 existing diff formatter\n- `internal/command/format/state.go` \u2014 state formatter pattern\n- `internal/plans/changes.go` \u2014 plan change types\n- `internal/plans/plan.go` \u2014 Plan struct definition\n- `internal/addrs/resource.go` \u2014 resource addressing\n\n## Success Criteria\n- CompactDiffFormatter struct exists in format package\n- Format method accepts plan and schemas parameters\n- Outputs resource-level change summary\n- Groups by action type\n- Test file exists\n",
+  "repo": "hashicorp/terraform",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-hashicorp-terraform-main",
+  "csb_task_id": "terraform-compact-diff-fmt-feat-001"
+}

@@ -4,4 +4,6 @@ cache/
 *.json
 !package.json
 !context-engineering/server-prod/vercel.json
+!context-engineering/eval/csb/converted-tasks/**/spec.json
+!context-engineering/eval/csb/converted-tasks/**/ground_truth.json
 .DS_Store

@@ -1,0 +1,6 @@
+[
+  "torch/_dynamo/resume_execution.py",
+  "torch/_dynamo/symbolic_convert.py",
+  "test/dynamo/test_repros.py",
+  "test/dynamo/test_ctx_manager.py"
+]

@@ -1,0 +1,8 @@
+[
+  "internal/storage/storage.go",
+  "internal/storage/sql/common/flag.go",
+  "internal/storage/fs/snapshot.go",
+  "internal/storage/fs/store.go",
+  "internal/common/store_mock.go",
+  "errors/errors.go"
+]

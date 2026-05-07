@@ -1,0 +1,5 @@
+# Local planning files (Manus-style task_plan.md / findings.md / progress.md)
+.planning/
+
+# Bench run artifacts — JSONL files can be MBs, regenerated on each bench
+eval/csb/runs/*.jsonl

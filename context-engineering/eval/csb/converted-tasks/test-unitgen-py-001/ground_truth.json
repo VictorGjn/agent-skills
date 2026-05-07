@@ -1,0 +1,5 @@
+[
+  "django/middleware/cache.py",
+  "django/utils/cache.py",
+  "django/utils/deprecation.py"
+]

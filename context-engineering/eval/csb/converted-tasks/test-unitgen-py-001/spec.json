@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Generate Unit Tests for Django Cache Middleware\n\n**Repository:** django/django\n**Output:** Write your test file to `/workspace/tests/test_cache_middleware.py`\n\n## Objective\n\nGenerate comprehensive unit tests for Django's cache middleware (`django/middleware/cache.py`). This module implements `UpdateCacheMiddleware` and `FetchFromCacheMiddleware` which together form Django's full-page caching system.\n\n## Scope\n\nRead `django/middleware/cache.py` to understand the classes and their methods. Your tests must cover:\n\n- `UpdateCacheMiddleware.process_response` \u2014 caching conditional logic (cacheable vs non-cacheable responses)\n- `FetchFromCacheMiddleware.process_request` \u2014 cache hit vs cache miss behavior\n- Cache-Control header handling (no-cache, max-age, private)\n- Vary header interactions\n- Non-GET/HEAD method passthrough (POST, PUT, DELETE should not be cached)\n- Authenticated request handling\n\n## Content Expectations\n\nYour test file must:\n- Use `django.test.TestCase` or `django.test.SimpleTestCase` as base class\n- Include at least 8 test methods with `test_` prefix\n- Cover at least 3 distinct failure/edge cases (e.g., non-cacheable status codes, missing Vary headers)\n- Import and use Django's test client or mock request factories\n- Do NOT run the tests yourself \u2014 write the test file and the evaluation system validates independently\n\n## Output\n\nWrite your test file to:\n```\n/workspace/tests/test_cache_middleware.py\n```\n",
+  "repo": "django/django",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-django-django-main",
+  "csb_task_id": "test-unitgen-py-001"
+}

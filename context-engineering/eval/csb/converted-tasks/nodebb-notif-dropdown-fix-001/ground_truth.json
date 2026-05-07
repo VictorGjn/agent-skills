@@ -1,0 +1,8 @@
+[
+  "public/src/client/header/notifications.js",
+  "public/src/modules/notifications.js",
+  "public/src/client/topic/fork.js",
+  "public/src/client/topic/move.js",
+  "public/src/modules/categorySelector.js",
+  "public/src/modules/categorySearch.js"
+]

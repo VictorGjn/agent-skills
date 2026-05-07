@@ -1,0 +1,6 @@
+[
+  "source/common/upstream/upstream_impl.cc",
+  "source/extensions/clusters/dynamic_forward_proxy/cluster.cc",
+  "source/extensions/clusters/dynamic_forward_proxy/cluster.h",
+  "test/extensions/clusters/dynamic_forward_proxy/cluster_test.cc"
+]

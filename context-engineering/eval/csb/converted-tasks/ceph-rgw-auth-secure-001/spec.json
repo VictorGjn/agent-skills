@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Security Audit of Ceph RADOS Gateway S3 Authentication\n\n## Objective\nPerform a security audit of the S3 authentication implementation in Ceph's RADOS Gateway (RGW) and create a findings report with remediation recommendations.\n\n## Steps\n1. Find the S3 authentication implementation in `src/rgw/` (look for AWS Signature V4 handling)\n2. Identify the request signing and verification flow\n3. Check for common S3 auth vulnerabilities:\n   - Signature version fallback (V2 vs V4)\n   - Timing attacks in signature comparison\n   - Request replay prevention (timestamp validation window)\n   - Secret key storage and access patterns\n4. Create `security_audit.md` in `/workspace/` documenting:\n   - Authentication flow overview (file paths and key functions)\n   - Each finding with severity, description, file location, and remediation\n   - At least 3 specific findings with code references\n   - Summary risk assessment\n\n## Key Reference Files\n- `src/rgw/rgw_auth_s3.h` and `src/rgw/rgw_auth_s3.cc` \u2014 S3 auth\n- `src/rgw/rgw_rest_s3.cc` \u2014 S3 REST handler\n- `src/rgw/rgw_auth.h` \u2014 auth framework\n\n## Success Criteria\n- security_audit.md exists\n- Contains file paths from src/rgw/\n- Identifies at least 3 security findings\n- Includes remediation recommendations\n",
+  "repo": "ceph/ceph",
+  "branch": "main",
+  "commit_sha": null,
+  "corpus_id": "gh-ceph-ceph-main",
+  "csb_task_id": "ceph-rgw-auth-secure-001"
+}

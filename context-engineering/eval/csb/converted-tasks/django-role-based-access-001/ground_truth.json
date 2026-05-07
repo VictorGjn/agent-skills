@@ -1,0 +1,6 @@
+[
+  "django/forms/widgets.py",
+  "django/forms/utils.py",
+  "django/forms/templates/django/forms/widgets/attrs.html",
+  "django/forms/jinja2/django/forms/widgets/attrs.html"
+]

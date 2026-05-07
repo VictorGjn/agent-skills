@@ -1,0 +1,15 @@
+[
+  "source/common/http/conn_manager_impl.cc",
+  "source/common/http/conn_manager_impl.h",
+  "source/common/http/filter_manager.cc",
+  "source/common/http/filter_manager.h",
+  "source/common/http/header_map_impl.cc",
+  "source/common/http/header_map_impl.h",
+  "test/common/http/conn_manager_impl_test.cc",
+  "test/common/http/conn_manager_impl_test_2.cc",
+  "test/common/http/conn_manager_impl_test_3.cc",
+  "test/common/http/conn_manager_misc_test.cc",
+  "test/common/http/filter_manager_test.cc",
+  "test/common/http/conn_manager_impl_test_base.h",
+  "test/common/http/conn_manager_impl_test_base.cc"
+]

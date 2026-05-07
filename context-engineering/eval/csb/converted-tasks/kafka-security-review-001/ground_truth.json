@@ -1,0 +1,7 @@
+[
+  "clients/src/main/java/org/apache/kafka/common/security/scram/internals/ScramSaslServer.java",
+  "clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslServerAuthenticator.java",
+  "clients/src/main/java/org/apache/kafka/common/security/authenticator/CredentialCache.java",
+  "core/src/main/scala/kafka/security/authorizer/AclAuthorizer.scala",
+  "clients/src/main/java/org/apache/kafka/common/security/scram/internals/ScramMessages.java"
+]

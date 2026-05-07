@@ -1,0 +1,10 @@
+[
+  "flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java",
+  "flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/EvictingWindowOperator.java",
+  "flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/MergingWindowSet.java",
+  "flink-streaming-java/src/test/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperatorTest.java",
+  "flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperatorBuilder.java",
+  "flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/assigners/MergingWindowAssigner.java",
+  "flink-core/src/main/java/org/apache/flink/util/OutputTag.java",
+  "flink-streaming-java/src/main/java/org/apache/flink/streaming/api/windowing/assigners/EventTimeSessionWindows.java"
+]

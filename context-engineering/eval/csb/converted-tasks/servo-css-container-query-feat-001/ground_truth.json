@@ -1,0 +1,18 @@
+[
+  "servo::components/script/layout_dom/element.rs",
+  "servo::components/layout/replaced.rs",
+  "servo::components/layout/traversal.rs",
+  "servo::components/layout/dom.rs",
+  "servo::components/layout/style_ext.rs",
+  "servo::components/layout/fragment_tree/box_fragment.rs",
+  "servo::components/layout/layout_box_base.rs",
+  "servo::components/layout/context.rs",
+  "servo::components/layout/dom_traversal.rs",
+  "servo::components/layout/lib.rs",
+  "servo::components/layout/query.rs",
+  "servo::components/layout/formatting_contexts.rs",
+  "servo::components/script/layout_dom/node.rs",
+  "servo::tests/unit/style/custom_properties.rs",
+  "servo::tests/unit/style/stylesheets.rs",
+  "servo::components/layout/Cargo.toml"
+]

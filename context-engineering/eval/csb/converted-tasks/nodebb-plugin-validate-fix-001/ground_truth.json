@@ -1,0 +1,6 @@
+[
+  "src/constants.js",
+  "src/plugins/install.js",
+  "src/socket.io/admin/plugins.js",
+  "src/cli/manage.js"
+]

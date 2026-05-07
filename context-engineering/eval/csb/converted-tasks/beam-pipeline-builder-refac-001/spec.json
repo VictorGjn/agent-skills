@@ -1,0 +1,8 @@
+{
+  "description": "# Task: Refactor PipelineOptions Validation in Apache Beam\n\n## Background\nThe PipelineOptions validation in Apache Beam is scattered across multiple locations. This task consolidates validation into a dedicated validator class using the Builder pattern.\n\n## Objective\nCreate a `PipelineOptionsValidator` class that centralizes validation for PipelineOptions, replacing scattered validation calls.\n\n## Steps\n1. Study the existing PipelineOptions interface in `sdks/java/core/src/main/java/org/apache/beam/sdk/options/`\n2. Identify validation logic in `PipelineOptionsFactory` and `PipelineOptionsValidator` (if exists)\n3. Create `/workspace/sdks/java/core/src/main/java/org/apache/beam/sdk/options/PipelineOptionsValidator.java` with:\n   - A Builder that accumulates validation rules\n   - Methods: `validateRequired()`, `validateType()`, `validateRange()`\n   - A `validate()` method that runs all accumulated rules and returns a `ValidationResult`\n4. Create a `ValidationResult` class that holds errors and warnings\n5. Create a test file for the validator\n\n## Key Reference Files\n- `sdks/java/core/src/main/java/org/apache/beam/sdk/options/PipelineOptions.java`\n- `sdks/java/core/src/main/java/org/apache/beam/sdk/options/PipelineOptionsFactory.java`\n\n## Success Criteria\n- PipelineOptionsValidator.java exists with Builder pattern\n- ValidationResult class exists\n- Test file exists\n- Validator has validateRequired, validateType, and validate methods\n",
+  "repo": "apache/beam",
+  "branch": "master",
+  "commit_sha": null,
+  "corpus_id": "gh-apache-beam-master",
+  "csb_task_id": "beam-pipeline-builder-refac-001"
+}

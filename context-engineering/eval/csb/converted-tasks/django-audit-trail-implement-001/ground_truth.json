@@ -1,0 +1,7 @@
+[
+  "django/template/loader_tags.py",
+  "django/template/context.py",
+  "django/template/base.py",
+  "django/template/defaulttags.py",
+  "django/template/__init__.py"
+]

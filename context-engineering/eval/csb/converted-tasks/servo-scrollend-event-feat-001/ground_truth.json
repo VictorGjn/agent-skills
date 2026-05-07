@@ -1,0 +1,11 @@
+[
+  "components/script/dom/document.rs",
+  "components/script/dom/window.rs",
+  "components/script/dom/element.rs",
+  "components/script/dom/event.rs",
+  "components/script/dom/eventtarget.rs",
+  "components/script/dom/globalscope.rs",
+  "components/script/dom/webidls/Event.webidl",
+  "components/compositing/compositor.rs",
+  "components/shared/script_layout/message.rs"
+]

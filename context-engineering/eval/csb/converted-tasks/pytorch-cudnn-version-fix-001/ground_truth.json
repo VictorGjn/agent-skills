@@ -1,0 +1,9 @@
+[
+  "aten/src/ATen/detail/CUDAHooksInterface.h",
+  "aten/src/ATen/cuda/detail/CUDAHooks.h",
+  "aten/src/ATen/cuda/detail/CUDAHooks.cpp",
+  "aten/src/ATen/Context.h",
+  "aten/src/ATen/native/ConvUtils.h",
+  "aten/src/ATen/native/Convolution.cpp",
+  "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp"
+]

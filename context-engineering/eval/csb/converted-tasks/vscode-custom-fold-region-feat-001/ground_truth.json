@@ -1,0 +1,15 @@
+[
+  "vscode::src/vs/editor/contrib/folding/browser/folding.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/foldingRanges.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/foldingModel.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/foldingDecorations.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/indentRangeProvider.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/syntaxRangeProvider.ts",
+  "vscode::src/vs/editor/contrib/folding/browser/hiddenRangeModel.ts",
+  "vscode::src/vs/editor/common/languages.ts",
+  "vscode::src/vs/editor/common/languages/languageConfiguration.ts",
+  "vscode::src/vs/editor/browser/editorExtensions.ts",
+  "vscode::src/vs/platform/quickinput/common/quickInput.ts",
+  "vscode::src/vs/editor/contrib/folding/test/browser/indentRangeProvider.test.ts",
+  "vscode::src/vs/editor/contrib/folding/test/browser/foldingModel.test.ts"
+]
