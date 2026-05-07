@@ -62,8 +62,16 @@ def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", s.lower()).strip("-")
 
 
-def github_branch_exists(repo: str, branch: str, token: str | None) -> bool:
-    """HEAD-style check: GET /repos/<o>/<n>/branches/<b>; 200 = exists, 404 = missing."""
+def github_branch_exists(repo: str, branch: str, token: str | None) -> bool | None:
+    """Three-state branch check.
+
+    Returns:
+        True   — 200, branch exists.
+        False  — 404, branch verifiably missing.
+        None   — 403 (rate-limit/auth) or transport failure; existence
+                 unknown. Caller must NOT treat None as "missing" — it's
+                 a signal to warn and skip, not block on stale spec.json.
+    """
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "csb-preflight"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -73,11 +81,12 @@ def github_branch_exists(repo: str, branch: str, token: str | None) -> bool:
         with urllib.request.urlopen(req, timeout=20) as r:
             return r.status == 200
     except urllib.error.HTTPError as e:
-        if e.code in (403, 404):
+        if e.code == 404:
             return False
-        raise
+        # 403 (rate limit / auth) and any other HTTP status: existence unknown.
+        return None
     except Exception:
-        return False
+        return None
 
 
 def main() -> int:
@@ -99,6 +108,11 @@ def main() -> int:
                         "indexing is branch-driven but IR lookup uses spec.corpus_id, "
                         "so a mismatch silently invalidates the bench (CORPUS_NOT_FOUND "
                         "or wrong-corpus retrieval).")
+    p.add_argument("--fail-on-partial-reach", action="store_true",
+                   help="Treat partially-reachable tasks (some GT files in non-indexable "
+                        "extensions) as a failure, not a warning. Default: warn only, "
+                        "since recall is capped but the task is still scoreable. Use in "
+                        "strict bench runs where any recall cap is unacceptable.")
     args = p.parse_args()
 
     if not args.tasks_dir.is_dir():
@@ -189,6 +203,8 @@ def main() -> int:
         failures += 1
     if corpus_id_mismatches and not args.allow_stale_corpus_id:
         failures += 1
+    if partial_reach and args.fail_on_partial_reach:
+        failures += 1
 
     if args.check_branches:
         gh_token = os.environ.get(args.gh_token_env)
@@ -196,16 +212,28 @@ def main() -> int:
             print("WARN: no GITHUB_TOKEN/GH_TOKEN; branch lookups may rate-limit", file=sys.stderr)
         print(f"## Branch existence check ({len(repo_branches)} unique repo+branch combos)")
         print()
+        # Three buckets: confirmed-missing (404), unknown (403/transport), exists (200).
+        # Only confirmed-missing counts toward failure; unknown is surfaced as a warning
+        # so a rate-limit blip doesn't get reported as a stale spec.json branch.
         missing: list[tuple[str, str, list[str]]] = []
+        unknown: list[tuple[str, str, list[str]]] = []
         for (repo, branch), task_ids in sorted(repo_branches.items()):
-            if not github_branch_exists(repo, branch, gh_token):
+            result = github_branch_exists(repo, branch, gh_token)
+            if result is True:
+                print(f"  [ok] {repo}@{branch}  ({len(task_ids)} task(s))")
+            elif result is False:
                 missing.append((repo, branch, task_ids))
                 print(f"  [X] {repo}@{branch}  ({len(task_ids)} task(s))")
             else:
-                print(f"  [ok] {repo}@{branch}  ({len(task_ids)} task(s))")
+                unknown.append((repo, branch, task_ids))
+                print(f"  [?] {repo}@{branch}  ({len(task_ids)} task(s))  (rate-limit/auth)")
         print()
+        if unknown:
+            print(f"{len(unknown)} repo+branch combo(s) returned 403/transport — existence unknown.")
+            print("Set GITHUB_TOKEN to a higher-rate-limit credential and re-run if you need a verdict.")
+            print()
         if missing:
-            print(f"{len(missing)} repo+branch combo(s) missing on GitHub.")
+            print(f"{len(missing)} repo+branch combo(s) confirmed-missing on GitHub (404).")
             print("v1.2 indexer auto-resolves default branch on 404; safe to proceed if those "
                   "repos use a different default branch than spec.json claims.")
             if not args.allow_missing_branches:
@@ -213,7 +241,8 @@ def main() -> int:
 
     if failures:
         print(f"\nPRE-FLIGHT FAILED ({failures} block(s)). Pass --allow-unreachable / "
-              "--allow-missing-branches / --allow-stale-corpus-id to override.")
+              "--allow-missing-branches / --allow-stale-corpus-id to override "
+              "(or drop --fail-on-partial-reach).")
         return 1
     print("\nPre-flight OK.")
     return 0

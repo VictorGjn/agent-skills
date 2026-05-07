@@ -191,3 +191,95 @@ def test_preflight_allow_stale_corpus_id_returns_zero(tmp_path, monkeypatch, cap
     ])
     rc = preflight.main()
     assert rc == 0
+
+
+# ── --fail-on-partial-reach gate ──────────────────────────────────────────────
+
+def _write_partial_task(tasks_dir: Path) -> None:
+    """Helper: emit a task whose GT mixes indexable and non-indexable extensions."""
+    d = tasks_dir / "partial"
+    d.mkdir()
+    (d / "spec.json").write_text(json.dumps({
+        "repo": "owner/repo", "branch": "main", "corpus_id": "gh-owner-repo-main",
+    }), encoding="utf-8")
+    (d / "ground_truth.json").write_text(json.dumps([
+        "src/file.py",        # reachable
+        "src/file.unknown",   # not reachable
+    ]), encoding="utf-8")
+
+
+def test_preflight_partial_reach_warns_by_default(tmp_path, monkeypatch, capsys):
+    """Partial-reach is a warning by default, not a failure."""
+    import preflight
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    _write_partial_task(tasks)
+
+    monkeypatch.setattr(sys, "argv", ["preflight.py", "--tasks-dir", str(tasks)])
+    rc = preflight.main()
+    out = capsys.readouterr().out
+    assert "partial reachable:  1" in out
+    assert rc == 0
+
+
+def test_preflight_fails_on_partial_reach_when_flag_set(tmp_path, monkeypatch, capsys):
+    """--fail-on-partial-reach turns the warning into a hard block (used by run_bench --strict)."""
+    import preflight
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    _write_partial_task(tasks)
+
+    monkeypatch.setattr(sys, "argv", [
+        "preflight.py", "--tasks-dir", str(tasks), "--fail-on-partial-reach",
+    ])
+    rc = preflight.main()
+    assert rc == 1
+
+
+# ── github_branch_exists 403/404/transport tri-state ──────────────────────────
+
+class _FakeHTTPError(Exception):
+    """Minimal stand-in for urllib.error.HTTPError that preserves .code."""
+    def __init__(self, code: int):
+        self.code = code
+
+
+def test_github_branch_exists_404_returns_false(monkeypatch):
+    """404 means the branch verifiably doesn't exist."""
+    import preflight
+    import urllib.error
+    import urllib.request
+
+    def boom(*a, **kw):
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert preflight.github_branch_exists("o/r", "main", None) is False
+
+
+def test_github_branch_exists_403_returns_none(monkeypatch):
+    """403 (rate-limit/auth) is unknown, not 'missing'.
+
+    Regression for Codex round-2 finding: collapsing 403→False misclassifies
+    rate-limited responses as stale spec.json branches.
+    """
+    import preflight
+    import urllib.error
+    import urllib.request
+
+    def boom(*a, **kw):
+        raise urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert preflight.github_branch_exists("o/r", "main", None) is None
+
+
+def test_github_branch_exists_transport_error_returns_none(monkeypatch):
+    """Network failures (ConnectionError, timeout, etc.) are unknown, not missing."""
+    import preflight
+    import urllib.request
+
+    def boom(*a, **kw):
+        raise ConnectionError("boom")
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert preflight.github_branch_exists("o/r", "main", None) is None

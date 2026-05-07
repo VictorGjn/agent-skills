@@ -72,12 +72,15 @@ def main() -> int:
     csb = "eval/csb"
 
     # ── Step 1: Preflight ──
+    # Defaults match preflight standalone: fully-unreachable, missing branches,
+    # and stale corpus_ids are HARD blocks. Don't silently neuter them via
+    # --allow-* on the way in. --strict adds partial-reach as a block too.
     if not args.skip_preflight:
         cmd = [py, f"{csb}/preflight.py", "--tasks-dir", str(args.tasks_dir)]
         if args.check_branches:
             cmd.append("--check-branches")
-        if not args.strict:
-            cmd += ["--allow-unreachable", "--allow-missing-branches"]
+        if args.strict:
+            cmd.append("--fail-on-partial-reach")
         run(cmd)
 
     # ── Step 2: Index 44 repos ──
