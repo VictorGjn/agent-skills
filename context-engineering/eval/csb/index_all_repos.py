@@ -155,7 +155,27 @@ def _poll_async(mcp_url: str, token: str, job_id: str,
                 }
             # queued / running — keep polling
             continue
-        # transport blip on a single poll — try again until the deadline
+        if kind in ("tool_error", "jsonrpc_error"):
+            # ce_get_job_status returned a STRUCTURED error (e.g.
+            # JOB_NOT_FOUND after KV TTL churn, or INVALID_ARGUMENT). The
+            # job won't recover by waiting — fail fast and surface the
+            # real reason instead of stalling the whole bench for 30 min
+            # per affected repo. Codex P1 round-3 on PR #60.
+            err = sc.get("error") or {} if kind == "jsonrpc_error" else {}
+            return {
+                "repo": repo, "branch": branch,
+                "elapsed_s": round(time.time() - t0, 1),
+                "status": f"async_{kind}",
+                "mode": "async",
+                "job_id": job_id,
+                "error_code": (sc.get("code") if kind == "tool_error"
+                               else err.get("code")),
+                "error": (sc.get("message") or err.get("message") or "")[:300],
+                "details": (sc.get("details", {}) if kind == "tool_error"
+                            else (err.get("data") or {}).get("details", {})),
+                "progress": last_progress,
+            }
+        # transport / unknown shape — true network blip; retry until deadline
     return {
         "repo": repo, "branch": branch,
         "elapsed_s": round(time.time() - t0, 1),
