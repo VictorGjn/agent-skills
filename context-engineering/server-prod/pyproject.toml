@@ -18,6 +18,10 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31",
+    # GitHub App auth (RS256). Mirror requirements.txt — Vercel installs from
+    # requirements.txt at deploy, but `pip install -e .` / test envs use
+    # this list. See _lib/github_auth.py.
+    "pyjwt[crypto]>=2.8",
 ]
 
 [project.optional-dependencies]
