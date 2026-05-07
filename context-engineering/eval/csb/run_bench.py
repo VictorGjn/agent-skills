@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -31,6 +32,49 @@ from pathlib import Path
 
 CONFIGS = ["ce-keyword", "ce-codestral", "ce-codestral-mmr", "ce-shipping"]
 NAMES = ["C1", "C2", "C3", "C4"]
+
+
+def ir_jsonl_complete(path: Path) -> bool:
+    """True iff the file ends with run_ir_bench.py's `_summary` sentinel.
+
+    `run_ir_bench.py` writes one task record per line, then a final
+    `{"_summary": {...}}` row before closing the file. A run that crashed
+    or was interrupted leaves a truncated file with task rows but no
+    summary — diffing it scores against an incomplete task set and
+    silently produces wrong aggregate metrics. We detect completeness
+    by reading the last non-empty line and checking for the sentinel.
+    """
+    if not path.is_file():
+        return False
+    try:
+        last = ""
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return False
+            # Read backwards a chunk at a time until we find a non-empty line.
+            chunk = 4096
+            offset = 0
+            buf = b""
+            while offset < size:
+                read = min(chunk, size - offset)
+                offset += read
+                f.seek(size - offset)
+                buf = f.read(read) + buf
+                if b"\n" in buf.rstrip(b"\n"):
+                    break
+            for raw in reversed(buf.splitlines()):
+                line = raw.decode("utf-8", errors="replace").strip()
+                if line:
+                    last = line
+                    break
+        if not last:
+            return False
+        obj = json.loads(last)
+        return isinstance(obj, dict) and "_summary" in obj
+    except Exception:
+        return False
 
 
 def run(cmd: list[str], *, env: dict | None = None, check: bool = True) -> int:
@@ -74,10 +118,13 @@ def main() -> int:
     # ── Step 1: Preflight ──
     # Defaults match preflight standalone: fully-unreachable, missing branches,
     # and stale corpus_ids are HARD blocks. Don't silently neuter them via
-    # --allow-* on the way in. --strict adds partial-reach as a block too.
+    # --allow-* on the way in. --strict adds partial-reach as a block AND
+    # auto-enables --check-branches so the missing-branch gate actually fires
+    # (it's documented as part of strict mode but only ran when the user also
+    # remembered to pass --check-branches explicitly — silent gap).
     if not args.skip_preflight:
         cmd = [py, f"{csb}/preflight.py", "--tasks-dir", str(args.tasks_dir)]
-        if args.check_branches:
+        if args.check_branches or args.strict:
             cmd.append("--check-branches")
         if args.strict:
             cmd.append("--fail-on-partial-reach")
@@ -102,14 +149,19 @@ def main() -> int:
     run(cmd)
 
     # ── Step 3: IR sweep × 4 configs ──
+    # On --resume, only skip a config if its JSONL is COMPLETE (last line is
+    # the run_ir_bench `_summary` sentinel). Truncated files from a crash get
+    # re-run rather than diffed-as-if-complete.
     ir_jsonls = []
     token = args.token_file.read_text(encoding="utf-8-sig").strip()
     for cfg in CONFIGS:
         out = run_dir / f"ir-{cfg}-{args.tag}.jsonl"
         ir_jsonls.append(out)
-        if args.resume and out.exists():
-            print(f"[skip] {out} exists (--resume).")
+        if args.resume and ir_jsonl_complete(out):
+            print(f"[skip] {out} complete (--resume).")
             continue
+        if args.resume and out.exists():
+            print(f"[redo] {out} exists but truncated (no _summary); re-running config.")
         run([py, f"{csb}/run_ir_bench.py",
              "--tasks-dir", str(args.tasks_dir),
              "--mcp-url", args.mcp_url,
