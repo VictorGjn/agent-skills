@@ -96,22 +96,18 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        # SSE stream. v1.0 minimal: respond 200 with a heartbeat comment.
-        # Real server-push events land in v1.1 (subscriptions).
-        token = authenticate(self.headers.get("Authorization"))
-        if token is None:
-            err = errors.protocol_error("UNAUTHENTICATED", "missing or invalid Authorization header")
-            self._write_error(err.pop("_http_status"), err)
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        # Streamable HTTP clients GET with `Accept: text/event-stream` to open
+        # a server-initiated stream. This server is stateless and emits no
+        # server-initiated events, so we return 405 — clients fall back to
+        # POST-only. A keep-alive SSE that emits no real events bills the
+        # full maxDuration × reconnect rate on Fluid compute. Mirrors
+        # syroco-connect's GET handler.
+        self.send_response(405)
+        self.send_header("Allow", "POST")
+        self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
         self.end_headers()
-        # Single comment frame so the connection completes cleanly under Vercel's
-        # serverless model (no long-lived stream — see SPEC § 3.0 v1.0 scope).
-        self.wfile.write(b": ce-mcp v1.0 stream open\n\n")
+        self.wfile.write(b'{"ok":false,"error":"method_not_allowed"}')
 
     def log_message(self, format, *args):
         # Quiet the default Vercel log spam; tool.call telemetry lands in v1.1
