@@ -189,7 +189,13 @@ def main() -> int:
     p.add_argument("--tasks-dir", required=True, type=Path,
                    help="Dir containing one subdir per task with spec.json + ground_truth.json")
     p.add_argument("--mcp-url", required=True)
-    p.add_argument("--token", required=True)
+    p.add_argument("--token",
+                   help="Bearer token for the MCP server. NOT recommended on the command "
+                        "line — argv leaks via `ps` and parent-process logging. Prefer "
+                        "--token-file.")
+    p.add_argument("--token-file", type=Path,
+                   help="Path to a file whose contents are the bearer token. Preferred over "
+                        "--token. UTF-8-sig tolerated; trailing whitespace stripped.")
     p.add_argument("--config", required=True, choices=sorted(VALID_CONFIGS.keys()))
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--budget", type=int, default=100_000,
@@ -200,6 +206,15 @@ def main() -> int:
                    help="JSONL output path (one record per task + summary)")
     p.add_argument("--limit", type=int, default=None, help="Run only the first N tasks")
     args = p.parse_args()
+
+    # Resolve token: --token-file wins (no argv leak); fall back to --token; error otherwise.
+    if args.token_file is not None:
+        token = args.token_file.read_text(encoding="utf-8-sig").strip()
+    elif args.token:
+        token = args.token
+    else:
+        print("ERROR: provide --token-file (preferred) or --token", file=sys.stderr)
+        return 2
 
     tasks = sorted([d for d in args.tasks_dir.iterdir() if d.is_dir()
                      and (d / "spec.json").exists()
@@ -216,7 +231,7 @@ def main() -> int:
         for i, task_dir in enumerate(tasks, 1):
             print(f"[{i}/{len(tasks)}] {task_dir.name}…", file=sys.stderr)
             rec = run_one(
-                task_dir, args.mcp_url, args.token,
+                task_dir, args.mcp_url, token,
                 args.config, args.top_k, args.budget, args.metric_tool,
             )
             records.append(rec)
