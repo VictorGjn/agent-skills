@@ -76,7 +76,20 @@ _DESCRIPTIONS: dict[str, str] = {
 }
 
 _INPUT_SCHEMAS: dict[str, dict] = {
-    "ce_get_health": {"type": "object", "properties": {}, "additionalProperties": False},
+    "ce_get_health": {
+        "type": "object",
+        "properties": {
+            "deep": {
+                "type": "boolean",
+                "default": False,
+                "description": "Run real round-trip probes against KV / Blob / Mistral. "
+                               "Default false (cheap liveness only). Each probe takes ~100-500ms; "
+                               "use deep=true for smoke tests or post-deploy verification, "
+                               "not high-frequency monitoring.",
+            },
+        },
+        "additionalProperties": False,
+    },
     "ce_pack_context": {
         "type": "object",
         "properties": {
