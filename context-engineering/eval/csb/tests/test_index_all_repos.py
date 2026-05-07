@@ -29,9 +29,11 @@ def _tool_error_response(code: str, msg: str, details: dict | None = None) -> di
                                               "details": details or {}}}}
 
 
-def _jsonrpc_error_response(code: int, msg: str) -> dict:
-    return {"jsonrpc": "2.0", "id": 1,
-            "error": {"code": code, "message": msg}}
+def _jsonrpc_error_response(code: int, msg: str, data: dict | None = None) -> dict:
+    err: dict = {"code": code, "message": msg}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": 1, "error": err}
 
 
 def _transport_blip() -> dict:
@@ -66,12 +68,21 @@ def test_poll_async_fails_fast_on_tool_error():
 
 
 def test_poll_async_fails_fast_on_jsonrpc_error():
-    """Top-level JSON-RPC error (e.g. -32602 invalid params) is also terminal."""
+    """Top-level JSON-RPC error (e.g. -32602 invalid params) is also terminal.
+
+    Asserts code AND details survive: _parse_tool_response passes the
+    JSON-RPC error body verbatim (`{code, message, data}`), so the
+    poll-loop must read `code`/`message` from the top level and dig
+    into `data.details` — not look for a nested `error` key. Codex P2
+    round-4 caught the original implementation dropping these fields.
+    """
     import index_all_repos as m
 
-    with mock.patch.object(m, "post",
-                           return_value=_jsonrpc_error_response(
-                               -32602, "invalid params")), \
+    resp = _jsonrpc_error_response(
+        -32602, "invalid params",
+        data={"details": {"missing": "job_id"}},
+    )
+    with mock.patch.object(m, "post", return_value=resp), \
          mock.patch.object(m, "time") as t:
         ticks = iter([0.0, 0.0, 0.1, 0.2])
         t.time.side_effect = lambda: next(ticks)
@@ -80,7 +91,9 @@ def test_poll_async_fails_fast_on_jsonrpc_error():
         rec = m._poll_async("https://x", "tok", "abc", "owner/r", "main", 0.0)
 
     assert rec["status"] == "async_jsonrpc_error"
-    assert rec["error"] and "invalid params" in rec["error"]
+    assert rec["error_code"] == -32602
+    assert "invalid params" in rec["error"]
+    assert rec["details"] == {"missing": "job_id"}
 
 
 def test_poll_async_keeps_polling_on_transport_blip():

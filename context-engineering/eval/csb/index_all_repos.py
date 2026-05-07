@@ -161,18 +161,26 @@ def _poll_async(mcp_url: str, token: str, job_id: str,
             # job won't recover by waiting — fail fast and surface the
             # real reason instead of stalling the whole bench for 30 min
             # per affected repo. Codex P1 round-3 on PR #60.
-            err = sc.get("error") or {} if kind == "jsonrpc_error" else {}
+            #
+            # `sc` shape differs by kind (Codex P2 round-4): _parse_tool_response
+            # passes the structuredContent body for tool_error and the top-level
+            # JSON-RPC `error` object ({code, message, data}) for jsonrpc_error.
+            # Both expose code+message at the top level; tool_error nests details
+            # under "details", JSON-RPC nests them under "data.details".
+            if kind == "tool_error":
+                err_details = sc.get("details") or {}
+            else:  # jsonrpc_error
+                data = sc.get("data") if isinstance(sc, dict) else None
+                err_details = (data.get("details") or {}) if isinstance(data, dict) else {}
             return {
                 "repo": repo, "branch": branch,
                 "elapsed_s": round(time.time() - t0, 1),
                 "status": f"async_{kind}",
                 "mode": "async",
                 "job_id": job_id,
-                "error_code": (sc.get("code") if kind == "tool_error"
-                               else err.get("code")),
-                "error": (sc.get("message") or err.get("message") or "")[:300],
-                "details": (sc.get("details", {}) if kind == "tool_error"
-                            else (err.get("data") or {}).get("details", {})),
+                "error_code": sc.get("code"),
+                "error": (sc.get("message") or "")[:300],
+                "details": err_details,
                 "progress": last_progress,
             }
         # transport / unknown shape — true network blip; retry until deadline
