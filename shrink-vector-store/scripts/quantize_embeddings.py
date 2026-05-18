@@ -102,6 +102,8 @@ def main() -> None:
 
     n, d = vecs.shape
     k = args.k
+    if not (1 <= k <= n):
+        _die(2, f"--k must satisfy 1 <= k <= n (k={k}, n={n})")
     truth = exact_topk(queries, vecs, k)  # exact float baseline = ground truth
 
     # --- coarse quantized scoring (asymmetric: query stays float) ---
@@ -155,6 +157,10 @@ def main() -> None:
         np.save(out / "hi.npy", hi)
     else:
         np.save(out / "packed.npy", packed)
+        if args.rescore:  # binary store is unusable without the int8 rescore copy
+            np.save(out / "rescore_codes.npy", rs_codes)
+            np.save(out / "rescore_lo.npy", rs_lo)
+            np.save(out / "rescore_hi.npy", rs_hi)
     if ids is not None:
         np.save(out / "ids.npy", ids)  # provenance carried through unchanged
     print(f"written to {out}/")
