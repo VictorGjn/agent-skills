@@ -122,11 +122,15 @@ def validate_page(path: Path, text: str | None = None) -> dict[str, Any]:
             f"Run `python3 scripts/wiki/wiki_init.py --rebuild`."
         )
 
-    # 3. kind must be one of the documented values.
+    # 3. kind must be present and a well-formed token. Membership is NOT
+    # enforced here: entity `kind` is OPEN-SET, governed by the injected JSON
+    # schema (company-brain/entity.schema.json), not this CE-era markdown
+    # validator. Hard-coding kinds dropped schema-defined kinds (navigation,
+    # vessel, product, ...) from reads/audits. See PR #71 review (Codex P1).
     kind = frontmatter.get("kind")
-    if kind not in _VALID_KINDS:
+    if not kind or not re.match(r"^[a-z][a-z0-9-]{0,63}$", str(kind)):
         raise ValidationError(
-            f"{path}: kind={kind!r} not in {sorted(_VALID_KINDS)!r}."
+            f"{path}: kind={kind!r} missing or malformed (expected a lowercase token)."
         )
 
     # 4. kind == "decision" requires the continuity fields (tri-state:

@@ -36,11 +36,13 @@ def _lock_embedding_provider() -> None:
     elif os.environ.get('OPENAI_API_KEY'):
         os.environ['EMBED_PROVIDER'] = 'openai'
     else:
-        print('FATAL: no embedding API key set. MCP server requires one of '
-              'MISTRAL_API_KEY / OPENAI_API_KEY / VOYAGE_API_KEY (BGE local '
-              'inference is intentionally disabled in MCP mode).',
+        # No key: do NOT exit at import — that killed the whole server before
+        # FastMCP registered any tools, so non-embedding paths (wiki.add/audit/
+        # ask, keyword pack) were unusable. Leave EMBED_PROVIDER unset; semantic
+        # tools degrade at call time. See PR #71 review (Codex P2).
+        print('WARN: no embedding API key set (MISTRAL/OPENAI/VOYAGE); semantic '
+              'tools disabled — keyword + wiki tools remain available.',
               file=sys.stderr)
-        sys.exit(1)
 
 
 _lock_embedding_provider()
@@ -232,27 +234,10 @@ def index_workspace(path: str) -> str:
             f"from {path}. Index: {INDEX_PATH}")
 
 
-@mcp.tool()
-def index_github_repo(repo: str, branch: str = "main") -> str:
-    """
-    Index a GitHub repository for context packing.
-
-    Args:
-        repo: GitHub repo in "owner/name" format.
-        branch: Branch to index (default "main").
-
-    Returns:
-        Summary of indexed files.
-    """
-    import subprocess
-    script = str(Path(__file__).parent / "index_github_repo.py")
-    result = subprocess.run(
-        [sys.executable, script, repo, "--branch", branch],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        return f"Error: {result.stderr}"
-    return result.stdout or f"Indexed {repo}. Check {INDEX_PATH}"
+# NOTE: index_github_repo (code-repo indexing) intentionally removed from the
+# entitystore engine — code-context indexing belongs in the context-engineering
+# wrapper, not the entity engine, and the script was never copied here so the
+# advertised tool was dead. See PR #71 review (Codex P2).
 
 
 @mcp.tool()
