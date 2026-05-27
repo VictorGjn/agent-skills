@@ -1,7 +1,7 @@
 [project]
 name = "context-engineering"
 version = "0.3.0"
-description = "Pack 40+ files at 5 depth levels into any LLM context window — keyword, semantic, and graph resolution with anti-hallucination filters."
+description = "Pack 40+ files at 2 depth levels (full / pointer) into any LLM context window — keyword, semantic, and graph resolution with anti-hallucination filters."
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Victor Grosjean" }]

@@ -65,7 +65,7 @@ The depth packer is one of these five capabilities, not the headline. The full b
 pack_context.py "users getting 401 on refresh tokens"
 ```
 
-Pack 40+ files at 5 depth levels into a token budget instead of loading 2-3 fully. The skill auto-decides:
+Pack 40+ files at 2 depth levels (full / pointer) into a token budget instead of loading 2-3 fully. The skill auto-decides:
 - **Mode** — proper-noun / `CamelCase` / `snake_case` query → `graph`; `how/why/what` → `semantic` (if `OPENAI_API_KEY` set, else `keyword`); else `keyword`.
 - **Task preset** — matches `fix / bug / 401 / traceback` → `--task fix`; `review / pr` → `review`; `explain / how does` → `explain`; etc.
 - **Index** — auto-builds one for `cwd` if no index exists at the configured cache path.
