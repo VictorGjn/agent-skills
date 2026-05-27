@@ -197,41 +197,10 @@ def pack(
     return "\n".join(out)
 
 
-@mcp.tool()
-def index_workspace(path: str) -> str:
-    """
-    Index a local directory for context packing.
-
-    Args:
-        path: Absolute path to the directory to index.
-
-    Returns:
-        Summary of indexed files and token counts.
-    """
-    # In-process, not subprocess: a nested subprocess inherits the MCP server's
-    # stdio pipe handles and deadlocks on Windows (capture_output never sees
-    # EOF). scan_directory is pure + fast, so call it directly.
-    import json as _json
-    import index_workspace as _iw
-    index = _iw.scan_directory(path)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(INDEX_PATH, "w", encoding="utf-8") as f:
-        _json.dump(index, f, indent=2, ensure_ascii=False)
-    light = {
-        "root": index["root"],
-        "totalFiles": index["totalFiles"],
-        "totalTokens": index["totalTokens"],
-        "directories": index["directories"],
-        "files": [
-            {"path": f["path"], "tokens": f["tokens"],
-             "nodeCount": f["nodeCount"], "headings": f["headings"]}
-            for f in index["files"]
-        ],
-    }
-    with open(CACHE_DIR / "workspace-index-light.json", "w", encoding="utf-8") as f:
-        _json.dump(light, f, indent=2, ensure_ascii=False)
-    return (f"Indexed {index['totalFiles']} files, {index['totalTokens']:,} tokens "
-            f"from {path}. Index: {INDEX_PATH}")
+# NOTE: index_workspace (code/workspace indexing) intentionally removed from the
+# entitystore engine — like index_github_repo it's code-context indexing (CE's
+# domain), and index_workspace.py was not copied here. The entity engine ingests
+# via Sources (emit_events -> events tier) + wiki.add, not workspace scans.
 
 
 # NOTE: index_github_repo (code-repo indexing) intentionally removed from the

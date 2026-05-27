@@ -1,6 +1,6 @@
 ---
 name: entitystore
-description: The schema-agnostic EntityStore engine — raw/events/wiki tiers, Source ABC, semantic-shift consolidator, contradiction auditor, depth-aware packer, and MCP. Carved from context-engineering. Reads the entity schema BY PATH (it ships no schema of its own); the canonical schema + entities live in company-brain, and domain Sources/connectors live in syroco-product-ops. Use when building or querying a provenance-tracked entity brain over any corpus, consolidating events into wiki entity pages, auditing for contradictions/drift, or packing entity context within a token budget. Do NOT use for code-context packing or code-knowledge-graph visualisation (that's the context-engineering skill, which now depends on this engine).
+description: The schema-agnostic EntityStore engine — raw/events/wiki tiers, Source ABC, semantic-shift consolidator, contradiction auditor, depth-aware packer, and MCP. Carved from context-engineering. Reads the entity schema BY PATH (it ships no schema of its own); the canonical schema + entities live in company-brain, and domain Sources/connectors live in syroco-product-ops. Use when building or querying a provenance-tracked entity brain over any corpus, consolidating events into wiki entity pages, auditing for contradictions/drift, or packing entity context within a token budget. Do NOT use for code-context packing or code-knowledge-graph visualisation (that's the context-engineering skill, which continues independently — entitystore does not replace it).
 ---
 
 # entitystore
@@ -43,15 +43,21 @@ Every validation / emission entrypoint takes `--schema <path>`. Reference impl:
 The engine holds no opinion on kinds, claims, or overlays — those are the
 schema's job.
 
-## Carve status (in progress)
+## Status — standalone skill (CE stays independent)
+
+entitystore is its own skill with its own MCP server; it does **not** require
+`context-engineering`, and CE is **not** refactored to depend on it. CE keeps its
+own copy of the engine code and continues on its own path — divergence is
+acceptable; this skill is the canonical entity engine going forward.
 
 - **Done:** engine core copied here (`scripts/wiki/*`, `pack_context*`,
-  `mcp_server`, `embed_resolve`, `mmr`); schema-injection validator proven
-  against company-brain v4.
-- **Next:** point `context-engineering` at this engine and shrink it to a thin
-  code-context wrapper (keep code_graph/viz/CSB-bench there); reconcile the wiki
-  tier to emit company-brain's JSON entity schema; then delete CE's duplicated
-  engine copies (only once CE's suite stays green).
+  `mcp_server`, `embed_resolve`, `mmr`); code-indexing tools (`index_github_repo`,
+  `index_workspace`) removed (CE's domain); MCP server runs standalone (13 tools,
+  no embedding key required); schema-injection validator proven against
+  company-brain v4.
+- **Open (independent of CE):** port the engine test suite from CE; reconcile the
+  wiki tier to emit/validate company-brain's JSON entity schema (the markdown↔JSON
+  serialization); optional deployable (Vercel) MCP like CE's `server-prod`.
 
 ## Not in scope
 
