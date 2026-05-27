@@ -206,15 +206,30 @@ def index_workspace(path: str) -> str:
     Returns:
         Summary of indexed files and token counts.
     """
-    import subprocess
-    script = str(Path(__file__).parent / "index_workspace.py")
-    result = subprocess.run(
-        [sys.executable, script, path],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        return f"Error: {result.stderr}"
-    return result.stdout or f"Indexed. Check {INDEX_PATH}"
+    # In-process, not subprocess: a nested subprocess inherits the MCP server's
+    # stdio pipe handles and deadlocks on Windows (capture_output never sees
+    # EOF). scan_directory is pure + fast, so call it directly.
+    import json as _json
+    import index_workspace as _iw
+    index = _iw.scan_directory(path)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(INDEX_PATH, "w", encoding="utf-8") as f:
+        _json.dump(index, f, indent=2, ensure_ascii=False)
+    light = {
+        "root": index["root"],
+        "totalFiles": index["totalFiles"],
+        "totalTokens": index["totalTokens"],
+        "directories": index["directories"],
+        "files": [
+            {"path": f["path"], "tokens": f["tokens"],
+             "nodeCount": f["nodeCount"], "headings": f["headings"]}
+            for f in index["files"]
+        ],
+    }
+    with open(CACHE_DIR / "workspace-index-light.json", "w", encoding="utf-8") as f:
+        _json.dump(light, f, indent=2, ensure_ascii=False)
+    return (f"Indexed {index['totalFiles']} files, {index['totalTokens']:,} tokens "
+            f"from {path}. Index: {INDEX_PATH}")
 
 
 @mcp.tool()
