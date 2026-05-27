@@ -7,7 +7,7 @@ Task: Diagnose the issue described in the query against the packed context below
 
 Query: {query}
 
-Packed context follows. The most relevant files are rendered at depth `Full`; supporting files are progressively compressed (`Detail` → `Summary` → `Headlines` → `Mention`). For every claim about the codebase, cite the file path from the packed sections — do not invent functions or types.
+Packed context follows. The most relevant files are rendered at depth `Full`; supporting files are compressed to a one-line `Mention` (path + token count). For every claim about the codebase, cite the file path from the packed sections — do not invent functions or types.
 
 ---
 

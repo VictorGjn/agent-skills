@@ -152,7 +152,7 @@ def parse_code_tree(source: str, content: str, lang: str) -> dict:
 
     Root node contains a content preview. Each top-level symbol (function, class,
     interface, type, etc.) becomes a depth-1 child with its signature as title and
-    docstring as text. This makes code files renderable at all 5 depth levels.
+    docstring as text. This makes code files renderable in full or as a pointer.
     """
     counter = [0]
 
