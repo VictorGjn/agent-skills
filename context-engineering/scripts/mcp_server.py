@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from pack_context_lib import (
     tokenize_query, score_file, pack_context, classify_knowledge_type,
-    estimate_tokens, DEPTH_NAMES,
+    estimate_tokens, render_at_depth, DEPTH_NAMES,
 )
 
 mcp = FastMCP(
@@ -72,38 +72,6 @@ def _load_index(index_path: str = None) -> dict:
         raise FileNotFoundError(f"No index at {p}. Run index_workspace or index_github_repo first.")
     with open(p) as f:
         return json.load(f)
-
-
-def _render_at_depth(tree: dict, depth_level: int, file_path: str) -> str:
-    """Render file content at a given depth level."""
-    if not tree:
-        return f"- `{file_path}`"
-    # Two levels only: pointer (4 = Mention) or full body.
-    if depth_level == 4:
-        return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
-    lines = [f"### {file_path}"]
-    for node in _walk(tree):
-        if node["depth"] > 0 and node.get("title"):
-            lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
-        if node.get("text"):
-            lines.append(node["text"])
-            lines.append("")
-    return "\n".join(lines)
-
-
-def _collect_headings(node, max_depth=3):
-    h = []
-    if node.get("depth", 0) > 0 and node["depth"] <= max_depth:
-        h.append({"depth": node["depth"], "title": node.get("title", ""), "tokens": node.get("totalTokens", 0)})
-    for c in node.get("children", []):
-        h.extend(_collect_headings(c, max_depth))
-    return h
-
-
-def _walk(node):
-    yield node
-    for c in node.get("children", []):
-        yield from _walk(c)
 
 
 # ── Tools ──
@@ -213,7 +181,7 @@ def pack(
     sections = {"Full": [], "Detail": [], "Summary": [], "Headlines": [], "Mention": []}
     for item in packed:
         dn = DEPTH_NAMES[item["depth"]]
-        rendered = _render_at_depth(item.get("tree"), item["depth"], item["path"])
+        rendered = render_at_depth(item.get("tree"), item["depth"], item["path"])
         sections[dn].append(rendered)
 
     out = [f'<!-- depth-packed [{mode}] query="{query}" budget={budget} used=~{total_tokens} files={len(packed)} -->']
@@ -412,40 +380,6 @@ def _resolve_brain_path(brain: str | None) -> Path:
     if env_brain:
         return Path(env_brain).resolve()
     return Path.cwd() / "brain"
-
-
-def _read_page_with_scope(path: Path) -> tuple[str | None, str]:
-    """Read a wiki page; return (scope, content).
-
-    scope=None means the file isn't a valid entity page (no frontmatter,
-    no `scope:` line, or unreadable). Codex P2 fix: malformed pages must
-    NOT silently default to scope="default" — that leaks arbitrary
-    markdown into default-scope queries.
-
-    A page qualifies if AND only if it has a closed `---` frontmatter
-    block AND that block contains a `scope:` line. Pages missing either
-    return (None, "") so callers skip them.
-    """
-    try:
-        content = path.read_text(encoding="utf-8")
-    except OSError:
-        return None, ""
-    in_frontmatter = False
-    frontmatter_closed = False
-    scope: str | None = None
-    for line in content.splitlines():
-        if line.startswith("---"):
-            if in_frontmatter:
-                frontmatter_closed = True
-                break
-            in_frontmatter = True
-            continue
-        if in_frontmatter and line.startswith("scope:"):
-            raw = line.split(":", 1)[1].strip().strip('"\'')
-            scope = raw if raw else None
-    if not frontmatter_closed or scope is None:
-        return None, ""
-    return scope, content
 
 
 @mcp.tool(name="wiki.ask")

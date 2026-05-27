@@ -74,8 +74,6 @@ Every call is logged to `cache/usage.jsonl` (metadata only — query length, mod
 
 Override anything with explicit flags (`--mode`, `--task`, `--graph`, `--semantic`, etc. — all still work).
 
-For experimental reasoning scaffolds around the packed output, see `--cognitive-tool=<name>` and [`cognitive_tools/README.md`](./cognitive_tools/README.md). Unmeasured uplift, ships as scaffolding only.
-
 ## Learn the engine
 
 If you want a guided walk from one query to a multi-corpus brain, [`docs/learn/`](./docs/learn/README.md) is a six-step stepladder — one runnable command and one concept per step. Under an hour on a real repo, no theory homework.
