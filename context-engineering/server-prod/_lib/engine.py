@@ -172,58 +172,10 @@ def depth_name(depth_int: int) -> str:
 def render_at_depth(tree: dict | None, depth_int: int, file_path: str) -> str:
     """Render a file's tree at the assigned depth.
 
-    Mirror of mcp_server._render_at_depth, kept self-contained so we don't pull
-    that file's full surface (FastMCP, embedding lock, brain wiki tools) in.
+    Delegates to the vendored canonical packer (single source of truth) so the
+    prod engine can never drift from scripts/pack_context_lib.py.
     """
-    if not tree:
-        return f"- `{file_path}`"
-    if depth_int == 4:
-        return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
-    if depth_int == 3:
-        lines = [f"### {file_path}"]
-        for h in _collect_headings(tree, max_depth=3):
-            indent = "  " * max(0, h["depth"] - 1)
-            lines.append(f"{indent}- {h['title']} ({h['tokens']} tok)")
-        return "\n".join(lines)
-    if depth_int == 2:
-        lines = [f"### {file_path}"]
-        for node in _walk(tree):
-            if node.get("depth", 0) > 0 and node.get("title"):
-                lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
-            if node.get("firstSentence"):
-                lines.append(node["firstSentence"])
-                lines.append("")
-        return "\n".join(lines)
-    # 0 or 1
-    key = "firstParagraph" if depth_int == 1 else "text"
-    lines = [f"### {file_path}"]
-    for node in _walk(tree):
-        if node.get("depth", 0) > 0 and node.get("title"):
-            lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
-        if node.get(key):
-            lines.append(node[key])
-            lines.append("")
-    return "\n".join(lines)
-
-
-def _collect_headings(node: dict, max_depth: int = 3) -> list[dict]:
-    out: list[dict] = []
-    if node.get("depth", 0) > 0 and node.get("depth", 0) <= max_depth:
-        out.append({
-            "depth": node.get("depth", 0),
-            "title": node.get("title", ""),
-            "tokens": node.get("totalTokens", 0),
-        })
-    for c in node.get("children", []):
-        out.extend(_collect_headings(c, max_depth))
-    return out
-
-
-def _walk(node: dict) -> list[dict]:
-    out = [node]
-    for c in node.get("children", []):
-        out.extend(_walk(c))
-    return out
+    return _import_lib().render_at_depth(tree, depth_int, file_path)
 
 
 def estimate_tokens(text: str) -> int:

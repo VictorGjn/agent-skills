@@ -39,72 +39,12 @@ if hasattr(sys.stdout, 'reconfigure'):
 sys.path.insert(0, str(Path(__file__).parent))
 from pack_context_lib import (
     tokenize_query, score_file, pack_context, filter_by_topic, confidence_check,
-    DEPTH_NAMES, KNOWLEDGE_TYPES,
+    render_at_depth, DEPTH_NAMES, KNOWLEDGE_TYPES,
 )
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 INDEX_PATH = _SCRIPT_DIR / 'cache' / 'workspace-index.json'
 EMBED_CACHE_PATH = _SCRIPT_DIR / 'cache' / 'embeddings.json'
-COGNITIVE_TOOLS_DIR = _SCRIPT_DIR / 'cognitive_tools'
-
-
-_COGNITIVE_TOOL_NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
-_COGNITIVE_TOOL_MAX_BYTES = 1_000_000  # 1 MB sanity cap on template size
-
-
-def _load_cognitive_tool(name: str, query: str) -> tuple[str, str]:
-    """Load a cognitive-tool template and split it into (prefix, suffix).
-
-    Template format: free-form markdown with `{query}` and `{packed_context}`
-    placeholders. The placeholder `{packed_context}` marks the split point —
-    everything before is prefix, everything after is suffix. `{query}` is
-    substituted in both halves. Leading HTML comment blocks are stripped.
-
-    Security: the template name is restricted to `[A-Za-z0-9_-]+` and the
-    resolved path must live inside `COGNITIVE_TOOLS_DIR`. This blocks path
-    traversal (e.g. `--cognitive-tool=../SKILL`) which is critical because
-    pack is exposed via MCP — an LLM client must not be able to coerce the
-    loader into reading arbitrary files.
-    """
-    if not _COGNITIVE_TOOL_NAME_RE.match(name or ''):
-        raise ValueError(
-            f'Cognitive tool name must match [A-Za-z0-9_-]+ (got: {name!r})'
-        )
-    cognitive_root = COGNITIVE_TOOLS_DIR.resolve()
-    path = (cognitive_root / f'{name}.md').resolve()
-    try:
-        path.relative_to(cognitive_root)
-    except ValueError:
-        raise ValueError(
-            f'Cognitive tool path escapes cognitive_tools/ (resolved: {path})'
-        )
-    if not path.is_file():
-        raise FileNotFoundError(
-            f'Cognitive tool not found: {path}. '
-            f'Available: {sorted(p.stem for p in cognitive_root.glob("*.md") if p.stem != "README")}'
-        )
-    if path.stat().st_size > _COGNITIVE_TOOL_MAX_BYTES:
-        raise ValueError(
-            f'Cognitive tool {name} exceeds {_COGNITIVE_TOOL_MAX_BYTES} bytes'
-        )
-    body = path.read_text(encoding='utf-8')
-    while True:
-        stripped = re.sub(r'^<!--.*?-->\s*\n', '', body, count=1, flags=re.DOTALL)
-        if stripped == body:
-            break
-        body = stripped
-    if '{packed_context}' not in body:
-        raise ValueError(
-            f'Cognitive tool {name} missing required placeholder {{packed_context}}'
-        )
-    if body.count('{packed_context}') > 1:
-        raise ValueError(
-            f'Cognitive tool {name} has multiple {{packed_context}} placeholders; only one is supported'
-        )
-    prefix, suffix = body.split('{packed_context}', 1)
-    prefix = prefix.replace('{query}', query).rstrip() + '\n'
-    suffix = suffix.replace('{query}', query).lstrip()
-    return prefix, suffix
 
 
 # ── Auto-mode + auto-task detection ────────────────────────────────────────
@@ -197,35 +137,6 @@ def log_usage(*, query: str, mode: str, task, files_packed: int, tokens_used: in
             f.write(json.dumps(line) + '\n')
     except Exception:
         pass
-
-# ── Content rendering at depth levels ──
-
-def render_at_depth(tree: dict, depth_level: int, file_path: str) -> str:
-    # Two levels only: pointer (4 = Mention) or full body.
-    if depth_level == 4:
-        return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
-    # Full
-    lines = [f"### {file_path}"]
-    for node in _walk_nodes(tree):
-        if node['depth'] > 0 and node['title']:
-            prefix = '#' * min(node['depth'] + 2, 6)
-            lines.append(f"{prefix} {node['title']}")
-        if node.get('text'):
-            lines.append(node['text']); lines.append('')
-    return '\n'.join(lines)
-
-def _collect_headings(node, max_depth=3):
-    h = []
-    if node.get('depth', 0) > 0 and node['depth'] <= max_depth:
-        h.append({'depth': node['depth'], 'title': node.get('title', ''), 'tokens': node.get('totalTokens', 0)})
-    for c in node.get('children', []):
-        h.extend(_collect_headings(c, max_depth))
-    return h
-
-def _walk_nodes(node):
-    yield node
-    for c in node.get('children', []):
-        yield from _walk_nodes(c)
 
 # ── Graph-enhanced scoring ──
 
@@ -419,22 +330,7 @@ def main():
                         help='Disable MMR diversity rerank (default: on when --semantic and embeddings cached)')
     parser.add_argument('--mmr-lambda', type=float, default=None,
                         help='Override MMR λ (0=full diversity, 1=full relevance). Default: auto from query type.')
-    parser.add_argument('--cognitive-tool', type=str, default=None,
-                        help='Wrap packed output with a reasoning scaffold from cognitive_tools/<name>.md '
-                             '(experimental — see cognitive_tools/README.md). Ignored with --json.')
     args = parser.parse_args()
-
-    cognitive_prefix = cognitive_suffix = None
-    if args.cognitive_tool:
-        if args.json:
-            print(f'<!-- --cognitive-tool ignored with --json -->', file=sys.stderr)
-        else:
-            try:
-                cognitive_prefix, cognitive_suffix = _load_cognitive_tool(
-                    args.cognitive_tool, args.query)
-            except (FileNotFoundError, ValueError) as e:
-                print(f'Cognitive tool error: {e}', file=sys.stderr)
-                sys.exit(2)
 
     t_start = time.time()
     why_trace = {}
@@ -694,12 +590,11 @@ def main():
                   time_ms=int((time.time() - t_start) * 1000), ok=True)
         return
 
-    sections = {'Full': [], 'Detail': [], 'Summary': [], 'Headlines': [], 'Mention': []}
+    sections = {'Full': [], 'Mention': []}
     total_tokens = 0
     for item in packed:
         depth_name = DEPTH_NAMES[item['depth']]
-        rendered = render_at_depth(item['tree'], item['depth'], item['path']) if item.get('tree') \
-            else f"- `{item['path']}` ({item['tokens']} tok)"
+        rendered = render_at_depth(item.get('tree'), item['depth'], item['path'])
         sections[depth_name].append(rendered)
         total_tokens += item['tokens']
 
@@ -710,18 +605,12 @@ def main():
     if args.why:
         _print_why_trace(args.query, why_trace, args.budget)
 
-    if cognitive_prefix:
-        print(cognitive_prefix)
-
     print(f'<!-- depth-packed [{mode}] query="{args.query}" budget={args.budget} used=~{total_tokens} files={len(packed)} -->')
     print()
-    for dn in ['Full', 'Detail', 'Summary', 'Headlines', 'Mention']:
+    for dn in ['Full', 'Mention']:
         if sections[dn]:
             print(f'## {dn} ({len(sections[dn])} files)\n')
             print('\n\n'.join(sections[dn])); print()
-
-    if cognitive_suffix:
-        print(cognitive_suffix)
 
     log_usage(query=args.query, mode=effective_mode, task=args.task,
               files_packed=len(packed), tokens_used=total_tokens,

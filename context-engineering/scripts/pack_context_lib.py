@@ -270,32 +270,6 @@ def filter_by_topic(scored_files: list, query: str,
     return filtered
 
 
-def filter_sections(content: str, terms: list) -> str:
-    """Extract only sections matching query terms from a long document.
-
-    From chatbot anti-hallucination: reduces noise from multi-topic documents.
-    Only applies to content >500 chars with multiple sections.
-    """
-    if not content or not terms or len(content) < 500:
-        return content
-
-    sections = re.split(r"(?=^#{1,3}\s)", content, flags=re.MULTILINE)
-    if len(sections) <= 1:
-        return content
-
-    kept = []
-    for i, section in enumerate(sections):
-        # Always keep short preamble (first section if <200 chars)
-        if i == 0 and len(section.strip()) < 200:
-            kept.append(section)
-            continue
-        # Keep sections that mention any query term
-        if any(t in section.lower() for t in terms):
-            kept.append(section)
-
-    return "\n".join(kept) if kept else content
-
-
 # ── Confidence Scoring (from chatbot) ──
 
 def confidence_check(scored_files: list, low_threshold: float = 0.25) -> dict:
@@ -485,3 +459,27 @@ def estimate_tokens(text: str) -> int:
     code_chars = sum(len(b) for b in code_blocks)
     prose_chars = len(text) - code_chars
     return max(1, int(prose_chars / 4 + code_chars / 2.5))
+
+
+# ── Rendering (single source of truth — CLI, MCP, and prod engine all import this) ──
+
+def _walk(node):
+    yield node
+    for c in node.get('children', []):
+        yield from _walk(c)
+
+
+def render_at_depth(tree, depth: int, file_path: str) -> str:
+    """Render a packed file. Two levels: pointer (depth 4 / no tree) or full body."""
+    if not tree:
+        return f"- `{file_path}`"
+    if depth == 4:
+        return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
+    lines = [f"### {file_path}"]
+    for node in _walk(tree):
+        if node.get('depth', 0) > 0 and node.get('title'):
+            lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
+        if node.get('text'):
+            lines.append(node['text'])
+            lines.append('')
+    return '\n'.join(lines)

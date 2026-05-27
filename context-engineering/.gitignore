@@ -1,5 +1,10 @@
 # Local planning files (Manus-style task_plan.md / findings.md / progress.md)
 .planning/
 
-# Bench run artifacts — JSONL files can be MBs, regenerated on each bench
+# Bench run artifacts — regenerated on each bench (JSONL can be MBs, plus logs + nested run dirs)
 eval/csb/runs/*.jsonl
+eval/csb/runs/**/*.jsonl
+eval/csb/runs/*.log
+
+# Vercel local project linkage
+.vercel/
