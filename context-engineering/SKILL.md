@@ -1,6 +1,6 @@
 ---
 name: context-engineering
-description: "Build and query a token-efficient, provenance-tracked company brain across code, docs, and connector streams. Five capabilities ship as one skill: multi-source indexer (14 languages via tree-sitter AST + markdown heading trees, schema-versioned, incremental); Source ABC (connector contract — connectors live elsewhere, never in this skill); EntityStore (three-tier raw/events/wiki layer with full provenance, semantic-shift consolidation, drift/split/merge auditor); depth-aware packer (5 levels, 95% budget utilization, multi-hop reasoning, query-as-lens reranking, anti-hallucination filters); MCP server. Anabasis `find-links` reference implementation. Use when: an agent needs broad file awareness within a token budget, building or querying a wiki/EntityStore over code + human knowledge, extracting features from a repo (code-to-knowledge), packing entity pages with provenance, multi-hop reasoning across linked concepts, indexing a workspace or GitHub repo. Do NOT use for: single-file reads, when every file needs full content, scheduling or orchestration (that's the Anabasis runtime), connector implementations (those live in syroco-product-ops or similar adapter library)."
+description: "Build and query a token-efficient, provenance-tracked company brain across code, docs, and connector streams. Five capabilities ship as one skill: multi-source indexer (14 languages via tree-sitter AST + markdown heading trees, schema-versioned, incremental); Source ABC (connector contract — connectors live elsewhere, never in this skill); EntityStore (three-tier raw/events/wiki layer with full provenance, semantic-shift consolidation, drift/split/merge auditor); depth-aware packer (2 levels — full / pointer, 95% budget utilization, multi-hop reasoning, query-as-lens reranking, anti-hallucination filters); MCP server. Anabasis `find-links` reference implementation. Use when: an agent needs broad file awareness within a token budget, building or querying a wiki/EntityStore over code + human knowledge, extracting features from a repo (code-to-knowledge), packing entity pages with provenance, multi-hop reasoning across linked concepts, indexing a workspace or GitHub repo. Do NOT use for: single-file reads, when every file needs full content, scheduling or orchestration (that's the Anabasis runtime), connector implementations (those live in syroco-product-ops or similar adapter library)."
 version: 0.3.0
 mcp_tools:
   - context-engineering.pack
@@ -36,7 +36,7 @@ Five tightly-coupled capabilities ship as one skill:
 2. **Source ABC** — the contract connectors implement to feed events into the brain. This skill ships `WorkspaceSource` + `GithubRepoSource` only; Notion / HubSpot / Gmail / Granola adapters live elsewhere (Anabasis spec calls this `SignalSource`).
 3. **EntityStore** — three-tier brain layer: `raw/` (verbatim sources) + `events/` (append-only JSONL of extracted claims) + `wiki/<slug>.md` (consolidated entity pages with full provenance — every cited claim resolves to file:line + content_hash + ts). Reference impl of Anabasis spec `EntityStore` ABC.
 4. **Synthesizer + Auditor** — GAM-grade semantic-shift detector (consolidate only on cosine drift, never on every event); `wiki_init.py` one-shot seeder; Auditor proposes splits / merges / contradictions / dead links.
-5. **Retrieval surface** — depth-aware packer (5 levels, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion + authority signals + anti-hallucination filters + knowledge-type priority.
+5. **Retrieval surface** — depth-aware packer (2 levels — full / pointer, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion (semantic mode) + anti-hallucination filters.
 
 Plus an MCP server exposing the whole stack as composable tools (`pack`, `index_workspace`, `index_github_repo`, `build_embeddings`, `resolve`, `stats`, `wiki.{ask,add,audit,impact_of}`, and `lat.{locate,section,refs,search,expand}` — 15 tools total).
 
@@ -83,7 +83,7 @@ If you want a guided walk from one query to a multi-corpus brain, [`docs/learn/`
 | # | Step | Take-away |
 |---|------|-----------|
 | 0 | [Pack one query](./docs/learn/00-pack-one-query.md) | One file, one budget, one packed answer |
-| 1 | [Budget and depth](./docs/learn/01-budget-and-depth.md) | Five depth levels, not one chunk size |
+| 1 | [Budget and depth](./docs/learn/01-budget-and-depth.md) | Full or pointer, not one chunk size |
 | 2 | [Index a workspace](./docs/learn/02-index-a-workspace.md) | The brain's short-term memory |
 | 3 | [Graph and multi-hop](./docs/learn/03-graph-and-multi-hop.md) | Linked reasoning, not flat keyword fan-out |
 | 4 | [Add a source](./docs/learn/04-add-a-source.md) | Code is one Source; transcripts/notes/CRM are others |
@@ -245,19 +245,16 @@ The workspace indexer handles markdown (heading-tree) and code files:
 
 `.ts` `.tsx` `.js` `.jsx` `.py` `.go` `.rs` `.rb` `.java` `.c` `.cpp` `.cs` `.kt` `.scala` `.php`
 
-Code files get AST symbol extraction — functions, classes, interfaces, methods, and types become searchable headings, renderable at all 5 depth levels. Falls back to regex if tree-sitter is not installed.
+Code files get AST symbol extraction — functions, classes, interfaces, methods, and types become searchable headings, rendered either in full or as a pointer. Falls back to regex if tree-sitter is not installed.
 
-### Five depth levels
+### Two depth levels
 
 | Level | What the LLM sees | Relative cost |
 |-------|-------------------|---------------|
 | **Full** | Complete file content | 100% |
-| **Detail** | Headings + first paragraphs | ~40% |
-| **Summary** | Headings + first sentences | ~20% |
-| **Headlines** | Heading/symbol tree only | ~8% |
-| **Mention** | File path + token count | ~3% |
+| **Pointer** (Mention) | File path + token count | ~3% |
 
-The packer assigns depth from relevance, demotes to fit budget, then promotes if budget remains. Target: 95% utilization.
+The packer assigns Full to relevant files, demotes to pointer to fit budget, then promotes pointers back to Full if budget remains. Target: 95% utilization. The intermediate Detail/Summary/Headlines bands were removed — they never moved a downstream answer vs. full-or-pointer (see `references/eval-results.md`).
 
 ### Four resolution modes (composable)
 
