@@ -130,7 +130,7 @@ def pack(
                        {workspace}/graphify-out/graph.json when None and mode includes "graph".
 
     Returns:
-        Depth-packed markdown context with files at Full/Detail/Summary/Headlines/Mention levels.
+        Depth-packed markdown context with files at Full or pointer (Mention) depth.
     """
     index = _load_index()
     query_tokens = tokenize_query(query)
