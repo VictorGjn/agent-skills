@@ -57,7 +57,7 @@ from pack_context_lib import (
 
 mcp = FastMCP(
     "context-engineering",
-    instructions="Depth-packed context loading for codebases. Pack 40+ files at 5 depth levels into any token budget. Wiki/EntityStore tools (wiki.ask / wiki.add / wiki.audit) close the Anabasis loop.",
+    instructions="Depth-packed context loading for codebases. Pack 40+ files at 2 depth levels (full / pointer) into any token budget. Wiki/EntityStore tools (wiki.ask / wiki.add / wiki.audit) close the Anabasis loop.",
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -78,34 +78,17 @@ def _render_at_depth(tree: dict, depth_level: int, file_path: str) -> str:
     """Render file content at a given depth level."""
     if not tree:
         return f"- `{file_path}`"
+    # Two levels only: pointer (4 = Mention) or full body.
     if depth_level == 4:
         return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
-    if depth_level == 3:
-        lines = [f"### {file_path}"]
-        for h in _collect_headings(tree, max_depth=3):
-            indent = "  " * max(0, h["depth"] - 1)
-            lines.append(f"{indent}- {h['title']} ({h['tokens']} tok)")
-        return "\n".join(lines)
-    if depth_level == 2:
-        lines = [f"### {file_path}"]
-        for node in _walk(tree):
-            if node["depth"] > 0 and node.get("title"):
-                lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
-            if node.get("firstSentence"):
-                lines.append(node["firstSentence"])
-                lines.append("")
-        return "\n".join(lines)
-    if depth_level <= 1:
-        key = "firstParagraph" if depth_level == 1 else "text"
-        lines = [f"### {file_path}"]
-        for node in _walk(tree):
-            if node["depth"] > 0 and node.get("title"):
-                lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
-            if node.get(key):
-                lines.append(node[key])
-                lines.append("")
-        return "\n".join(lines)
-    return f"- `{file_path}`"
+    lines = [f"### {file_path}"]
+    for node in _walk(tree):
+        if node["depth"] > 0 and node.get("title"):
+            lines.append(f"{'#' * min(node['depth'] + 2, 6)} {node['title']}")
+        if node.get("text"):
+            lines.append(node["text"])
+            lines.append("")
+    return "\n".join(lines)
 
 
 def _collect_headings(node, max_depth=3):

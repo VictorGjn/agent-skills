@@ -201,32 +201,9 @@ def log_usage(*, query: str, mode: str, task, files_packed: int, tokens_used: in
 # ── Content rendering at depth levels ──
 
 def render_at_depth(tree: dict, depth_level: int, file_path: str) -> str:
+    # Two levels only: pointer (4 = Mention) or full body.
     if depth_level == 4:
         return f"- `{file_path}` ({tree.get('totalTokens', 0)} tok)"
-    if depth_level == 3:
-        lines = [f"### {file_path}"]
-        for h in _collect_headings(tree, max_depth=3):
-            indent = '  ' * max(0, h['depth'] - 1)
-            lines.append(f"{indent}- {h['title']} ({h['tokens']} tok)")
-        return '\n'.join(lines)
-    if depth_level == 2:
-        lines = [f"### {file_path}"]
-        for node in _walk_nodes(tree):
-            if node['depth'] > 0 and node['title']:
-                prefix = '#' * min(node['depth'] + 2, 6)
-                lines.append(f"{prefix} {node['title']}")
-            if node.get('firstSentence'):
-                lines.append(node['firstSentence']); lines.append('')
-        return '\n'.join(lines)
-    if depth_level == 1:
-        lines = [f"### {file_path}"]
-        for node in _walk_nodes(tree):
-            if node['depth'] > 0 and node['title']:
-                prefix = '#' * min(node['depth'] + 2, 6)
-                lines.append(f"{prefix} {node['title']}")
-            if node.get('firstParagraph'):
-                lines.append(node['firstParagraph']); lines.append('')
-        return '\n'.join(lines)
     # Full
     lines = [f"### {file_path}"]
     for node in _walk_nodes(tree):

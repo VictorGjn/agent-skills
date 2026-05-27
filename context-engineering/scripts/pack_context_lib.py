@@ -69,16 +69,6 @@ KNOWLEDGE_TYPES = {
     },
 }
 
-# Epistemic weights for budget allocation (from modular-patchbay budgetAllocator.ts)
-EPISTEMIC_WEIGHTS = {
-    'ground_truth': 0.30,
-    'framework':    0.15,
-    'evidence':     0.20,
-    'signal':       0.12,
-    'hypothesis':   0.08,
-    'artifact':     0.05,
-}
-
 # ── Knowledge Type Classifier ──
 
 _KT_PATTERNS = {
@@ -410,20 +400,15 @@ def score_file(file_entry: dict, query_tokens: list, query_lower: str) -> float:
         coverage = len(matched_tokens) / len(query_tokens)
         score += coverage * 0.3
 
-    # Knowledge type bonus
-    kt = file_entry.get('knowledge_type', 'evidence')
-    kt_bonus = KNOWLEDGE_TYPES.get(kt, {}).get('depth_bonus', 0)
-    score += kt_bonus
-
     return min(1.0, max(0.0, score))
 
 
 def relevance_to_depth(relevance: float) -> int:
-    if relevance >= 0.6: return 0
-    if relevance >= 0.4: return 1
-    if relevance >= 0.25: return 2
-    if relevance >= 0.15: return 3
-    return 4
+    """Binary depth: Full (0) when relevant enough to include in body,
+    else pointer (4 = Mention, a one-line reference). The intermediate
+    Detail/Summary/Headlines bands were removed — they never moved a
+    downstream answer vs. full-or-pointer (see references/eval-results.md)."""
+    return 0 if relevance >= 0.4 else 4
 
 
 def estimate_at_depth(file_tokens: int, depth: int) -> int:
@@ -433,24 +418,15 @@ def estimate_at_depth(file_tokens: int, depth: int) -> int:
 
 # ── Packing ──
 
-_KT_PRIORITY = {
-    'ground_truth': 0,
-    'framework': 1,
-    'evidence': 2,
-    'signal': 3,
-    'hypothesis': 4,
-    'artifact': 5,
-}
-
 
 def pack_context(scored_files: list, token_budget: int) -> list:
     """3-phase packing: assign depth, demote if over, promote if under.
 
-    Sort key: (1) relevance desc, (2) knowledge_type priority, (3) smaller files first.
+    Sort key: (1) relevance desc, (2) smaller files first. Knowledge-type
+    priority was removed — relevance + size alone decide ordering.
     """
     def sort_key(sf):
-        kt_prio = _KT_PRIORITY.get(sf.get('knowledge_type', 'evidence'), 3)
-        return (-sf['relevance'], kt_prio, sf['tokens'])
+        return (-sf['relevance'], sf['tokens'])
 
     items = []
     for sf in sorted(scored_files, key=sort_key):
@@ -468,94 +444,36 @@ def pack_context(scored_files: list, token_budget: int) -> list:
 
     total = sum(it['tokens'] for it in items)
 
-    # Phase 2: Demote from bottom
+    # Phase 2: Demote from bottom — Full (0) → pointer (4) in one step, then drop
     if total > token_budget:
         for i in range(len(items) - 1, -1, -1):
             if total <= token_budget:
                 break
             item = items[i]
-            while item['depth'] < 4 and total > token_budget:
+            if item['depth'] == 0:
                 old_tokens = item['tokens']
-                item['depth'] += 1
-                item['tokens'] = estimate_at_depth(item['file_tokens'], item['depth'])
+                item['depth'] = 4
+                item['tokens'] = estimate_at_depth(item['file_tokens'], 4)
                 total -= (old_tokens - item['tokens'])
         while items and total > token_budget:
             removed = items.pop()
             total -= removed['tokens']
 
-    # Phase 3: Promote top files if budget has room
+    # Phase 3: Promote top pointers (4) back to Full (0) if budget has room
     if total < token_budget * 0.92:
         for i in range(len(items)):
             if total >= token_budget * 0.95:
                 break
             item = items[i]
-            if item['depth'] > 0:
-                new_tokens = estimate_at_depth(item['file_tokens'], item['depth'] - 1)
+            if item['depth'] == 4:
+                new_tokens = estimate_at_depth(item['file_tokens'], 0)
                 delta = new_tokens - item['tokens']
                 if total + delta <= token_budget:
-                    item['depth'] -= 1
+                    item['depth'] = 0
                     item['tokens'] = new_tokens
                     total += delta
 
     return items
-
-
-# ── Epistemic Budget Allocator (from modular-patchbay) ──
-
-def allocate_budgets(scored_files: list, total_budget: int) -> list:
-    """Allocate token budgets across knowledge types using epistemic weights.
-
-    Instead of flat allocation, gives ground_truth 30% of budget, evidence 20%, etc.
-    Cap by actual content size, redistribute excess. Max 3 rounds.
-
-    Returns scored_files with 'budget_allocation' field added.
-    """
-    if not scored_files or total_budget <= 0:
-        return scored_files
-
-    # Group by knowledge type
-    groups = {}
-    for f in scored_files:
-        kt = f.get('knowledge_type', 'evidence')
-        groups.setdefault(kt, []).append(f)
-
-    # Calculate raw weights per file
-    allocations = {}
-    for kt, files in groups.items():
-        type_weight = EPISTEMIC_WEIGHTS.get(kt, 0.10)
-        per_file_weight = type_weight / len(files)
-        for f in files:
-            allocations[f['path']] = max(per_file_weight, 0.03)  # 3% floor
-
-    # Normalize
-    total_weight = sum(allocations.values())
-    if total_weight > 0:
-        for path in allocations:
-            allocations[path] /= total_weight
-
-    # Assign budgets, cap by file size, redistribute excess (3 rounds)
-    for _round in range(3):
-        excess = 0
-        uncapped = []
-        for f in scored_files:
-            budget = int(allocations[f['path']] * total_budget)
-            if budget > f['tokens']:
-                excess += budget - f['tokens']
-                f['budget_allocation'] = f['tokens']
-            else:
-                f['budget_allocation'] = budget
-                uncapped.append(f)
-
-        if excess > 0 and uncapped:
-            uncapped_weight = sum(allocations[f['path']] for f in uncapped)
-            if uncapped_weight > 0:
-                for f in uncapped:
-                    share = int((allocations[f['path']] / uncapped_weight) * excess)
-                    f['budget_allocation'] = min(f['tokens'], f['budget_allocation'] + share)
-        else:
-            break
-
-    return scored_files
 
 
 # ── Token estimation ──
