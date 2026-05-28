@@ -478,11 +478,15 @@ def wiki_audit(
     contradictions: list[dict] = []
 
     def _hashable(v):
-        # Pair (type, value) so True ≠ 1 ≠ 1.0 in the set. Coerce unhashables
-        # (dict/list) via JSON repr — set construction would otherwise crash
-        # before schema_invalid surfaces the malformed entity.
-        if isinstance(v, (str, int, float, bool, type(None))):
-            return (type(v).__name__, v)
+        # bool first because bool ⊂ int (True == 1 in a set otherwise).
+        # int/float share a 'num' bucket so 5 and 5.0 don't false-positive
+        # as a contradiction. Unhashables (dict/list) go to JSON repr.
+        if isinstance(v, bool):
+            return ("bool", v)
+        if isinstance(v, (int, float)):
+            return ("num", float(v))
+        if isinstance(v, (str, type(None))):
+            return v
         return ("json", json.dumps(v, sort_keys=True, ensure_ascii=False, default=str))
 
     for k, group in by_key.items():
