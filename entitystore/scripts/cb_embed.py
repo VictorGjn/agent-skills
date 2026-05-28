@@ -30,9 +30,6 @@ import sys
 import time
 from typing import Iterable
 
-# os.replace is imported above via `import os` — explicit for the atomic-write
-# pattern used in save_cache.
-
 # ──────────────────────────────────────────────────────────────────
 # Provider resolution (Mistral preferred — Syroco default)
 # ──────────────────────────────────────────────────────────────────
@@ -126,13 +123,18 @@ def load_cache(corpus_dir: pathlib.Path) -> dict:
 
 
 def save_cache(corpus_dir: pathlib.Path, cache: dict) -> None:
-    # Atomic write — survives kill/OOM. Plain write_text leaves a truncated
-    # file; load_cache catches JSONDecodeError but returns {} so the entire
-    # cache is silently wiped on next call. (Review finding.)
+    """Atomic write — load_cache silently returns {} on a truncated cache."""
     p = _cache_path(corpus_dir)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, p)
+    tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -250,10 +252,7 @@ def build_embeddings(
               f"{provider['name']}/{provider['model']}...", file=sys.stderr)
         t0 = time.time()
         vecs = embed_texts(to_embed_texts, provider)
-        # Refuse partial cache: zip would silently truncate if the API
-        # returned fewer vectors than inputs (partial response, batch-boundary
-        # bug, proxy drop). Leaves the affected ids embedding=None forever.
-        # (Review finding.)
+        # Refuse partial cache: zip would silently drop the unmatched tail.
         if len(vecs) != len(to_embed_texts):
             raise RuntimeError(
                 f"embedding API returned {len(vecs)} vectors for "
@@ -288,12 +287,10 @@ def semantic_rank(
         )
 
     cache = load_cache(corpus_dir)
-    # Auto-build if the cache is empty OR many entries are incompatible with
-    # the current provider/model — counting only `embedding is None` lets a
-    # provider swap (Mistral 1024d -> OpenAI 512d) silently fly through with
-    # a stale-shaped cache; cosine() returns 0.0 for every dim-mismatch,
-    # min_score filter drops everything, caller sees "no matches" instead of
-    # "stale cache". (Review finding.)
+    # Incompatibility = missing OR built under a different provider/model/dims.
+    # Counting only `embedding is None` lets a provider swap (Mistral 1024d ->
+    # OpenAI 512d) silently fly through; cosine() then returns 0 for every
+    # dim-mismatch and the caller sees "no matches" instead of "stale cache".
     def _incompatible(eid: str) -> bool:
         e = cache.get(eid)
         if not e or not e.get("embedding"):

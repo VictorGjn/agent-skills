@@ -30,16 +30,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CB_MCP = HERE / "cb_mcp.py"
 
-READ_TIMEOUT_S = 60.0  # generous — wiki_audit on a 2.5k-entity corpus is ~10s
-                       # of jsonschema.validate + key-grouping + freshness scan.
+READ_TIMEOUT_S = 60.0  # wiki_audit over a few-k-entity corpus is ~10s of work
 
 
 def main() -> int:
-    # Refuse silent CI misconfig: smoke test MUST be told where the corpus
-    # lives. The old defaults hardcoded Victor's Windows layout, so on any
-    # other host the subprocess crashed with CorpusUnconfigured and the
-    # smoke report said "MCP server EOF" instead of "set CB_CORPUS_DIR".
-    # (Review finding.)
     if not os.environ.get("CB_CORPUS_DIR") or not os.environ.get("CB_SCHEMA_PATH"):
         print("FAIL: CB_CORPUS_DIR and CB_SCHEMA_PATH must be set in the "
               "environment before running cb_mcp_smoke.py. Example:\n"
@@ -134,12 +128,12 @@ def main() -> int:
         print(f"-- stats: entity_count={sjson.get('entity_count')}, "
               f"schema_version={sjson.get('schema_version')}, "
               f"embeddings={emb}")
-        # Range-based: corpus is fluid (parallel scribe-passes land entities).
-        # Earlier ran at 248; HubSpot vessel backfill bumped it past 2.5k.
-        # Just sanity-check that the count is plausible.
+        # Range-based: corpus is fluid (scribe-passes land entities). Lower
+        # bound is loose enough to ride out short-term growth/shrink; the upper
+        # bound catches a runaway double-write or a load_corpus regression.
         ec = sjson.get("entity_count", 0)
-        check("stats: entity_count is sane (>= 100)",
-              ec >= 100, f"got {ec}")
+        check("stats: entity_count in plausible range (500 <= ec <= 50000)",
+              500 <= ec <= 50_000, f"got {ec}")
         check("stats: schema_version=5", sjson.get("schema_version") == 5)
         check("stats: wiki_links_total > 400",
               sjson.get("wiki_links_total", 0) > 400)
@@ -216,9 +210,8 @@ def main() -> int:
               f"freshness_expired={s_['freshness_expired']}, "
               f"orphans={s_['orphans']}, "
               f"schema_invalid={s_['schema_invalid']}")
-        # Asserting schema_invalid == 0 alone hides the "schema not loaded"
-        # failure mode (would also be 0/None). Require schema_loaded==True
-        # AND schema_invalid==0. (Review finding.)
+        # schema_loaded must be True — otherwise schema_invalid is None and
+        # "== 0" hides the missing-schema failure mode.
         check("wiki_audit: schema actually loaded",
               adj.get("schema_loaded") is True)
         check("wiki_audit: 0 schema_invalid (schema loaded)",
