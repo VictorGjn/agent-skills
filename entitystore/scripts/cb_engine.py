@@ -92,19 +92,25 @@ def _resolve_schema(corpus_dir: pathlib.Path) -> pathlib.Path:
     )
 
 
-# Schema cache by (path, mtime) — schema is static within a process.
-_SCHEMA_CACHE: dict[tuple[str, float], dict] = {}
+# Schema cache keyed by (path, mtime, size) — mtime alone is unreliable on
+# FAT32 (2s resolution) and some NFS (1s); in-place truncate-and-write within
+# the resolution window could silently return a stale schema. Adding size +
+# a TTL bounds the window. (Review finding: schema-cache low-mtime-resolution.)
+_SCHEMA_CACHE: dict[tuple[str, float, int], tuple[float, dict]] = {}
+_SCHEMA_CACHE_TTL_S = 60.0
 
 
 def _load_schema(corpus_dir: pathlib.Path,
                  schema_path: str | pathlib.Path | None = None) -> dict:
     sp = pathlib.Path(schema_path) if schema_path else _resolve_schema(corpus_dir)
-    key = (str(sp), sp.stat().st_mtime)
+    st = sp.stat()
+    key = (str(sp), st.st_mtime, st.st_size)
+    now = __import__("time").monotonic()
     cached = _SCHEMA_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and (now - cached[0]) < _SCHEMA_CACHE_TTL_S:
+        return cached[1]
     schema = json.loads(sp.read_text(encoding="utf-8"))
-    _SCHEMA_CACHE[key] = schema
+    _SCHEMA_CACHE[key] = (now, schema)
     return schema
 
 
@@ -113,7 +119,15 @@ def _load_schema(corpus_dir: pathlib.Path,
 # ──────────────────────────────────────────────────────────────────
 
 
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_SLUG_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]*\Z")
+
+
+def _atomic_write_text(path: pathlib.Path, content: str) -> None:
+    """Write to a sibling .tmp then os.replace — survives kill mid-write +
+    safe against concurrent writers on the same path. (Review finding.)"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def load_corpus(corpus_dir: pathlib.Path) -> dict[str, dict]:
@@ -140,12 +154,14 @@ def _entity_path(corpus_dir: pathlib.Path, entity: dict) -> pathlib.Path:
     eid = entity["id"]
     kind = entity["kind"]
     slug = eid.split(":", 1)[1] if ":" in eid else eid
-    if not _SLUG_RE.match(slug):
+    # fullmatch + \A...\Z: re.match + $ in vanilla Python lets `slug + "\n"`
+    # slip through ($ matches before a trailing newline). Real review finding.
+    if not _SLUG_RE.fullmatch(slug):
         raise ValueError(
             f"unsafe slug {slug!r} (must match [a-z0-9][a-z0-9._-]*) — "
             "this would risk path traversal or write outside the corpus"
         )
-    if not _SLUG_RE.match(kind):
+    if not _SLUG_RE.fullmatch(kind):
         raise ValueError(f"unsafe kind {kind!r} (must match [a-z0-9][a-z0-9._-]*)")
     # Final defence in depth: resolve and ensure containment.
     base = (corpus_dir / "entities" / kind).resolve()
@@ -267,26 +283,34 @@ def _est_tokens(obj) -> int:
 
 
 def _substring_score(entity: dict, q_lower: str) -> float:
-    """Cheap substring relevance in [0, 1]. 0 = no match."""
+    """Cheap substring relevance in [0, 1]. 0 = no match.
+
+    Additive (not max-clobbering) so an entity matching BOTH id and name
+    sorts above one matching name only. (Review finding.)
+    """
     if not q_lower:
         return 0.0
     score = 0.0
-    # id + names get bigger weight (these are identity)
+    # id + names are identity → bigger weight
     if q_lower in entity.get("id", "").lower():
         score += 0.5
+    name_hit = False
     for n in entity.get("names") or []:
         if q_lower in n.lower():
-            score = max(score, 0.7)
+            name_hit = True
             break
+    if name_hit:
+        score += 0.4
     summary = (entity.get("summary") or "").lower()
     if q_lower in summary:
-        score = max(score, 0.4)
+        score += 0.15
     stmt = ((entity.get("concept") or {}).get("statement") or "").lower()
     if q_lower in stmt:
-        score = max(score, 0.4)
+        score += 0.15
     for t in entity.get("topics") or []:
         if q_lower in t.lower():
-            score = max(score, 0.3)
+            score += 0.05
+            break  # one topic credit; don't pile up
     return min(1.0, score)
 
 
@@ -304,6 +328,7 @@ def wiki_ask(
     budget: int = 8000,
     mode: str = "hybrid",
     top: int = 30,
+    _entities: dict[str, dict] | None = None,
 ) -> dict:
     """Search entities + expand wiki_link neighborhood.
 
@@ -311,9 +336,12 @@ def wiki_ask(
     Hybrid falls back to substring when no embedding provider is available.
 
     Truncation (over budget) drops the LOWEST-scored entities first, not LIFO.
+
+    `_entities` is an internal hook so wiki_pack can avoid a second
+    load_corpus on the same request — do not use from external callers.
     """
     cdir = _resolve_corpus(corpus_dir)
-    entities = load_corpus(cdir)
+    entities = _entities if _entities is not None else load_corpus(cdir)
     q = (query or "").strip()
     q_lower = q.lower()
 
@@ -383,31 +411,33 @@ def wiki_ask(
                 seen.add(ref)
                 ne = entities.get(ref)
                 if ne:
-                    neighbors.append({
-                        "id": ne["id"],
-                        "kind": ne["kind"],
-                        "names": ne.get("names", []),
-                        "summary": ne.get("summary", ""),
-                    })
+                    # Use the depth=2 (Summary) contract instead of a hand-rolled
+                    # 4-field projection — otherwise wiki_ask.neighbors and
+                    # wiki_pack-at-depth-2 drift on the same wire name. (Review.)
+                    neighbors.append(render_at_depth(ne, 2))
                     next_frontier.append(ne)
         frontier = next_frontier
         if not frontier:
             break
 
-    # 4. Budget-bounded truncation: drop lowest-scored matched + tail of neighbors.
+    # 4. Budget-bounded truncation. Per-item costs tracked incrementally so
+    # popping is O(1) — the old version re-serialized the whole payload on
+    # every pop (O(N²) on big corpora). (Review finding.)
     char_cap = budget * 4
     truncated = False
+    # ~30 chars of fixed framing ({"matched":[],"neighbors":[]}) + 1 char/comma.
+    FRAMING = 30
+    m_costs = [len(json.dumps(e, ensure_ascii=False)) for e in matched]
+    n_costs = [len(json.dumps(n, ensure_ascii=False)) for n in neighbors]
+    total = FRAMING + sum(m_costs) + sum(n_costs) + len(m_costs) + len(n_costs)
 
-    def _ser():
-        return json.dumps({"matched": matched, "neighbors": neighbors},
-                          ensure_ascii=False)
-
-    while len(_ser()) > char_cap and neighbors:
-        neighbors.pop()  # FIFO tail of neighbors is fine; they're already lower-priority
+    # neighbors first (lower priority), then matched tail (already score-sorted desc).
+    while total > char_cap and n_costs:
+        total -= n_costs.pop() + 1
+        neighbors.pop()
         truncated = True
-
-    # `matched` is sorted high→low; pop from the END drops the lowest-scored first.
-    while len(_ser()) > char_cap and len(matched) > 1:
+    while total > char_cap and len(m_costs) > 1:
+        total -= m_costs.pop() + 1
         matched.pop()
         truncated = True
 
@@ -461,8 +491,16 @@ def wiki_audit(
         by_key[_claim_key(c["entity"], c["metric"], c["role"], c["cp_type"],
                           c["tenor"], c["status"], c["as_of"])].append(c)
     contradictions: list[dict] = []
+
+    def _hashable(v):
+        # Set construction would crash on unhashable values (dict/list) before
+        # schema_invalid runs — coerce via JSON repr. (Review finding.)
+        if isinstance(v, (str, int, float, bool, type(None))):
+            return v
+        return json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
+
     for k, group in by_key.items():
-        values = {g["value"] for g in group}
+        values = {_hashable(g["value"]) for g in group}
         if len(values) > 1:
             contradictions.append({
                 "key": {"entity": k[0], "metric": k[1], "role": k[2],
@@ -521,23 +559,30 @@ def wiki_audit(
                     "path": "/".join(str(x) for x in ex.absolute_path),
                 })
 
+    # If no schema was loaded, schema_invalid stays []. Reporting `0` would be
+    # indistinguishable from "passed validation" — that lets a missing/typo'd
+    # CB_SCHEMA_PATH silently ship a real regression. (Review finding.)
+    schema_loaded = schema is not None
     return {
         "corpus": cdir.name,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "entity_count_total": total,
         "entity_count_audited": len(entities),
         "kinds_filter": kinds,
+        "schema_loaded": schema_loaded,
         "contradictions": contradictions,
         "dead_links": dead_links,
         "freshness_expired": freshness_expired,
         "orphans": orphans,
-        "schema_invalid": schema_invalid,
+        "schema_invalid": schema_invalid if schema_loaded else None,
         "summary": {
             "contradictions": len(contradictions),
             "dead_links": len(dead_links),
             "freshness_expired": len(freshness_expired),
             "orphans": len(orphans),
-            "schema_invalid": len(schema_invalid),
+            # null sentinel (not 0) when no schema was loaded — preserves the
+            # int contract on success, makes "I don't know" explicit otherwise.
+            "schema_invalid": len(schema_invalid) if schema_loaded else None,
         },
     }
 
@@ -573,9 +618,13 @@ def _git_commit(file_path: pathlib.Path, entity_id: str,
             return {"committed": False, "reason": "git_add_failed",
                     "stderr": add.stderr.strip()[:200]}
 
-        # Empty commit guard: nothing staged means nothing to commit.
+        # Pathspec-restricted empty-commit guard. The unscoped check picked
+        # up unrelated staged files in the user's index, masking real no-op
+        # writes as "git_commit_failed" and silently committing those
+        # unrelated files via pathspec mismatch. (Review finding.)
         diff = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--cached", "--quiet"],
+            ["git", "-C", str(repo), "diff", "--cached", "--quiet",
+             "--", str(rel)],
             capture_output=True, text=True, timeout=10,
         )
         if diff.returncode == 0:
@@ -641,8 +690,12 @@ def wiki_add(
 
     is_new = not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entity, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8")
+    # Atomic: tmp + os.replace. plain write_text leaves a truncated file
+    # on kill/OOM/concurrent writer; load_corpus silently swallows the
+    # resulting JSONDecodeError and the entity vanishes from queries. (Review.)
+    _atomic_write_text(
+        path, json.dumps(entity, indent=2, ensure_ascii=False) + "\n",
+    )
 
     result = {
         "ok": True,
@@ -684,19 +737,20 @@ def wiki_pack(
 
     Returns one packed bundle: entities with per-item depth + total token usage.
     """
-    # 1. Get scored candidates via wiki_ask but with a huge budget so we don't
-    # lose anything to truncation yet — the packer makes the depth decisions.
+    # 1. Load corpus ONCE and pass it down to wiki_ask via the private
+    # _entities hook — old code paid two disk+parse passes per request
+    # (review finding). Budget is set uncapped so the packer alone decides
+    # depth assignment.
+    cdir = _resolve_corpus(corpus_dir)
+    all_ents = load_corpus(cdir)
     answer = wiki_ask(
         query=query, corpus_dir=corpus_dir, kind=kind, topics=topics,
         depth=1 if include_neighbors else 0,
-        budget=10_000_000,  # effectively uncapped
-        mode=mode,
-        top=top,
+        budget=10_000_000, mode=mode, top=top,
+        _entities=all_ents,
     )
     matched = answer["matched"]
     neighbor_lookup = {n["id"]: n for n in answer.get("neighbors", [])}
-
-    cdir = _resolve_corpus(corpus_dir)
 
     # 2. Assemble (entity, depth, tokens) items. Matched start at Full;
     # neighbors start at Summary (they got there via expansion, not query match).
@@ -711,8 +765,7 @@ def wiki_pack(
             "via": "matched",
         })
     if include_neighbors:
-        # Load full entity for neighbors so we have headroom to promote them.
-        all_ents = load_corpus(cdir)
+        # Use the corpus we loaded above for the neighbor lookups too.
         for nid in neighbor_lookup:
             ne = all_ents.get(nid)
             if not ne:
@@ -909,13 +962,18 @@ def resolve(
             if q in names:
                 score = 0.9
             else:
+                # Scan ALL names; take the best ratio. Old code `break`-ed on
+                # the first hit and missed shorter, better aliases. (Review.)
+                best_ratio = 0.0
                 for n in names:
                     if q in n and n:
                         ratio = len(q) / len(n)
-                        # Cap at 0.89 so substring never beats exact-name (0.90).
-                        score = max(score, min(0.89, 0.5 + 0.39 * ratio))
-                        break
-                if score == 0.0 and q in (e.get("summary") or "").lower():
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                if best_ratio > 0:
+                    # Cap at 0.89 so substring never beats exact-name (0.90).
+                    score = min(0.89, 0.5 + 0.39 * best_ratio)
+                elif q in (e.get("summary") or "").lower():
                     score = 0.30
         if score > 0:
             scored.append((score, {
@@ -1031,11 +1089,14 @@ def _self_test_in_tempdir() -> int:
             # 5. wiki_audit — baseline (clean corpus copy)
             audit = wiki_audit()
             s_ = audit["summary"]
-            print(f"-- wiki_audit baseline: contradictions={s_['contradictions']}, "
+            print(f"-- wiki_audit baseline: schema_loaded={audit['schema_loaded']}, "
+                  f"contradictions={s_['contradictions']}, "
                   f"dead_links={s_['dead_links']}, "
                   f"freshness_expired={s_['freshness_expired']}, "
                   f"orphans={s_['orphans']}, schema_invalid={s_['schema_invalid']}")
-            check("wiki_audit baseline: 0 schema_invalid",
+            check("wiki_audit baseline: schema actually loaded",
+                  audit["schema_loaded"] is True)
+            check("wiki_audit baseline: 0 schema_invalid (schema loaded)",
                   s_["schema_invalid"] == 0)
             check("wiki_audit baseline: 0 dead_links",
                   s_["dead_links"] == 0)
@@ -1105,7 +1166,7 @@ def _self_test_in_tempdir() -> int:
             check("wiki_add: synthetic validates + writes (no commit)",
                   add_result.get("ok") is True)
 
-            # 6b. Path-traversal guard
+            # 6b. Path-traversal guard via wiki_add (high-level happy path).
             bad = dict(synthetic)
             bad["id"] = "concept:../../../etc/passwd"
             bad_result = wiki_add(bad, commit=False)
@@ -1114,6 +1175,31 @@ def _self_test_in_tempdir() -> int:
             check("wiki_add: rejects traversal slug",
                   bad_result.get("ok") is False
                   and bad_result.get("error_kind") == "ValidationError")
+
+            # 6c. Direct slug-defence test. The high-level path above is
+            # caught by jsonschema's id-pattern FIRST, so the slug regex
+            # may never fire. Test _entity_path directly with a payload
+            # that the schema would also reject but which specifically
+            # exercises the slug regex: a trailing-newline bypass that
+            # the original `re.match(r"...$")` would have let through.
+            # (Review finding: original slug check used $ + match, not
+            # \Z + fullmatch, so "abc\n" passed through.)
+            from cb_engine import _entity_path as _ep  # local alias
+            saw_slug_error = False
+            try:
+                _ep(test_corpus, {"id": "concept:abc\n", "kind": "concept"})
+            except ValueError as ex:
+                saw_slug_error = "unsafe slug" in str(ex)
+            check("_entity_path: rejects trailing-newline slug "
+                  "(fullmatch + \\Z anchor)",
+                  saw_slug_error)
+            saw_kind_error = False
+            try:
+                _ep(test_corpus, {"id": "concept:ok-slug", "kind": "../etc"})
+            except ValueError as ex:
+                saw_kind_error = "unsafe kind" in str(ex)
+            check("_entity_path: rejects unsafe kind",
+                  saw_kind_error)
 
         finally:
             # Restore env so caller's state is intact.
