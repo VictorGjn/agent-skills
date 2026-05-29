@@ -43,21 +43,37 @@ Every validation / emission entrypoint takes `--schema <path>`. Reference impl:
 The engine holds no opinion on kinds, claims, or overlays — those are the
 schema's job.
 
-## Status — standalone skill (CE stays independent)
+## Status — JSON-native MCP SHIPPED + audit-pass landed (2026-05-28)
 
-entitystore is its own skill with its own MCP server; it does **not** require
-`context-engineering`, and CE is **not** refactored to depend on it. CE keeps its
-own copy of the engine code and continues on its own path — divergence is
-acceptable; this skill is the canonical entity engine going forward.
+The engine pivoted to **JSON-native** after empirics overturned the "build on
+gbrain as library" call. Same day, a /code-review pass reversed three "wrong
+defers" (semantic, depth-banding, git commit-through) and a /simplify pass
+deleted ~3000 LOC of CE markdown carcass. See `SURFACE.md` for the locked v1
+contract and the memory files (`project_syroco_company_brain`,
+`gbrain-vs-anabasis`) for the premortem and revised verdict.
 
-- **Done:** engine core copied here (`scripts/wiki/*`, `pack_context*`,
-  `mcp_server`, `embed_resolve`, `mmr`); code-indexing tools (`index_github_repo`,
-  `index_workspace`) removed (CE's domain); MCP server runs standalone (13 tools,
-  no embedding key required); schema-injection validator proven against
-  company-brain v4.
-- **Open (independent of CE):** port the engine test suite from CE; reconcile the
-  wiki tier to emit/validate company-brain's JSON entity schema (the markdown↔JSON
-  serialization); optional deployable (Vercel) MCP like CE's `server-prod`.
+- **Shipped (v1, post-audit):** `scripts/cb_engine.py` (six JSON-native
+  endpoints) + `scripts/cb_mcp.py` (local stdio FastMCP server) +
+  `scripts/cb_embed.py` (semantic resolver — Mistral default, OpenAI
+  fallback) + `scripts/cb_mcp_smoke.py` (live wire-protocol smoke test) +
+  `scripts/validate_corpus.py` (schema-injection seam). Engine self-test
+  15/15 PASS (incl. negative test for contradiction detector + path-traversal
+  guard, all running in a tempdir copy of the corpus). MCP smoke test 17/17
+  PASS over real JSON-RPC against the live 248-entity `syroco-commercial`
+  corpus. Charter-aware auditor logic ported from
+  `company-brain/scratch/promote_gate.py`. Schema-injection seam preserved
+  (`CB_SCHEMA_PATH` env). Registered in `~/.claude.json` as `companybrain` MCP.
+- **Six endpoints:** `wiki_ask` (substring | semantic | hybrid + neighborhood) /
+  `wiki_pack` (depth-banded budget-bounded bundle: Full/Detail/Summary/
+  Headlines/Mention) / `wiki_audit` (charter-aware contradictions +
+  dead_links + freshness + orphans + schema_invalid) / `wiki_add` (validate +
+  write + git commit-through, path-traversal-safe) / `stats` (counts +
+  freshness + embedding-provider status) / `resolve` (slug/alias/name).
+- **Wrong-defer reversals (live-proven):** semantic via Mistral, depth-banded
+  `wiki_pack` (43 items packed into 3997/4000 token budget), git commit-through
+  (real commit sha returned via subprocess git invocation).
+- **Honest deferrals to v1.1:** structured-query (filter on claim values),
+  cross-corpus, Vercel/HTTP + OAuth, embedding-cache management UI.
 
 ## Not in scope
 
