@@ -32,6 +32,14 @@ def git(repo: pathlib.Path, *args: str) -> str:
                           text=True, encoding="utf-8", errors="replace").stdout.strip()
 
 
+def blob_at(repo: pathlib.Path, ref: str, rel: str) -> str | None:
+    """File content at a git ref (None if absent there). Used so reviews read the
+    entity from the HEAD/PR tree, never from a possibly-divergent working tree."""
+    r = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{rel}"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.stdout if r.returncode == 0 else None
+
+
 def load_cb_engine(engine_dir: pathlib.Path):
     """Import cb_engine.py from the entitystore skill so we reuse load_corpus/wiki_audit."""
     p = engine_dir / "cb_engine.py"
@@ -153,23 +161,39 @@ def review(repo, corpus, schema_path, engine_dir, base, head, pr, files,
     prohibited = parse_prohibited(schema)
     cb = load_cb_engine(engine_dir)
 
-    # full corpus id-set for referential / dup checks
-    corpus_ids: set[str] = set()
-    if cb and hasattr(cb, "load_corpus"):
+    # corpus id -> [repo-relative paths]. >1 path for an id = a corpus duplicate.
+    # (glob, not cb.load_corpus, because load_corpus dedups by id and would hide dups.)
+    corpus_paths_by_id: dict[str, list[str]] = {}
+    for p in corpus_dir.glob("entities/**/*.json"):
         try:
-            corpus_ids = set(cb.load_corpus(corpus_dir).keys())
+            eid = json.loads(p.read_text(encoding="utf-8")).get("id", "")
         except Exception:
-            pass
-    if not corpus_ids:  # fallback: glob
-        for p in corpus_dir.glob("entities/**/*.json"):
-            try:
-                corpus_ids.add(json.loads(p.read_text(encoding="utf-8")).get("id", ""))
-            except Exception:
-                pass
+            continue
+        corpus_paths_by_id.setdefault(eid, []).append(
+            str(p.relative_to(repo)).replace("\\", "/"))
+    corpus_ids = set(corpus_paths_by_id)
 
     added, modified, deleted = changed_files(repo, base, head, pr, files, corpus)
     review_paths = added + modified
     F: list[Finding] = []
+
+    # Read reviewed entities from the HEAD/PR tree, NOT the working tree (which may
+    # diverge from the commit under review). --files reads disk (explicit local set).
+    if files:
+        read_ref = None
+    elif pr is not None:
+        subprocess.run(["git", "-C", str(repo), "fetch", "origin", f"pull/{pr}/head"],
+                       capture_output=True, text=True)
+        read_ref = "FETCH_HEAD"
+    else:
+        read_ref = head
+    # Fast path: when the head ref IS the checked-out commit (CI / --head HEAD), read
+    # from disk — avoids one `git show` per file. Only fall back to per-blob reads when
+    # the working tree genuinely diverges from the reviewed ref (--pr, foreign --head).
+    use_disk = read_ref is None
+    if read_ref is not None:
+        cur = git(repo, "rev-parse", "HEAD")
+        use_disk = bool(cur) and cur == git(repo, "rev-parse", read_ref)
 
     # load changed entities from working tree
     ents: dict[str, dict] = {}
@@ -181,11 +205,17 @@ def review(repo, corpus, schema_path, engine_dir, base, head, pr, files,
         validator = None
 
     for rel in review_paths:
-        fp = repo / rel
-        if not fp.exists():
-            continue
+        if use_disk:
+            fp = repo / rel
+            if not fp.exists():
+                continue
+            raw = fp.read_text(encoding="utf-8")
+        else:
+            raw = blob_at(repo, read_ref, rel)
+            if raw is None:  # not present at head (e.g. a delete) — skip
+                continue
         try:
-            e = json.loads(fp.read_text(encoding="utf-8"))
+            e = json.loads(raw)
         except Exception as ex:
             F.append(Finding(ERROR, "C1 schema", rel, f"JSON parse failed: {ex}"))
             continue
@@ -205,6 +235,10 @@ def review(repo, corpus, schema_path, engine_dir, base, head, pr, files,
         if eid in seen_ids:
             F.append(Finding(ERROR, "C2 id", rel, f"duplicate id {eid} (also {seen_ids[eid]})"))
         seen_ids[eid] = rel
+        # collision against an EXISTING corpus entity at a different path
+        others = [pp for pp in corpus_paths_by_id.get(eid, []) if pp != rel]
+        if others:
+            F.append(Finding(ERROR, "C2 id", rel, f"id {eid} already exists in corpus at {others[0]}"))
 
         # C4 provenance honesty
         prov = e.get("provenance", {})
