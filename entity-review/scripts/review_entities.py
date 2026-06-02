@@ -26,8 +26,10 @@ class Finding:
 
 # ---- helpers ----------------------------------------------------------------
 def git(repo: pathlib.Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args],
-                          capture_output=True, text=True).stdout.strip()
+    # force utf-8 decode: Windows defaults to cp1252, which corrupts em-dashes
+    # in schema text and breaks PROHIBITED-clause parsing.
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace").stdout.strip()
 
 
 def load_cb_engine(engine_dir: pathlib.Path):
@@ -52,20 +54,33 @@ def parse_prohibited(schema: dict) -> dict[str, list[str]]:
     props = schema.get("properties", {})
     for kind, spec in props.items():
         desc = (spec.get("description") or "") if isinstance(spec, dict) else ""
-        # capture ONLY the field-list: from the colon up to the first em/en-dash,
-        # semicolon, or period (the prose that follows the list starts there).
-        m = re.search(r"PROHIBITED(?:\s+FIELDS)?\s*:?\s*([^.;\n—–]+)", desc, re.I)
+        # Capture ONLY the field-list after the colon, then cut at the first prose
+        # separator: a space-surrounded dash (" - " / " — " / " – "), a period, or a
+        # semicolon. Space-surrounding is required so hyphenated field names
+        # ("zone-flag") and underscored ones ("trust_default") survive intact.
+        m = re.search(r"PROHIBITED(?:\s+FIELDS)?\s*:?\s*(.+)", desc, re.I)
         if m:
+            # cut the field-list at the first prose separator. Source stays pure
+            # ASCII: detect unicode dashes (U+2010..U+2015, incl. em-dash) by
+            # codepoint, period/semicolon by char, and a space-surrounded ascii
+            # hyphen by regex (so 'zone-flag'/'trust_default' survive intact).
+            raw = m.group(1)
+            cut = len(raw)
+            for idx, ch in enumerate(raw):
+                if ch in ".;" or 0x2010 <= ord(ch) <= 0x2015:
+                    cut = idx
+                    break
+            seg = re.split(r"\s-\s", raw[:cut])[0]
             stop = {"any", "a", "an", "the", "is", "not", "or", "and", "no", "fields"}
-            toks = [t for t in re.findall(r"[a-z][a-z0-9_-]*", m.group(1).lower())
+            toks = [t for t in re.findall(r"[a-z][a-z0-9_-]*", seg.lower())
                     if t not in stop]
             out[kind] = toks
     return out
 
 
 def schema_version(schema: dict) -> str:
-    desc = schema.get("description", "") + " " + schema.get("title", "")
-    vs = re.findall(r"\bv(\d+)\b", desc)
+    # scan the whole schema (top + every property description) for the max vN
+    vs = re.findall(r"\bv(\d+)\b", json.dumps(schema))
     return f"v{max(int(v) for v in vs)}" if vs else "v?"
 
 
@@ -95,8 +110,8 @@ def changed_files(repo, base, head, pr, files, corpus):
     if files:
         return ([f for f in files], [], [])
     if pr is not None:
-        out = subprocess.run(["gh", "pr", "diff", str(pr), "-R", _remote(repo),
-                              "--name-only"], capture_output=True, text=True).stdout
+        out = subprocess.run(["gh", "pr", "diff", str(pr), "-R", _remote(repo), "--name-only"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
         paths = [l for l in out.splitlines() if _is_entity(l, corpus)]
         # without status we treat all as "modified" for review purposes
         return ([], paths, [])
@@ -125,10 +140,16 @@ def _remote(repo):
 
 
 # ---- the checks -------------------------------------------------------------
-def review(repo, corpus, schema_path, engine_dir, base, head, pr, files, anchor_kinds=ANCHOR_KINDS):
+def review(repo, corpus, schema_path, engine_dir, base, head, pr, files,
+           anchor_kinds=ANCHOR_KINDS, schema_ref=None, schema_rel=None):
     repo = pathlib.Path(repo)
     corpus_dir = repo / corpus
-    schema = json.loads(pathlib.Path(schema_path).read_text(encoding="utf-8"))
+    # --schema-ref pins validation to the canonical-latest schema from a git ref
+    # (e.g. origin/main), not the reviewed branch's possibly-stale copy.
+    if schema_ref and schema_rel:
+        schema = json.loads(git(repo, "show", f"{schema_ref}:{schema_rel}"))
+    else:
+        schema = json.loads(pathlib.Path(schema_path).read_text(encoding="utf-8"))
     prohibited = parse_prohibited(schema)
     cb = load_cb_engine(engine_dir)
 
@@ -329,6 +350,9 @@ def main():
     ap.add_argument("--files", nargs="*", default=None)
     ap.add_argument("--anchor-kinds", default="navigation",
                     help="comma-separated kinds C7 (lazy-materialization/role-boundary) applies to")
+    ap.add_argument("--schema-ref", default=None,
+                    help="git ref (e.g. origin/main) to read the canonical-latest schema from, "
+                         "instead of the reviewed tree's copy")
     a = ap.parse_args()
     anchor_kinds = {k.strip() for k in a.anchor_kinds.split(",") if k.strip()}
 
@@ -338,8 +362,11 @@ def main():
     engine = pathlib.Path(a.engine) if a.engine else \
         pathlib.Path(__file__).resolve().parents[2] / "entitystore" / "scripts"
 
+    import os
+    schema_rel = os.path.relpath(schema, str(repo)).replace("\\", "/") if a.schema_ref else None
     F, added, modified, deleted, ver = review(
-        a.repo, a.corpus, schema, engine, a.base, a.head, a.pr, a.files, anchor_kinds)
+        a.repo, a.corpus, schema, engine, a.base, a.head, a.pr, a.files,
+        anchor_kinds, a.schema_ref, schema_rel)
     sys.exit(report(F, added, modified, deleted, ver))
 
 
