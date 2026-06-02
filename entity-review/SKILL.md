@@ -11,7 +11,14 @@ question well: *"Do the entities this branch/PR pushes stay valid against the
 latest schema AND on-track with the brain's design philosophy?"*
 
 It is the codified, repeatable version of the manual review done on company-brain
-PR #8 (vessel/captain/navigation backfill, 2026-06-02).
+PR #8 (the vessel/captain/navigation backfill).
+
+## Prerequisites
+
+- Python 3.10+ with `jsonschema` (`pip install jsonschema`).
+- `git` (and `gh` only if you pass `--pr`).
+- The `entitystore` engine skill (sibling dir) for `cb_engine.load_corpus` /
+  `wiki_audit`. Auto-detected; the reviewer degrades to a glob if absent.
 
 ## When to use
 
@@ -66,7 +73,7 @@ Severity: **ERROR** blocks merge · **WARN** needs a human call · **INFO** is a
 | C4 | **Provenance honesty** — `extractor` + `extraction_method` present; `extraction_method=system` only for deterministic-source entities; `llm` without `evidence[]` flagged; `extraction_confidence ≤ 1` | WARN | every claim has receipts |
 | C5 | **Anti-authority PROHIBITED fields** — enforces each kind's `PROHIBITED FIELDS:` note parsed from the schema (person: trust/reputation/tier/score; org: trust_default/tier; navigation: score/rating/satisfaction/zone-flag) | ERROR | *a person is a witness, not an authority; an org is context, not credential* |
 | C6 | **Navigation reference-anchor discipline** — no embedded bulk (`track/weather/noon/fuel/waypoints/positions`); single-valued `captain_in_charge`; `backoffice_id` present | ERROR | a navigation is a key, not a data mirror |
-| C7 | **Lazy-materialization / role boundary** — flags a push that mass-creates navigation (or any anchor) nodes that are **orphan** (0 inbound refs), or where >N added nodes all share ONE provenance source (enricher-shaped output from a single mirror) | WARN | *materialize lazily; scribe ≠ enricher* (locked 2026-06-02) |
+| C7 | **Lazy-materialization / role boundary** — flags a push that mass-creates anchor-kind nodes (default `navigation`, set by `--anchor-kinds`) that are **orphan** (0 inbound refs), or where ≥50 added nodes share ONE extractor (enricher-shaped output from a single mirror) | WARN | *materialize lazily; scribe ≠ enricher* (see the locked role-boundary decision in `company-brain/docs/proposals/`) |
 | C8 | **Volatile-not-frozen** — observed-but-volatile integration fields (e.g. `vessel.live_status`, `vessel.contract_status`) must carry source attribution and must NOT be re-asserted as a `claims[]` fact | WARN | capture observations, don't freeze them as truth |
 | C9 | **Identity-as-revisable (v6)** — if `identity_assertions[]` present: required keys; `status=retracted` carries `retraction_reason`; `echo_of` non-null ⇒ excluded from corroboration; `superseded_by` resolves to a sibling assertion | WARN | identity is a thresholded inference with receipts, not bedrock |
 | C10 | **Truth ⊥ relevance** — `post.signal_quality` judges the post (never the author); `topics[]` stay identity-neutral; `concept` carries `falsifiability` + `specificity` | INFO | relevance and credibility are orthogonal |
@@ -75,9 +82,24 @@ Severity: **ERROR** blocks merge · **WARN** needs a human call · **INFO** is a
 
 ## Output
 
-A markdown review: a verdict line, a summary table (files reviewed, by status), then
-findings grouped by severity with `file → check → message`. Mirrors the PR #8 review
-format so it reads the same whether a human or this skill produced it.
+A markdown review: a verdict line, a one-line summary (files by status), then findings
+grouped by severity as `file → check → message`. Mirrors the PR #8 review format so it
+reads the same whether a human or this skill produced it. Example (company-brain PR #8):
+
+```
+# entity-review — 🟡 APPROVE WITH COMMENTS
+
+Schema: **v5** · reviewed **2347** entities (+2345 new, ~2 modified, -0 deleted)
+Findings: **0 ERROR · 1 WARN · 1 INFO**
+
+## 🟡 WARN (1)
+- `(push)` — **C7 lazy-materialization**: 1854 added navigation anchors are ALL
+  orphan (no inbound ref) — anchors should materialize lazily, not one node per voyage
+
+## ⚪ INFO (1)
+- `(push)` — **C7 role-boundary**: 1854 navigation anchors from ONE extractor —
+  confirm this is a system-of-record scribe, not an enricher mirroring another source
+```
 
 ## Extending
 
