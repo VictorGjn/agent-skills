@@ -170,11 +170,19 @@ def validate_jsonl(path: str) -> list[Finding]:
         for b in _banned_in(e):
             F.append(Finding(FAIL, "O2/O3 no-interpretation", f"{pathlib.Path(path).name}:{i}",
                              f"event carries interpretation field '{b}'"))
-        # S1 content_hash must NOT equal sha256(claim) (that means it ignores content)
+        # S1 content_hash must fingerprint CONTENT, not a label. Failing sha256(claim)
+        # ONLY makes sense when richer content lives in the payload (claim is a label,
+        # e.g. a meeting title). When claim IS the full captured content (a message/email
+        # body), content_hash == sha256(claim) is CORRECT — do not flag it.
         ch, claim = e.get("content_hash"), e.get("claim")
-        if ch and isinstance(claim, str) and ch == hashlib.sha256(claim.encode("utf-8")).hexdigest():
+        pl = e.get("payload", {}) if isinstance(e.get("payload"), dict) else {}
+        RICHER = ("summary", "transcript", "body", "markdown", "action_items")
+        claim_is_label = any(any(r in k.lower() for r in RICHER) for k in pl)
+        if ch and isinstance(claim, str) and claim_is_label \
+                and ch == hashlib.sha256(claim.encode("utf-8")).hexdigest():
             F.append(Finding(FAIL, "S1 content-fingerprint", f"{pathlib.Path(path).name}:{i}",
-                             "content_hash == sha256(claim) — captured content can never supersede"))
+                             "content_hash == sha256(claim) but richer content (summary/transcript/…) "
+                             "lives in payload — finalized/edited content can never supersede"))
         # S5 duplicate file_id
         fid = e.get("file_id")
         if fid:
@@ -182,6 +190,15 @@ def validate_jsonl(path: str) -> list[Finding]:
                 F.append(Finding(FAIL, "S5 idempotency", f"{pathlib.Path(path).name}:{i}",
                                  f"duplicate file_id (first at line {seen_file_id[fid]}) — dedup broken"))
             seen_file_id[fid] = i
+            # C2 file_id must follow the documented Profile-B formula (deterministic, not
+            # random/time-based). WARN not FAIL: the concat has no pinned separator, so a
+            # mismatch may be a convention difference rather than a real defect.
+            if "external_id" in e and ch is not None:
+                want = hashlib.sha256(f"{scribe}{e.get('external_id', '')}{ch}".encode("utf-8")).hexdigest()
+                if fid != want:
+                    F.append(Finding(WARN, "C2 file_id", f"{pathlib.Path(path).name}:{i}",
+                                     "file_id != sha256(scribe+external_id+content_hash) — a non-deterministic "
+                                     "id, or a different concatenation convention than SPEC documents"))
         # S6 inlined large blob despite a re-fetch id
         pl = e.get("payload", {})
         if isinstance(pl, dict) and any(k.endswith("_id") for k in pl):
