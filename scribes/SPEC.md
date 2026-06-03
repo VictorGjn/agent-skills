@@ -1,6 +1,19 @@
 # Scribe Spec v0.1
 
 > **Status:** draft, 2026-05-03. First worked example (granola-scribe) deferred.
+>
+> **Two profiles exist (un-reconciled, read before applying this spec).** This
+> document specifies **Profile A — CE push**: scribes call `wiki.add`,
+> `entity_hint` is a *resolved* slug, claims are extracted at scribe-time
+> (T0–T3). A second, **newer** model is now in production at Syroco — **Profile
+> B — raw-JSONL verbatim** (`syrocolab/syroco-product-ops/routines/scribe-pass`):
+> scribes append verbatim events to `company-brain/<stream>/raw/<source>.jsonl`,
+> `entity_hint` is *source-local* (`<scribe>:<id>`), and **all** extraction +
+> identity resolution defer to the enricher (`enrich-pass`). The two must
+> converge (see *Open questions → Cross-scribe entity merge*). The SOTA
+> idempotency rules added below (content fingerprint, supersession, look-back,
+> correlation) apply to **both** profiles. Validate any scribe against its
+> profile with the `scribe-check` skill.
 
 ## Why this exists
 
@@ -114,6 +127,34 @@ Two valid implementations:
 2. **Content-hash dedup with source-side filtering** (for bounded universes): scribe enumerates the full source each run, computes `file_id = sha256(<connector-id>:<content-hash>)`, then **reads the existing events log and skips any `file_id` already emitted** before calling `wiki.add`. Without that read-before-emit step, re-runs WILL bloat entity pages with duplicate claims.
 
 State files live at `~/.claude/scribes/<scribe-name>/state.json` by default; configurable.
+
+### Freshness, supersession & content fingerprint (SOTA, post-v0.1)
+
+Added 2026-06-03 after these were proven load-bearing on the `scribe-pass`
+meeting modules (`fathom`, `granola`). Profile-agnostic — they apply to both A
+and B. A scribe that skips them loses data silently.
+
+1. **`file_id` / `content_hash` must fingerprint the CONTENT, not a label.**
+   When the dedup key hashes only the title/`claim` but the substantive content
+   lives elsewhere (a meeting summary, a transcript, an email body that grows),
+   an artifact whose content **finalizes or is edited after first capture**
+   keeps the same key and **never re-emits** — the finalized content is lost.
+   The key MUST incorporate the captured material (e.g.
+   `sha256(title + summary + action_items + updated_at)`). Hashing the title
+   alone is the single most common silent-data-loss bug on async sources.
+2. **Supersession (append-only, latest-wins).** Keep a stable per-object id
+   (`external_id`) and let `file_id` vary per content version. An edited or
+   finalized artifact appends a NEW event sharing the `external_id`; the log is
+   never rewritten. CE does not dedupe by `file_id`, so downstream
+   (`wiki_init` / enricher / consumer) treats multiple events with one
+   `external_id` as revisions and takes the newest by `ts`.
+3. **Look-back re-scan for async-finalized content.** Many sources finalize
+   content *after* the object first appears (Fathom generates summaries
+   minutes-to-hours post-call; Granola re-summarizes; transcripts land late). A
+   watermark-only fetch skips these. Scribes whose payload depends on
+   async-generated content MUST, in addition to `> watermark`, re-list a
+   trailing look-back window (default **7 days**); unchanged content is a no-op
+   via the `file_id` check, finalized content supersedes.
 
 ### Configuration
 
@@ -318,7 +359,7 @@ ce_event_schema = "1.0"
 
 - **Multi-tenancy:** one operator runs N scribes against ONE brain. What about N brains (per-customer scope segregation)? Current spec assumes one brain per scribe instance.
 - **Replay-on-recover:** if a scribe crashes mid-batch and resumes, do we replay the whole batch or trust state-file dedup? Current spec assumes state-file dedup is canonical.
-- **Cross-scribe entity merge:** if granola-scribe and hubspot-scribe both produce `acme` events, how do we ensure they land on the same wiki page? Current answer: shared `entity_hint`. Future: explicit entity-id resolution.
+- **Cross-scribe entity merge:** if granola-scribe and hubspot-scribe both produce `acme` events, how do we ensure they land on the same wiki page? Profile A answer: shared resolved `entity_hint`. Profile B answer: the scribe does NOT merge — it **surfaces raw correlation keys** (for meetings: `scheduled_start_time` + the invitee-email set + any calendar id) so the enricher merges deterministically. The same call recorded in both Fathom (sales) and Granola (Victor) must carry these keys or it becomes two orphaned events. This is also the unresolved A↔B convergence: A merges at the librarian via hint, B merges at the enricher via keys.
 - **Streaming vs batch:** webhook scribes need a small HTTP server. Where does it live (Pipedream-side? scribe-side? a shared receiver)? Out of v0.1 scope.
 - **Skill registry conventions:** `npx skills search` is the assumed surface, but the registry format isn't standardized yet. Coordinate with `victorgjn/agent-skills` + `syrocolab/company-knowledge` README updates.
 
