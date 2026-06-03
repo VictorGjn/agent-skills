@@ -15,6 +15,12 @@
 > correlation) apply to **both** profiles. Validate any scribe against its
 > profile with the `scribe-check` skill.
 
+> **Placement & ownership now live in company-brain.** The authoritative
+> placement/ownership model (truth shared, relevance per-department; one
+> canonical `corpora/syroco`; repo ownership) is **`company-brain/ARCHITECTURE.md`**.
+> Syroco-specific scribe specs are being relocated there; this repo keeps only
+> the agnostic scribe CONTRACT.
+
 ## Why this exists
 
 The `context-engineering` (CE) brain exposes one push-shape ingest button: `wiki.add` on the MCP server. Anything that wants to feed the brain calls that button.
