@@ -52,6 +52,16 @@ def split_modules(text: str, path: str) -> list[tuple[str, str]]:
     return [((m.group(1) if m else pathlib.Path(path).parent.name), text)]
 
 
+def _entitystore(unit: str) -> bool:
+    """Profile C signal: writes EntityStore entity files directly + identity_assertions
+    (system-of-record scribe, e.g. bo-scribe). No wiki.add, no raw/*.jsonl."""
+    writes = bool(re.search(r"entities/[<>\w-]+/[<>\w.\-]+\.json", unit)) \
+        or bool(re.search(r"\bwrites:\s*entitystore\b", unit, re.I)) \
+        or bool(re.search(r"\bsource_of_record:\s*true\b", unit, re.I))
+    ida = bool(re.search(r"identity_assertions?\b", unit))
+    return writes and ida
+
+
 def detect_profile(unit: str) -> str:
     push = bool(re.search(r"wiki\.add", unit))
     raw = bool(re.search(r"raw/[\w*<>-]+\.jsonl", unit))
@@ -61,6 +71,8 @@ def detect_profile(unit: str) -> str:
         return "B"
     if push:
         return "A"
+    if _entitystore(unit):
+        return "C"
     return "?"
 
 
@@ -74,7 +86,8 @@ def lint_spec(path: str, text: str) -> list[Finding]:
     fname = pathlib.Path(path).name
     units = split_modules(text, path)
     file_profile = "B" if any(detect_profile(u) == "B" for _, u in units) else \
-                   "A" if any(detect_profile(u) == "A" for _, u in units) else "?"
+                   "A" if any(detect_profile(u) == "A" for _, u in units) else \
+                   "C" if any(detect_profile(u) == "C" for _, u in units) else "?"
 
     # C1 — required envelope fields, checked at FILE level (the scribe-pass envelope
     # is declared once in a shared section; per-module sections only add deltas, so a
@@ -89,12 +102,15 @@ def lint_spec(path: str, text: str) -> list[Finding]:
         where = f"{fname}:{name}"
         push = bool(re.search(r"wiki\.add", unit))
         raw = bool(re.search(r"raw/[\w*<>-]+\.jsonl", unit))
+        entitystore = _entitystore(unit)
         prof = detect_profile(unit)
 
-        # S0 — mixed model: the ONLY spec-level FAIL (unambiguous, can't false-block)
-        if push and raw:
+        # S0 — mixed model: the ONLY spec-level FAIL (unambiguous, can't false-block).
+        # Fires when a unit declares more than one of the three sinks.
+        if sum([push, raw, entitystore]) > 1:
             F.append(Finding(FAIL, "S0 single-model", where,
-                             "declares BOTH wiki.add and raw/*.jsonl — pick one profile (A or B)"))
+                             "declares more than one model (wiki.add / raw JSONL / EntityStore "
+                             "writes) — pick one profile (A, B or C)"))
 
         # S1 — content_hash fingerprints a label, not content (WARN)
         for m in re.finditer(r"content_hash[^\n]*sha256\((title|claim)\)", unit, re.I):

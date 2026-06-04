@@ -14,9 +14,9 @@ derived_from:
   - memory: concept-first-trust (entity schema v4)       # no trust/score on person/org
 ```
 
-## Two profiles — detect first, then apply
+## Scribe profiles — detect first, then apply
 
-A scribe conforms to **one** of two models. Applying the wrong profile's rules
+A scribe conforms to **one** of three models. Applying the wrong profile's rules
 produces false findings, so detection is step 0.
 
 | | **Profile A — CE push** | **Profile B — raw-JSONL verbatim** |
@@ -28,10 +28,29 @@ produces false findings, so detection is step 0.
 | Authority | `agent-skills/scribes/SPEC.md` v0.1 (2026-05-03) | `scribe-pass` applied contract (2026-05-19, newer) |
 | Examples | `granola-scribe/SKILL.md` | `scribe-pass` `fathom` / `granola` modules |
 
+**Profile C — system-of-record EntityStore writer.** A third model for the narrow
+class of scribes that read a *system of record* (an authoritative source API) and
+write the physical facts straight into the shared EntityStore — they do **not**
+emit claims at all. Sink = `entities/<kind>/<slug>.json` written directly, each
+entity carrying a v6 `identity_assertions[]` block (`method=exact-key`,
+`source_system`, `status`, `echo_of`); no `wiki.add`, no `raw/*.jsonl`, no
+`entity_hint` (the entity's own URN is the id). Extraction = none (it *describes*
+the source record, one source, never infers). Authority = company-brain
+`schemas/entity.schema.json` ("Writers: enrich-pass + system-of-record scribes").
+Example: `bo-scribe` (back-office navigations + vessels + captains). **C's output
+gate is `entity.schema.json` validation (e.g. `cb_engine wiki_audit`), not this
+tool's `--sample` raw-JSONL validator** — `--specs` lints its SKILL; entity output
+is validated by the entity schema.
+
 **Detection.** Calls `wiki.add` + resolved hints → **A**. Emits `raw/*.jsonl` +
-`entity_hint` matching `^<scribe>:` → **B**. Ambiguous → operator passes
-`--profile A|B`. If a scribe mixes both (e.g. resolved hint *and* raw JSONL),
-that is itself a **FAIL (S0)** — pick one model.
+`entity_hint` matching `^<scribe>:` → **B**. Writes `entities/<kind>/<slug>.json` +
+`identity_assertions` (and neither `wiki.add` nor `raw/*.jsonl`) → **C**. Ambiguous
+→ operator passes `--profile A|B|C`. If a scribe mixes **any two** models (e.g.
+resolved hint *and* raw JSONL, or EntityStore writes *and* `wiki.add`), that is
+itself a **FAIL (S0)** — pick one model. The producer-only / no-score-trust-tier /
+single-source / describe-not-decide rules (O3, V1, V3, naming) apply to **all
+three**; the `entity_hint`/envelope rules (C1-B, O1, O7) are Profile-B-specific and
+do not apply to C.
 
 > ⚠️ **Known divergence (report on every run):** Profiles A and B are two
 > models for the same job and have not been reconciled (see
@@ -71,7 +90,7 @@ that is itself a **FAIL (S0)** — pick one model.
 
 | ID | Rule | Sev | Profile | Mode | Pass criterion | Fix |
 |---|---|---|---|---|---|---|
-| S0 | Single model — does not mix A and B | FAIL | both | static | exactly one sink + one `entity_hint` style | pick a profile |
+| S0 | Single model — does not mix A, B and C | FAIL | all | static | exactly one model: one sink (`wiki.add` / `raw/*.jsonl` / `entities/*.json`) and one hint style | pick a profile |
 | S1 | Dedup key fingerprints **content**, not a label | FAIL | both | static, output | when `claim` ≠ full captured content (e.g. `claim`=title), `content_hash`/`file_id` incorporates the substantive material (summary/transcript/body) | hash content, not the title — *this is the bug that ships silently* |
 | S2 | Supersession: stable `external_id`, `file_id` per content version, append-only | FAIL | both | static, output | edited/finalized object appends a NEW line sharing `external_id`; downstream takes latest by `ts` | document supersession; never rewrite the log |
 | S3 | Look-back re-scan for async-finalized content | FAIL | both | static | modules with async-generated payload (summaries, late transcripts) re-list a trailing window (default 7d), not watermark-only | add `createdAfter = min(watermark, now−7d)` |
