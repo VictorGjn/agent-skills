@@ -98,9 +98,12 @@ class ListToolsCLITests(unittest.TestCase):
     """`python mcp_server.py --list-tools` returns the expected catalog."""
 
     def test_list_tools_returns_15(self):
+        # stdin=DEVNULL: under pytest's fd capture on Windows the inherited
+        # stdin handle is invalid and DuplicateHandle raises WinError 6.
         result = subprocess.run(
             [sys.executable, str(SCRIPTS / "mcp_server.py"), "--list-tools"],
             capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         self.assertEqual(result.returncode, 0)
         names = [line for line in result.stdout.splitlines() if line.strip()]
