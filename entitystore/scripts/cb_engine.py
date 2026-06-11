@@ -991,7 +991,7 @@ def _self_test_in_tempdir() -> int:
         test_schemas = td_path / "schemas"
 
         shutil.copytree(live_corpus, test_corpus,
-                        ignore=shutil.ignore_patterns(".cb_embed_cache.json"))
+                        ignore=shutil.ignore_patterns(".cb_embed_cache*"))
         test_schemas.mkdir(parents=True, exist_ok=True)
         shutil.copy2(live_schema, test_schemas / "entity.schema.json")
 
