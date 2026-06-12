@@ -10,7 +10,10 @@ brute-force tier runs instead, which is exact by definition (recall 1.0);
 pass --require-turbovec to make that an error instead of a green run.
 
 Clones the shrink-vector-store/scripts/quantize_embeddings.py gate pattern
-(that skill is not touched). Dependency: numpy; turbovec optional.
+(that skill is not touched). The id mapping and over-fetch policy are
+IMPORTED from cb_vec (cb_vec._assign_u64, cb_vec.over_fetch_k), not cloned,
+so the gate measures exactly what production runs.
+Dependency: numpy; turbovec optional.
 
 Gated metrics (each must be >= 1.0 - --recall-tolerance):
   pool      pre-rescore candidate-pool recall@k — the binding metric,
@@ -21,10 +24,12 @@ Gated metrics (each must be >= 1.0 - --recall-tolerance):
 
 Exit codes (mirrors quantize_embeddings.py, must be preserved):
   0  success, recall gate passed
-  2  bad arguments / unmet precondition (shape mismatch, k out of range,
-     turbovec unavailable with --require-turbovec, missing corpus cache)
-  3  provenance / id-map misalignment (--ids length != vector count,
-     u64 round-trip failure, allowlist leak)
+  2  bad arguments / unmet precondition (missing or malformed .npy — wrong
+     ndim, non-numeric dtype — shape mismatch, k out of range, turbovec
+     index construction failure (e.g. dim %% 8 != 0), turbovec unavailable
+     with --require-turbovec, missing corpus cache)
+  3  provenance / id-map misalignment (--ids not 1-D or length != vector
+     count, u64 round-trip failure, allowlist leak)
   4  recall gate failed (recall@k < 1.0 - recall_tolerance)
 """
 from __future__ import annotations
@@ -38,18 +43,38 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import cb_vec
+except ImportError:
+    # The gate may be loaded with the scripts dir absent from sys.path
+    # (e.g. via importlib by-path) — make the sibling importable, the
+    # same pattern cb_embed.py uses.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import cb_vec
+
 
 def _die(code: int, msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
 
-def _load_npy(path: str, what: str, **kw) -> np.ndarray:
-    """np.load with the exit-2 'bad arguments' contract for missing/corrupt files."""
+def _load_npy(path: str, what: str, *, ndim: int | None = None,
+              as_float32: bool = False, **kw) -> np.ndarray:
+    """np.load with the exit-2 'bad arguments' contract for missing, corrupt
+    or malformed files (wrong ndim, non-float-convertible dtype)."""
     try:
-        return np.load(path, **kw)
+        arr = np.load(path, **kw)
     except (OSError, ValueError) as exc:
         _die(2, f"cannot load {what} from {path}: {exc}")
+    if ndim is not None and arr.ndim != ndim:
+        _die(2, f"{what} must be {ndim}-D, got shape {arr.shape}")
+    if as_float32:
+        try:
+            arr = arr.astype(np.float32)
+        except (TypeError, ValueError) as exc:
+            _die(2, f"{what} must be numeric (float32-convertible), "
+                    f"got dtype {arr.dtype}: {exc}")
+    return arr
 
 
 def _turbovec_index_cls():
@@ -63,36 +88,21 @@ def _turbovec_index_cls():
         return None
 
 
-def str_to_u64(eid: str, taken: set[int]) -> int:
-    """Deterministic blake2b-64 of the entity id, with collision probe.
-
-    Mirrors the cb_vec.py id-mapping strategy: the probed value is what
-    gets persisted, so collisions are detected AND resolved.
-    """
-    h = int.from_bytes(hashlib.blake2b(eid.encode("utf-8"), digest_size=8).digest(), "big")
-    i = 0
-    while h in taken:
-        i += 1
-        probe = f"{eid}#{i}".encode("utf-8")
-        h = int.from_bytes(hashlib.blake2b(probe, digest_size=8).digest(), "big")
-    return h
-
-
 def build_id_maps(ids: list[str]) -> tuple[dict[str, int], dict[int, str], int]:
-    """str->u64 and u64->str maps; returns (fwd, rev, n_collisions). Exit 3 on
-    any internal inconsistency or round-trip failure."""
+    """str->u64 and u64->str maps via cb_vec._assign_u64 (the production
+    id-mapping, including its reuse-on-re-encounter semantics); returns
+    (fwd, rev, n_collisions). Exit 3 on any internal inconsistency or
+    round-trip failure."""
     fwd: dict[str, int] = {}
     rev: dict[int, str] = {}
     collisions = 0
-    taken: set[int] = set()
     for eid in ids:
-        u = str_to_u64(eid, taken)
+        u = cb_vec._assign_u64(eid, rev)
         base = int.from_bytes(hashlib.blake2b(eid.encode("utf-8"), digest_size=8).digest(), "big")
         if u != base:
             collisions += 1
         fwd[eid] = u
         rev[u] = eid
-        taken.add(u)
     if len(fwd) != len(ids) or len(rev) != len(ids):
         _die(3, f"id-map misalignment: {len(ids)} ids -> {len(fwd)} fwd / {len(rev)} rev entries")
     for eid in ids:  # str -> u64 -> str round-trip, every row
@@ -133,7 +143,7 @@ def load_corpus_vectors(corpus_dir: str) -> tuple[np.ndarray, list[str]]:
             rows = json.loads(meta.read_text(encoding="utf-8")).get("rows", [])
         except (OSError, json.JSONDecodeError) as exc:
             _die(2, f"cannot read {meta}: {exc}")
-        mat = _load_npy(str(npy), "sidecar matrix").astype(np.float32)
+        mat = _load_npy(str(npy), "sidecar matrix", ndim=2, as_float32=True)
         if len(rows) != len(mat):
             _die(3, f"sidecar misalignment: {len(rows)} meta rows vs {len(mat)} npy rows")
         return mat, [r["id"] for r in rows]
@@ -200,8 +210,9 @@ def main() -> None:
     ap.add_argument("--ids", default=None,
                     help="optional .npy provenance ids aligned to the DB vectors")
     ap.add_argument("--k", type=int, default=10)
-    ap.add_argument("--over-fetch-factor", type=int, default=10,
-                    help="candidate pool k' = min(n, max(factor*k, 100))")
+    ap.add_argument("--over-fetch-factor", type=int, default=None,
+                    help="experiment override: candidate pool k' = min(n, max(factor*k, "
+                         "100)); default: the production cb_vec.over_fetch_k policy")
     ap.add_argument("--recall-tolerance", type=float, default=0.02,
                     help="max allowed recall@k drop vs exact float (default 2%%)")
     ap.add_argument("--require-turbovec", action="store_true",
@@ -213,9 +224,7 @@ def main() -> None:
     # --- DB vectors + ids ---
     if args.vectors_npy:
         mode = "npy"
-        vecs = _load_npy(args.vectors_npy, "--vectors-npy").astype(np.float32)
-        if vecs.ndim != 2:
-            _die(2, f"--vectors-npy must be 2-D, got shape {vecs.shape}")
+        vecs = _load_npy(args.vectors_npy, "--vectors-npy", ndim=2, as_float32=True)
         ids = [f"vec:{i:06d}" for i in range(len(vecs))]
     elif args.corpus:
         mode = "corpus"
@@ -227,7 +236,12 @@ def main() -> None:
         vecs = rng.standard_normal((args.synthetic, args.dim), dtype=np.float32)
         ids = [f"syn:{i:06d}" for i in range(len(vecs))]
     if args.ids:
+        # Malformed/unreadable file is exit 2 (inside _load_npy); an id array
+        # that loads but is unusable (not 1-D) or misaligned is a provenance
+        # defect -> exit 3.
         loaded = _load_npy(args.ids, "--ids", allow_pickle=False)
+        if loaded.ndim != 1:
+            _die(3, f"provenance misalignment: --ids must be 1-D, got shape {loaded.shape}")
         if len(loaded) != len(vecs):
             _die(3, f"provenance misalignment: {len(loaded)} ids vs {len(vecs)} vectors")
         ids = [str(x) for x in loaded]
@@ -235,8 +249,8 @@ def main() -> None:
 
     # --- queries (never quantized — R1 asymmetric invariant) ---
     if args.queries_npy:
-        queries = _load_npy(args.queries_npy, "--queries-npy").astype(np.float32)
-        if queries.ndim != 2 or queries.shape[1] != d:
+        queries = _load_npy(args.queries_npy, "--queries-npy", ndim=2, as_float32=True)
+        if queries.shape[1] != d:
             _die(2, f"shape mismatch: vectors {vecs.shape}, queries {queries.shape}")
     elif args.queries < 1:
         _die(2, f"--queries must be >= 1 (got {args.queries})")
@@ -252,7 +266,10 @@ def main() -> None:
     if not (1 <= k <= n):
         _die(2, f"--k must satisfy 1 <= k <= n (k={k}, n={n})")
     gate = 1.0 - args.recall_tolerance
-    kprime = min(n, max(args.over_fetch_factor * k, 100))
+    if args.over_fetch_factor is None:
+        kprime = cb_vec.over_fetch_k(n, k)  # the production policy, not a clone
+    else:
+        kprime = min(n, max(args.over_fetch_factor * k, 100))
 
     fwd, rev, collisions = build_id_maps(ids)
     u64s = np.array([fwd[eid] for eid in ids], dtype=np.uint64)
@@ -263,11 +280,6 @@ def main() -> None:
     q32 = l2_normalize(queries)
     q64 = q32.astype(np.float64)
     truth = exact_topk(q64, v64, k)          # exact float cosine baseline
-
-    # numpy tier sanity: the brute-force fallback is exact by definition.
-    numpy_pred = exact_topk(q64, v64, k)
-    numpy_rec = recall_at_k(numpy_pred, truth, k)
-    assert numpy_rec == 1.0, f"numpy exact tier recall must be 1.0, got {numpy_rec}"
 
     # seeded allowlist spot-check subset: 25% of ids.
     allow_rows = sorted(rng.choice(n, size=max(k, n // 4), replace=False).tolist())
@@ -285,7 +297,10 @@ def main() -> None:
         allow_preds = allow_truth
     else:
         engine = "turbovec"
-        index = index_cls(dim=d, bit_width=4)
+        try:
+            index = index_cls(dim=d, bit_width=4)
+        except Exception as exc:  # turbovec raises e.g. when dim % 8 != 0
+            _die(2, f"cannot build turbovec index (dim={d}, bit_width=4): {exc}")
         index.add_with_ids(v32, u64s)
         pools, preds = turbovec_search(index, rev, u64_to_row, q32, q64, v64, k, kprime)
         _, allow_preds = turbovec_search(index, rev, u64_to_row, q32, q64, v64, k,
@@ -299,7 +314,6 @@ def main() -> None:
     print(f"vectors={n} dim={d} queries={len(queries)} "
           f"float_MB={v32.nbytes / 1e6:.1f} over_fetch_k'={kprime}")
     print(f"idmap: {n} ids, u64 unique, round-trip OK, collisions={collisions}")
-    print(f"recall@{k} numpy=1.0000 (sanity: exact tier)")
     print(f"recall@{k} pool={pool_rec:.4f} (gate: >= {gate:.4f}, binding metric)")
     print(f"recall@{k} rescored={rescored_rec:.4f} (gate: >= {gate:.4f})")
     print(f"recall@{k} allowlist={allow_rec:.4f} "

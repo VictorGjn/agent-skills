@@ -218,13 +218,15 @@ def cosine(a: Iterable[float], b: Iterable[float]) -> float:
 # ──────────────────────────────────────────────────────────────────
 
 
-def _sidecar_store(corpus_dir: pathlib.Path):
+def _sidecar_store(corpus_dir: pathlib.Path, provider: dict | None = None):
     """Load the cb_vec sidecars, or None (backend missing / sidecars
-    missing / stale / mismatched). Best-effort — never raises."""
+    missing / stale / mismatched). Passing `provider` refuses sidecars
+    built under another provider/model/dims at load time — without it a
+    same-dims model swap would be searched. Best-effort — never raises."""
     if cb_vec is None or np is None:
         return None
     try:
-        return cb_vec.load(corpus_dir)
+        return cb_vec.load(corpus_dir, provider)
     except Exception:
         return None
 
@@ -235,25 +237,32 @@ def _sync_sidecars(corpus_dir: pathlib.Path, cache: dict, provider: dict,
 
     `store` must be loaded BEFORE save_cache (its fingerprint still matches
     the old JSON) so the sync can be incremental: stale ids removed,
-    changed-hash ids re-added with the same u64, new ids added. Any failure
-    warns to stderr and never blocks the JSON write (the source of truth).
+    changed-hash ids re-added with the same u64, new ids added — all in ONE
+    batched store.apply (per-entity mutations copy the matrix each time).
+    The source fingerprint is captured HERE, immediately after the JSON
+    write and before the sync work, and stamped as data — cb_vec.save
+    never re-stats (a concurrent rewrite during the sync must not get our
+    stamp). Any failure warns to stderr and never blocks the JSON write
+    (the source of truth).
     """
     if cb_vec is None or np is None:
         return
     try:
+        source_fp = cb_vec.json_fingerprint(corpus_dir)
         if store is not None:
             # Copy the matrix in-memory: releases the npy memmap so the
-            # save() below can os.replace the file (Windows holds a lock
+            # save() below can sweep the old file (Windows holds a lock
             # on memmapped files).
             store._materialize()
         if (store is None
                 or store.provider != provider["name"]
                 or store.model != provider["model"]
                 or store.dims != provider["dims"]):
-            store = cb_vec.build_from_cache(cache, provider)
+            store = cb_vec.build_from_cache(cache, provider,
+                                            source_fp=source_fp)
         else:
-            for eid in [e for e in store.ids if e not in cache]:
-                store.remove(eid)
+            removals = [e for e in store.ids if e not in cache]
+            upserts = []
             for eid, entry in cache.items():
                 emb = entry.get("embedding")
                 if (not emb or len(emb) != store.dims
@@ -261,8 +270,10 @@ def _sync_sidecars(corpus_dir: pathlib.Path, cache: dict, provider: dict,
                         or entry.get("model") != store.model):
                     continue
                 if store.hashes.get(eid) != entry.get("hash"):
-                    store.upsert(eid, emb, entry.get("hash", ""),
-                                 entry.get("identity", ""))
+                    upserts.append((eid, emb, entry.get("hash", ""),
+                                    entry.get("identity", "")))
+            store.apply(removals, upserts)
+            store.source_fp = source_fp
         store.save(corpus_dir)
     except Exception as ex:  # noqa: BLE001 — sidecars are disposable
         print(f"cb_embed: sidecar sync failed ({ex}) — JSON cache remains "
@@ -341,7 +352,7 @@ def build_embeddings(
     # matches the old JSON, which is what makes the sync incremental. force
     # bypasses them: content hashes are unchanged, so an incremental sync
     # would keep the old vectors; a None store rebuilds from the new JSON.
-    store = None if force else _sidecar_store(corpus_dir)
+    store = None if force else _sidecar_store(corpus_dir, provider)
     save_cache(corpus_dir, cache)
     _sync_sidecars(corpus_dir, cache, provider, store)
     return cache
@@ -369,7 +380,7 @@ def semantic_rank(
     use_backend = cb_vec is not None and np is not None
     # Fresh sidecars carry per-id hashes and the provider/model/dims meta, so
     # the hot path never parses the (multi-MB) JSON cache.
-    store = _sidecar_store(corpus_dir)
+    store = _sidecar_store(corpus_dir, provider)
     cache = None if store is not None else load_cache(corpus_dir)
 
     # Incompatibility = missing OR built under a different provider/model/dims.
@@ -399,7 +410,7 @@ def semantic_rank(
     if auto_build and incompatible > len(entities) * 0.1:
         store = None  # drop the memmap so the rebuild can replace the sidecars
         cache = build_embeddings(corpus_dir, entities)
-        store = _sidecar_store(corpus_dir)
+        store = _sidecar_store(corpus_dir, provider)
 
     qvec = embed_query(query, provider)
     if not qvec:
@@ -408,7 +419,11 @@ def semantic_rank(
     if use_backend and store is None:
         if cache is None:
             cache = load_cache(corpus_dir)
-        store = cb_vec.build_from_cache(cache, provider)
+        # Fingerprint captured at the read the cache came from; close enough
+        # to the load_cache above that a racing writer is caught by load()'s
+        # fingerprint check on the next call.
+        store = cb_vec.build_from_cache(
+            cache, provider, source_fp=cb_vec.json_fingerprint(corpus_dir))
         try:
             store.save(corpus_dir)
         except Exception as ex:  # noqa: BLE001 — sidecars are disposable

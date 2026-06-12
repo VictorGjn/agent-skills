@@ -76,6 +76,24 @@ class TestGateExitCodes(unittest.TestCase):
         self.assertEqual(cp.returncode, 2, cp.stderr)
         self.assertIn("shape mismatch", cp.stderr)
 
+    def test_exit2_string_dtype_vectors(self):
+        with tempfile.TemporaryDirectory() as td:
+            v = Path(td) / "v.npy"
+            np.save(v, np.array([["a", "b"], ["c", "d"]]))  # non-numeric dtype
+            cp = run_gate("--vectors-npy", str(v), env_extra=self.env_extra)
+        self.assertEqual(cp.returncode, 2, cp.stderr)
+        self.assertIn("--vectors-npy must be numeric", cp.stderr)
+        self.assertNotIn("Traceback", cp.stderr)
+
+    def test_exit3_zero_dim_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            ids = Path(td) / "ids.npy"
+            np.save(ids, np.array("scalar-not-array"))  # 0-d, len() unusable
+            cp = run_gate(*SMALL, "--ids", str(ids), env_extra=self.env_extra)
+        self.assertEqual(cp.returncode, 3, cp.stderr)
+        self.assertIn("provenance misalignment: --ids must be 1-D", cp.stderr)
+        self.assertNotIn("Traceback", cp.stderr)
+
     def test_exit3_ids_misalignment(self):
         with tempfile.TemporaryDirectory() as td:
             ids = Path(td) / "ids.npy"

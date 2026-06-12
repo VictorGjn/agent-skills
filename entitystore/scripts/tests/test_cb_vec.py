@@ -2,8 +2,10 @@
 
 Covers the turbovec IdMapIndex tier, the numpy fallback tier, the
 CE_DISABLE_TURBOVEC=1 kill switch, the persisted str<->uint64 id map,
-content-hash invalidation via remove+add, allowlist filtering, and the
-sidecar save/load lifecycle (staleness, partial sets, crash ordering).
+content-hash invalidation via remove+add, batched apply(), allowlist
+filtering, and the v2 token-named sidecar save/load lifecycle (staleness,
+partial sets, crash ordering, cross-pairing, orphan sweep, path-traversal
+refusal, fingerprint-as-data).
 
 Engine-agnostic assertions run TWICE: once in the default mode (turbovec
 when installed) and once under CE_DISABLE_TURBOVEC=1 via the subclass at
@@ -65,6 +67,14 @@ def write_json_cache(corpus_dir: pathlib.Path, cache: dict) -> None:
         json.dumps(cache, ensure_ascii=False), encoding="utf-8")
 
 
+def read_meta(corpus_dir: pathlib.Path) -> dict:
+    """The committed sidecar meta — v2 data files are token-named, so
+    tests resolve .npy/.tvim through the meta references, never by a
+    fixed filename."""
+    return json.loads(
+        (corpus_dir / cb_vec.META_NAME).read_text(encoding="utf-8"))
+
+
 @contextlib.contextmanager
 def numpy_mode():
     """Force the numpy tier via the kill switch, restoring prior state."""
@@ -90,7 +100,11 @@ class VectorStoreTests(unittest.TestCase):
         self.dir = pathlib.Path(self.tmp)
         self.cache = make_cache(self.N)
         write_json_cache(self.dir, self.cache)
-        self.store = cb_vec.build_from_cache(self.cache, PROVIDER)
+        # Mirror cb_embed: capture the JSON fingerprint at read/write time
+        # and thread it in as data — save() never re-stats the JSON.
+        self.fp = cb_vec.json_fingerprint(self.dir)
+        self.store = cb_vec.build_from_cache(
+            self.cache, PROVIDER, source_fp=self.fp)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -127,9 +141,21 @@ class VectorStoreTests(unittest.TestCase):
 
     def test_search_rejects_bad_query(self):
         self.assertEqual(self.store.search([0.0] * DIMS, top_k=5), [])
-        self.assertEqual(self.store.search([1.0] * (DIMS + 3), top_k=5), [])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(
+                self.store.search([1.0] * (DIMS + 3), top_k=5), [])
+        # a dims mix-up must be loud (stderr), not read as "no matches"
+        self.assertIn("shape", err.getvalue())
         self.assertEqual(
             self.store.search(self._qvec("concept:e000"), top_k=0), [])
+
+    def test_over_fetch_k_policy(self):
+        """10x top_k, min 100, capped at the allowed population."""
+        self.assertEqual(cb_vec.over_fetch_k(1000, 5), 100)
+        self.assertEqual(cb_vec.over_fetch_k(1000, 20), 200)
+        self.assertEqual(cb_vec.over_fetch_k(50, 20), 50)
+        self.assertEqual(cb_vec.over_fetch_k(150, 12), 120)
+        self.assertEqual(cb_vec.over_fetch_k(0, 5), 0)
 
     # ── allowlist filtering ──────────────────────────────────────
 
@@ -193,6 +219,79 @@ class VectorStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.upsert("concept:bad", [1.0] * (DIMS - 1), "h", "i")
 
+    # ── batched apply() ──────────────────────────────────────────
+
+    def test_apply_batch_equals_sequential(self):
+        """One apply(removals, upserts) call must observably equal the
+        same sequence of individual remove()/upsert() calls: same ids,
+        same u64 map (stable across remove+re-add and replace), same
+        hashes/identities, same search ids AND scores."""
+        rng = np.random.default_rng(123)
+
+        def unit() -> list[float]:
+            v = rng.standard_normal(DIMS)
+            return (v / np.linalg.norm(v)).tolist()
+
+        removals = ["concept:e003", "concept:e007", "concept:absent"]
+        upserts = [
+            ("concept:new-a", unit(), "ha", "ia"),       # brand new id
+            ("concept:e010", unit(), "h-re", "i-re"),    # replace existing
+            ("concept:e003", unit(), "h-back", "i-back"),  # re-add removed
+        ]
+        seq = cb_vec.build_from_cache(self.cache, PROVIDER)
+        u64_e003 = seq._u64_of["concept:e003"]
+        u64_e010 = seq._u64_of["concept:e010"]
+        self.assertTrue(seq.remove("concept:e003"))
+        self.assertTrue(seq.remove("concept:e007"))
+        self.assertFalse(seq.remove("concept:absent"))
+        for up in upserts:
+            seq.upsert(*up)
+        bat = cb_vec.build_from_cache(self.cache, PROVIDER)
+        bat.apply(removals, upserts)
+
+        self.assertEqual(sorted(bat.ids), sorted(seq.ids))
+        self.assertEqual(bat._u64_of, seq._u64_of)
+        self.assertEqual(bat.hashes, seq.hashes)
+        self.assertEqual(bat.identities, seq.identities)
+        # u64 stability: re-added and replaced ids keep their u64
+        self.assertEqual(bat._u64_of["concept:e003"], u64_e003)
+        self.assertEqual(bat._u64_of["concept:e010"], u64_e010)
+        self.assertNotIn("concept:e007", bat._u64_of)
+        for q in (upserts[0][1], upserts[1][1], upserts[2][1],
+                  self._qvec("concept:e000")):
+            a = seq.search(q, top_k=self.N + 1, min_score=-1.0)
+            b = bat.search(q, top_k=self.N + 1, min_score=-1.0)
+            self.assertEqual([h[0] for h in a], [h[0] for h in b])
+            for (_, sa), (_, sb) in zip(a, b):
+                self.assertAlmostEqual(sa, sb, places=10)
+
+    def test_apply_bad_vector_leaves_store_unmutated(self):
+        """A wrong-shape vector anywhere in the batch raises ValueError
+        BEFORE any mutation — removals included; search output is
+        bit-identical before and after the failed call."""
+        rng = np.random.default_rng(321)
+        good = rng.standard_normal(DIMS)
+        good = (good / np.linalg.norm(good)).tolist()
+        q = self._qvec("concept:e000")
+        before = self.store.search(q, top_k=self.N, min_score=-1.0)
+        ids_before = list(self.store.ids)
+        u64_before = dict(self.store._u64_of)
+        hashes_before = dict(self.store.hashes)
+        identities_before = dict(self.store.identities)
+        with self.assertRaises(ValueError):
+            self.store.apply(
+                ["concept:e003"],
+                [("concept:new-good", good, "hg", "ig"),
+                 ("concept:bad", [1.0] * (DIMS - 1), "hb", "ib")])
+        self.assertEqual(self.store.ids, ids_before)
+        self.assertIn("concept:e003", self.store._row_of)  # removal undone
+        self.assertNotIn("concept:new-good", self.store._row_of)
+        self.assertEqual(self.store._u64_of, u64_before)
+        self.assertEqual(self.store.hashes, hashes_before)
+        self.assertEqual(self.store.identities, identities_before)
+        after = self.store.search(q, top_k=self.N, min_score=-1.0)
+        self.assertEqual(before, after)
+
     # ── save / load round-trip ───────────────────────────────────
 
     def test_save_load_roundtrip_identical_results(self):
@@ -222,7 +321,8 @@ class VectorStoreTests(unittest.TestCase):
         meta_p.unlink()
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
         meta_p.write_bytes(meta_bytes)
-        (self.dir / cb_vec.NPY_NAME).unlink()
+        npy_name = json.loads(meta_bytes.decode("utf-8"))["npy"]
+        (self.dir / npy_name).unlink()
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
 
     def test_load_stale_json_cache(self):
@@ -261,27 +361,151 @@ class VectorStoreTests(unittest.TestCase):
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
 
     def test_crash_ordering_meta_written_last(self):
-        """Simulate: JSON cache updated + npy rewritten, crash before meta.
-        The stale meta fingerprint must refuse the set; rebuild works."""
+        """v2 crash window: an in-flight save wrote its token-named data
+        files but crashed BEFORE the atomic meta replace (the commit
+        point). load() must keep serving the OLD complete set — never a
+        mixed set — and refuse outright once the JSON cache itself moved
+        on (stale fingerprint). A completed save then recovers and sweeps
+        the crash orphan."""
         self.store.save(self.dir)
-        new_cache = make_cache(self.N + 5, seed=43)
-        write_json_cache(self.dir, new_cache)
-        fresh = cb_vec.build_from_cache(new_cache, PROVIDER)
-        npy_p = self.dir / cb_vec.NPY_NAME
-        with open(npy_p, "wb") as fh:
+        q = self._qvec("concept:e012")
+        saved_hits = self.store.search(q, top_k=10, min_score=-1.0)
+        fresh_cache = make_cache(self.N + 5, seed=43)
+        fresh = cb_vec.build_from_cache(fresh_cache, PROVIDER)
+        # crash window A: new data file on disk, meta still the old commit
+        crash_npy = self.dir / f"{cb_vec.SIDECAR_PREFIX}deadbeefdeadbeef.npy"
+        with open(crash_npy, "wb") as fh:
             np.save(fh, np.asarray(fresh.matrix, dtype=np.float64))
+        loaded = cb_vec.load(self.dir, PROVIDER)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(len(loaded.ids), self.N)  # OLD set, complete
+        self.assertNotEqual(read_meta(self.dir)["npy"], crash_npy.name)
+        hits = loaded.search(q, top_k=10, min_score=-1.0)
+        self.assertEqual([h[0] for h in hits], [h[0] for h in saved_hits])
+        for (_, sa), (_, sb) in zip(hits, saved_hits):
+            self.assertAlmostEqual(sa, sb, places=10)
+        del loaded  # release the npy memmap (Windows file lock)
+        # crash window B: the JSON cache was also rewritten before the
+        # crash — the committed meta's fingerprint is now stale: refuse.
+        write_json_cache(self.dir, fresh_cache)
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+        # recovery: a completed save commits the new set, sweeps orphans
+        fresh.source_fp = cb_vec.json_fingerprint(self.dir)
         fresh.save(self.dir)
         reloaded = cb_vec.load(self.dir, PROVIDER)
         self.assertIsNotNone(reloaded)
         self.assertEqual(len(reloaded.ids), self.N + 5)
+        self.assertFalse(crash_npy.exists())
 
     def test_load_row_count_mismatch_with_npy(self):
         self.store.save(self.dir)
-        with open(self.dir / cb_vec.NPY_NAME, "wb") as fh:
+        with open(self.dir / read_meta(self.dir)["npy"], "wb") as fh:
             np.save(fh, np.asarray(self.store.matrix[: self.N - 3],
                                    dtype=np.float64))
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+
+    def test_concurrent_savers_cannot_cross_pair(self):
+        """Two stores saving to the same corpus dir: the surviving meta's
+        npy reference must resolve to ITS OWN matrix (token-per-save), so
+        a loader sees the last saver's vectors, never a mix; the loser's
+        orphaned data files are swept by the next completed save."""
+        cache_b = make_cache(self.N, seed=77)  # same ids, different vectors
+        store_b = cb_vec.build_from_cache(cache_b, PROVIDER,
+                                          source_fp=self.fp)
+        self.store.save(self.dir)   # saver A
+        store_b.save(self.dir)      # saver B wins (meta replaced last)
+        meta = read_meta(self.dir)
+        self.assertEqual(
+            sorted(p.name for p in self.dir.glob("*.npy")), [meta["npy"]])
+        for p in self.dir.glob("*.tvim"):
+            self.assertEqual(p.name, meta["tvim"])
+        loaded = cb_vec.load(self.dir, PROVIDER)
+        self.assertIsNotNone(loaded)
+        self.assertTrue(np.array_equal(np.asarray(loaded.matrix),
+                                       np.asarray(store_b.matrix)))
+        for eid in ("concept:e000", "concept:e017"):
+            hits = loaded.search(cache_b[eid]["embedding"], top_k=3)
+            self.assertEqual(hits[0][0], eid)
+            self.assertAlmostEqual(hits[0][1], 1.0, places=6)
+            # A's vector for the same id must NOT self-match: no mixing
+            mix = loaded.search(self._qvec(eid), top_k=3, min_score=0.99)
+            self.assertNotIn(eid, [h[0] for h in mix])
+
+    def test_save_never_restats_json(self):
+        """save() stamps the source_fp captured when the JSON was read —
+        a concurrent JSON rewrite must NOT get our stamp, so load()
+        refuses (rebuild) instead of serving stale vectors as fresh."""
+        original_fp = self.store.source_fp
+        self.assertIsNotNone(original_fp)
+        write_json_cache(self.dir, make_cache(self.N + 3, seed=9))
+        self.assertNotEqual(cb_vec.json_fingerprint(self.dir), original_fp)
+        self.store.save(self.dir)
+        self.assertEqual(read_meta(self.dir)["source"], original_fp)
+        self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+
+    def test_unstamped_store_save_refused_by_load(self):
+        """source_fp=None saves source=None, which load() treats stale."""
+        store = cb_vec.build_from_cache(self.cache, PROVIDER)  # no fp
+        store.save(self.dir)
+        self.assertIsNone(read_meta(self.dir)["source"])
+        self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+
+    def test_meta_data_file_reference_path_traversal_refused(self):
+        """meta is data: an npy/tvim reference must be a plain sidecar
+        filename in the corpus dir — relative traversal, absolute paths,
+        prefix-less or non-string names are all refused (load -> None)."""
+        self.store.save(self.dir)
+        meta_p = self.dir / cb_vec.META_NAME
+        good = read_meta(self.dir)
+        evil_refs = [
+            "..\\..\\evil.npy",
+            "../evil.npy",
+            str(pathlib.Path(self.tmp).parent / "evil.npy"),  # absolute
+            f"..\\{cb_vec.SIDECAR_PREFIX}x.npy",
+            f"{cb_vec.SIDECAR_PREFIX}tok\\..\\evil.npy",
+            f"sub/{cb_vec.SIDECAR_PREFIX}x.npy",
+            "evil.npy",  # missing sidecar prefix
+            None,
+            42,
+        ]
+        for evil in evil_refs:
+            m = dict(good, npy=evil)
+            meta_p.write_text(json.dumps(m), encoding="utf-8")
+            self.assertIsNone(cb_vec.load(self.dir, PROVIDER),
+                              msg=f"npy={evil!r}")
+        # the tvim reference is held to the same rule (None stays legal)
+        m = dict(good, tvim="..\\..\\evil.tvim")
+        meta_p.write_text(json.dumps(m), encoding="utf-8")
+        self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+
+    def test_boundary_tie_broken_by_entity_id(self):
+        """Several entities with IDENTICAL vectors straddling the top_k
+        boundary: the k-th-boundary tie is broken by entity id, so the
+        selected set is deterministic and identical in both tiers (this
+        test re-runs under CE_DISABLE_TURBOVEC=1 via the subclass).
+
+        One-hot tied vectors + one-hot query keep the cosine bit-exact:
+        BLAS matmul accumulation order is row-position dependent, so
+        identical RANDOM rows can rescore ulps apart between the
+        full-matrix and pooled-submatrix paths, which would defeat the
+        exact-tie detection this test targets."""
+        cache = make_cache(12, seed=900)
+        one_hot = [0.0] * DIMS
+        one_hot[0] = 1.0
+        tied_ids = [f"concept:tie-{c}" for c in "fdbace"]  # shuffled order
+        for tid in tied_ids:
+            cache[tid] = {
+                "hash": "h", "identity": tid,
+                "embedding": list(one_hot),
+                "provider": "mistral", "model": "mistral-embed",
+                "dims": DIMS}
+        store = cb_vec.build_from_cache(cache, PROVIDER)
+        top_k = 3  # 6 exact ties at score 1.0 straddle the k=3 boundary
+        hits = store.search(one_hot, top_k=top_k, min_score=-1.0)
+        expected = sorted(tied_ids)[:top_k]
+        self.assertEqual([h[0] for h in hits], expected)
+        for _, s in hits:
+            self.assertEqual(s, 1.0)
 
     # ── id mapping ───────────────────────────────────────────────
 
@@ -354,7 +578,8 @@ class VectorStoreTests(unittest.TestCase):
 
     def test_empty_store(self):
         write_json_cache(self.dir, {})
-        store = cb_vec.build_from_cache({}, PROVIDER)
+        store = cb_vec.build_from_cache(
+            {}, PROVIDER, source_fp=cb_vec.json_fingerprint(self.dir))
         self.assertEqual(store.search([1.0] * DIMS, top_k=5), [])
         store.save(self.dir)
         loaded = cb_vec.load(self.dir, PROVIDER)
@@ -384,7 +609,8 @@ class NumpyModeVectorStoreTests(VectorStoreTests):
         self.store.search(self._qvec("concept:e001"), top_k=5)
         self.assertIsNone(self.store._index)
         self.store.save(self.dir)
-        self.assertFalse((self.dir / cb_vec.TVIM_NAME).exists())
+        self.assertIsNone(read_meta(self.dir)["tvim"])
+        self.assertEqual(list(self.dir.glob("*.tvim")), [])
 
 
 @unittest.skipUnless(HAVE_TURBOVEC, "turbovec not installed")
@@ -402,7 +628,8 @@ class TurboVecTests(unittest.TestCase):
         self.dir = pathlib.Path(self.tmp)
         self.cache = make_cache(self.N)
         write_json_cache(self.dir, self.cache)
-        self.store = cb_vec.build_from_cache(self.cache, PROVIDER)
+        self.store = cb_vec.build_from_cache(
+            self.cache, PROVIDER, source_fp=cb_vec.json_fingerprint(self.dir))
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -444,17 +671,19 @@ class TurboVecTests(unittest.TestCase):
 
     def test_tvim_sidecar_lifecycle(self):
         self.store.save(self.dir)
-        tvim_p = self.dir / cb_vec.TVIM_NAME
-        self.assertTrue(tvim_p.exists())
+        meta = read_meta(self.dir)
+        self.assertIsNotNone(meta["tvim"])
+        self.assertTrue((self.dir / meta["tvim"]).exists())
         loaded = cb_vec.load(self.dir, PROVIDER)
         self.assertIsNotNone(loaded)
         self.assertIsNotNone(loaded._index)
-        # Release the loaded store's memmap before rewriting the npy —
-        # Windows keeps the file locked while the mmap handle is open.
+        # Release the loaded store's memmap before the next save sweeps
+        # the old npy — Windows keeps memmapped files locked.
         del loaded
         with numpy_mode():
             self.store.save(self.dir)
-            self.assertFalse(tvim_p.exists())
+        self.assertIsNone(read_meta(self.dir)["tvim"])
+        self.assertEqual(list(self.dir.glob("*.tvim")), [])
 
     def test_upsert_reuses_index_without_full_rebuild(self):
         self.store.search(self._qvec("concept:e000"), top_k=5)
@@ -472,7 +701,8 @@ class TurboVecTests(unittest.TestCase):
 
     def test_corrupt_tvim_falls_back_to_lazy_rebuild(self):
         self.store.save(self.dir)
-        (self.dir / cb_vec.TVIM_NAME).write_bytes(b"not a tvim file")
+        (self.dir / read_meta(self.dir)["tvim"]).write_bytes(
+            b"not a tvim file")
         import io
         from contextlib import redirect_stderr
         with redirect_stderr(io.StringIO()):
@@ -500,6 +730,56 @@ class TurboVecTests(unittest.TestCase):
         self.store.save(self.dir)
         (self.dir / cb_vec.META_NAME).unlink()
         self.assertIsNone(cb_vec.load(self.dir, PROVIDER))
+
+    def test_tvim_entry_count_mismatch_rejected(self):
+        """A .tvim whose entry count differs from the meta rows must be
+        refused even when every meta u64 IS contained in it (extra stale
+        u64s would KeyError on every search otherwise)."""
+        self.store.save(self.dir)
+        meta = read_meta(self.dir)
+        # shrink meta rows + npy by one; the saved tvim keeps N entries,
+        # so containment of the remaining N-1 u64s still holds
+        meta["rows"] = meta["rows"][:-1]
+        with open(self.dir / meta["npy"], "wb") as fh:
+            np.save(fh, np.asarray(self.store.matrix[:-1],
+                                   dtype=np.float64))
+        (self.dir / cb_vec.META_NAME).write_text(
+            json.dumps(meta), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            loaded = cb_vec.load(self.dir, PROVIDER)
+        self.assertIsNotNone(loaded)
+        self.assertIsNone(loaded._index)  # lazy in-memory rebuild instead
+        self.assertIn("entries", err.getvalue())
+        hits = loaded.search(self._qvec("concept:e009"), top_k=3)
+        self.assertEqual(hits[0][0], "concept:e009")
+
+    def test_approximate_retrieval_overlap_with_exact_tier(self):
+        """N=500 >> over-fetch pool (100): retrieval is genuinely
+        approximate. Self-query must still rank itself first, and the
+        quantized-pool + exact-rescore results must overlap the exact
+        numpy tier >= 9/10 with identical scores for common ids."""
+        dims = 64  # dims % 8 == 0 (IdMapIndex requirement)
+        n = 500
+        cache = make_cache(n, dims=dims, seed=4242)
+        provider = {"name": "mistral", "model": "mistral-embed",
+                    "dims": dims}
+        store = cb_vec.build_from_cache(cache, provider)
+        self.assertLess(cb_vec.over_fetch_k(n, 10), n)
+        q_eid = "concept:e123"
+        q = cache[q_eid]["embedding"]
+        tv = store.search(q, top_k=10, min_score=-1.0)
+        self.assertEqual(len(tv), 10)
+        self.assertEqual(tv[0][0], q_eid)
+        self.assertAlmostEqual(tv[0][1], 1.0, places=6)
+        with numpy_mode():
+            ex = store.search(q, top_k=10, min_score=-1.0)
+        self.assertEqual(ex[0][0], q_eid)
+        tv_scores, ex_scores = dict(tv), dict(ex)
+        common = set(tv_scores) & set(ex_scores)
+        self.assertGreaterEqual(len(common), 9)
+        for eid in common:
+            self.assertAlmostEqual(tv_scores[eid], ex_scores[eid],
+                                   places=10)
 
 
 if __name__ == "__main__":

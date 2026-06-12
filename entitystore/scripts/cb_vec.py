@@ -23,11 +23,17 @@ Sidecars (derived, disposable — `.cb_embed_cache.json` stays the byte-
 identical source of truth and is NEVER written here; deleting all
 sidecars is always safe, they rebuild on the next semantic call):
 
-  .cb_embed_cache.npy        float64 matrix, row-aligned with meta rows
-  .cb_embed_cache.tvim       serialized turbovec index (turbovec tier only)
-  .cb_embed_cache.meta.json  written LAST as the commit point:
+  .cb_embed_cache.<token>.npy   float64 matrix, row-aligned with meta rows
+  .cb_embed_cache.<token>.tvim  serialized turbovec index (turbovec tier only)
+  .cb_embed_cache.meta.json     written LAST as the commit point:
       {version, provider, model, dims,
-       source: {size, mtime_ns} of .cb_embed_cache.json,
+       source: {size, mtime_ns} of .cb_embed_cache.json — captured by the
+               caller when the JSON was read/written, NEVER re-stat'ed at
+               save time (a concurrent JSON rewrite must not get our stamp),
+       npy / tvim: the exact token-named data files of THIS save — a
+               fresh token per save means concurrent savers cannot
+               cross-pair each other's data files (last meta wins,
+               orphans are swept on the next save),
        rows: [{id, u64, hash, identity}]}
 
 load() refuses partial / stale / version- or provider-mismatched sidecar
@@ -47,6 +53,7 @@ import hashlib
 import json
 import os
 import pathlib
+import secrets
 import sys
 
 try:
@@ -55,10 +62,12 @@ except ImportError:
     np = None
 
 JSON_NAME = ".cb_embed_cache.json"
-NPY_NAME = ".cb_embed_cache.npy"
-TVIM_NAME = ".cb_embed_cache.tvim"
+SIDECAR_PREFIX = ".cb_embed_cache."
 META_NAME = ".cb_embed_cache.meta.json"
-META_VERSION = 1
+META_VERSION = 2
+# v1 fixed-name data files — no longer written or read, swept on save.
+LEGACY_NPY_NAME = ".cb_embed_cache.npy"
+LEGACY_TVIM_NAME = ".cb_embed_cache.tvim"
 
 
 def _turbovec_enabled() -> bool:
@@ -103,11 +112,40 @@ def _fingerprint(json_cache: pathlib.Path) -> dict | None:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def json_fingerprint(corpus_dir: pathlib.Path) -> dict | None:
+    """Fingerprint of the corpus JSON cache, for callers to capture at the
+    moment they read or write it and thread into build_from_cache / save
+    as data (save never re-stats — see the module docstring)."""
+    return _fingerprint(pathlib.Path(corpus_dir) / JSON_NAME)
+
+
+def over_fetch_k(n_pool: int, top_k: int) -> int:
+    """Quantized-retrieval candidate-pool size: 10x top_k, min 100, capped
+    at the allowed population. Shared with cb_vec_gate so the gate measures
+    the exact policy production runs."""
+    return min(n_pool, max(10 * top_k, 100))
+
+
 def _unlink_quiet(p: pathlib.Path) -> None:
     try:
         p.unlink()
     except OSError:
         pass
+
+
+def _sweep_orphans(corpus_dir: pathlib.Path, keep: set[str]) -> None:
+    """Best-effort removal of sidecar data files not referenced by the
+    just-written meta: loser halves of concurrent saves and pre-v2
+    fixed-name files. Quiet on failure (Windows holds a lock on memmapped
+    npy files). May delete another saver's in-flight data files — its
+    meta then points at a missing npy, which load() refuses (rebuild),
+    never serves wrong."""
+    for pat in (f"{SIDECAR_PREFIX}*.npy", f"{SIDECAR_PREFIX}*.tvim"):
+        for p in corpus_dir.glob(pat):
+            if p.name not in keep:
+                _unlink_quiet(p)
+    _unlink_quiet(corpus_dir / LEGACY_NPY_NAME)
+    _unlink_quiet(corpus_dir / LEGACY_TVIM_NAME)
 
 
 class VectorStore:
@@ -126,6 +164,10 @@ class VectorStore:
         self._id_of: dict[int, str] = {}
         self._row_of: dict[str, int] = {}
         self._index = None
+        # {size, mtime_ns} of the JSON cache this store was built from —
+        # set by the caller (via build_from_cache / load); save() stamps
+        # exactly this value, never a fresh stat.
+        self.source_fp: dict | None = None
 
     # ── engine internals ─────────────────────────────────────────
 
@@ -166,7 +208,7 @@ class VectorStore:
         pool is exact-rescored by the caller."""
         index = self._ensure_index()
         n_pool = int(allowed_rows.size) if allowed_rows is not None else len(self.ids)
-        k_prime = min(n_pool, max(10 * top_k, 100))
+        k_prime = over_fetch_k(n_pool, top_k)
         q32 = q.astype(np.float32).reshape(1, -1)
         if allowed_rows is not None:
             allow_u64 = np.asarray(
@@ -187,6 +229,11 @@ class VectorStore:
             index = turbovec.IdMapIndex.load(str(tvim_p))
             if index.dim != self.dims:
                 raise ValueError(f"tvim dim {index.dim} != {self.dims}")
+            if len(index) != len(self._id_of):
+                # extra stale u64s would surface as KeyErrors on every
+                # search — containment alone is a one-way check
+                raise ValueError(
+                    f"tvim has {len(index)} entries, meta has {len(self._id_of)}")
             for u in self._id_of:
                 if not index.contains(u):
                     raise ValueError("tvim id-map misaligned with meta rows")
@@ -217,6 +264,10 @@ class VectorStore:
             return []
         q = np.asarray(list(qvec), dtype=np.float64)
         if q.shape != (self.dims,):
+            # warn, don't raise: a provider dims mix-up must degrade like
+            # the other paths, but silently would read as "no matches"
+            print(f"cb_vec: query has shape {q.shape}, store expects "
+                  f"({self.dims},) — returning no matches", file=sys.stderr)
             return []
         qn = float(np.linalg.norm(q))
         if qn == 0.0:
@@ -247,6 +298,19 @@ class VectorStore:
         rows, sims = rows[mask], sims[mask]
         if rows.size > top_k:
             part = np.argpartition(-sims, top_k - 1)[:top_k]
+            kth = sims[part].min()
+            if np.count_nonzero(sims == kth) > 1:
+                # exact score ties at the k-th boundary (realistic with
+                # duplicate-content entities): argpartition picks members
+                # in array order, which differs between tiers — break by
+                # id. Best-effort across tiers: BLAS may put bit-identical
+                # rows ulps apart depending on matrix position, in which
+                # case they are not "tied" here at all
+                strict = np.flatnonzero(sims > kth)
+                tied = np.flatnonzero(sims == kth)
+                tied = tied[np.argsort(
+                    np.asarray([self.ids[int(rows[i])] for i in tied]))]
+                part = np.concatenate([strict, tied])[:top_k]
             rows, sims = rows[part], sims[part]
         out = [(self.ids[int(r)], float(s)) for r, s in zip(rows, sims)]
         out.sort(key=lambda t: (-t[1], t[0]))
@@ -254,21 +318,10 @@ class VectorStore:
 
     def remove(self, entity_id: str) -> bool:
         """Drop one entity. Returns False when it was not present."""
-        row = self._row_of.get(entity_id)
-        if row is None:
-            return False
-        self._materialize()
-        self.matrix = np.delete(self.matrix, row, axis=0)
-        self.norms = np.delete(self.norms, row)
-        self.ids.pop(row)
-        u = self._u64_of.pop(entity_id)
-        del self._id_of[u]
-        del self.hashes[entity_id]
-        del self.identities[entity_id]
-        self._row_of = {eid: i for i, eid in enumerate(self.ids)}
-        if self._index is not None:
-            self._index.remove(u)
-        return True
+        present = entity_id in self._row_of
+        if present:
+            self.apply([entity_id], [])
+        return present
 
     def upsert(self, entity_id: str, vector, content_hash: str, identity: str) -> None:
         """Add a new entity or replace a changed one (content-hash change).
@@ -277,98 +330,146 @@ class VectorStore:
         the SAME u64 (add_with_ids raises ValueError on a duplicate id) —
         no full rebuild on re-embed.
         """
-        vec = np.asarray(list(vector), dtype=np.float64)
-        if vec.shape != (self.dims,):
-            raise ValueError(
-                f"vector has shape {vec.shape}, expected ({self.dims},)")
+        self.apply([], [(entity_id, vector, content_hash, identity)])
+
+    def apply(self, removals, upserts) -> None:
+        """Batched remove + upsert — the scribe-scale sync path.
+
+        Per-entity remove()/upsert() each copy the full matrix (O(n*dims)),
+        so a sync touching m entities costs O(m*n*dims); this does one
+        masked drop + one vstack regardless of m. All upsert vectors are
+        validated BEFORE any mutation (a bad one leaves the store intact).
+
+        removals: iterable of entity ids (absent ids are ignored).
+        upserts:  iterable of (entity_id, vector, content_hash, identity);
+                  a duplicated id keeps the last tuple.
+        """
+        drop_ids = [e for e in dict.fromkeys(removals) if e in self._row_of]
+        ups: dict[str, tuple] = {}
+        for eid, vector, content_hash, identity in upserts:
+            vec = np.asarray(list(vector), dtype=np.float64)
+            if vec.shape != (self.dims,):
+                raise ValueError(
+                    f"vector has shape {vec.shape}, expected ({self.dims},)")
+            ups[eid] = (vec, float(np.linalg.norm(vec)), content_hash, identity)
+        if not drop_ids and not ups:
+            return
         self._materialize()
-        norm = float(np.linalg.norm(vec))
-        row = self._row_of.get(entity_id)
-        if row is None:
-            u = _assign_u64(entity_id, self._id_of)
-            self.ids.append(entity_id)
-            self._row_of[entity_id] = len(self.ids) - 1
-            self._u64_of[entity_id] = u
-            self._id_of[u] = entity_id
-            self.matrix = np.vstack([self.matrix, vec[None, :]])
-            self.norms = np.append(self.norms, norm)
-        else:
-            u = self._u64_of[entity_id]
-            self.matrix[row] = vec
-            self.norms[row] = norm
+        if drop_ids:
+            drop_set = set(drop_ids)
+            keep = np.asarray(
+                [i for i, eid in enumerate(self.ids) if eid not in drop_set],
+                dtype=np.int64)
+            self.matrix = self.matrix[keep]
+            self.norms = self.norms[keep]
+            self.ids = [e for e in self.ids if e not in drop_set]
+            for eid in drop_ids:
+                u = self._u64_of.pop(eid)
+                del self._id_of[u]
+                self.hashes.pop(eid, None)
+                self.identities.pop(eid, None)
+                if self._index is not None:
+                    self._index.remove(u)
+            self._row_of = {eid: i for i, eid in enumerate(self.ids)}
+        new_vecs: list = []
+        new_norms: list[float] = []
+        index_adds: list[tuple] = []  # (unit float32 vec, u64)
+        for eid, (vec, norm, content_hash, identity) in ups.items():
+            row = self._row_of.get(eid)
+            if row is None:
+                u = _assign_u64(eid, self._id_of)
+                self.ids.append(eid)
+                self._row_of[eid] = len(self.ids) - 1
+                self._u64_of[eid] = u
+                self._id_of[u] = eid
+                new_vecs.append(vec)
+                new_norms.append(norm)
+            else:
+                u = self._u64_of[eid]
+                self.matrix[row] = vec
+                self.norms[row] = norm
+                if self._index is not None:
+                    self._index.remove(u)
+            self.hashes[eid] = content_hash
+            self.identities[eid] = identity
             if self._index is not None:
-                self._index.remove(u)
-        self.hashes[entity_id] = content_hash
-        self.identities[entity_id] = identity
-        if self._index is not None:
-            unit = vec / (norm if norm else 1.0)
+                index_adds.append(((vec / (norm if norm else 1.0))
+                                   .astype(np.float32), u))
+        if new_vecs:
+            self.matrix = np.vstack(
+                [self.matrix, np.asarray(new_vecs, dtype=np.float64)])
+            self.norms = np.append(self.norms, np.asarray(new_norms))
+        if index_adds and self._index is not None:
             self._index.add_with_ids(
-                np.ascontiguousarray(unit.astype(np.float32)[None, :]),
-                np.asarray([u], dtype=np.uint64))
+                np.ascontiguousarray(np.vstack([v[None, :] for v, _ in index_adds])),
+                np.asarray([u for _, u in index_adds], dtype=np.uint64))
 
     def save(self, corpus_dir: pathlib.Path) -> None:
-        """Write the sidecars. All writes atomic (pid tmp + os.replace).
+        """Write the sidecars under a fresh per-save token.
 
-        Order matters: .npy first, then .tvim (turbovec tier only), then
-        .meta.json LAST as the commit point — a crash mid-save leaves a
-        stale-fingerprint set that load() refuses, never a consistent-
-        looking wrong one.
+        Data files (.npy / .tvim) go directly to unique token names — an
+        unguessable name nothing reads until .meta.json, replaced
+        atomically LAST as the commit point, references it. A crash
+        mid-save leaves the previous complete set untouched (plus swept-
+        later orphans); concurrent savers cannot cross-pair data files.
+
+        The source fingerprint stamped is `self.source_fp` — captured by
+        the caller when the JSON cache was read or written, never a fresh
+        stat (a concurrent JSON rewrite must not get our stamp; an
+        unstamped store saves source=None, which load() refuses as stale).
         """
         corpus_dir = pathlib.Path(corpus_dir)
-        pid = os.getpid()
+        token = secrets.token_hex(8)
         self._materialize()
 
-        npy_p = corpus_dir / NPY_NAME
-        tmp = npy_p.with_name(npy_p.name + f".{pid}.tmp")
+        npy_name = f"{SIDECAR_PREFIX}{token}.npy"
+        tvim_name = (f"{SIDECAR_PREFIX}{token}.tvim"
+                     if _turbovec_enabled() and self.ids else None)
         try:
-            with open(tmp, "wb") as fh:
+            with open(corpus_dir / npy_name, "wb") as fh:
                 np.save(fh, np.ascontiguousarray(self.matrix, dtype=np.float64))
-            os.replace(tmp, npy_p)
-        except Exception:
-            _unlink_quiet(tmp)
-            raise
+            if tvim_name is not None:
+                self._ensure_index().write(str(corpus_dir / tvim_name))
 
-        tvim_p = corpus_dir / TVIM_NAME
-        if _turbovec_enabled() and self.ids:
-            tmp = tvim_p.with_name(tvim_p.name + f".{pid}.tmp")
+            meta = {
+                "version": META_VERSION,
+                "provider": self.provider,
+                "model": self.model,
+                "dims": self.dims,
+                "source": self.source_fp,
+                "npy": npy_name,
+                "tvim": tvim_name,
+                "rows": [
+                    {"id": eid,
+                     "u64": self._u64_of[eid],
+                     "hash": self.hashes.get(eid, ""),
+                     "identity": self.identities.get(eid, "")}
+                    for eid in self.ids
+                ],
+            }
+            meta_p = corpus_dir / META_NAME
+            tmp = meta_p.with_name(meta_p.name + f".{token}.tmp")
             try:
-                self._ensure_index().write(str(tmp))
-                os.replace(tmp, tvim_p)
+                tmp.write_text(json.dumps(meta, ensure_ascii=False),
+                               encoding="utf-8")
+                os.replace(tmp, meta_p)
             except Exception:
                 _unlink_quiet(tmp)
                 raise
-        else:
-            # A .tvim from an earlier turbovec-mode save must not survive a
-            # numpy-mode rewrite of the matrix — it would be stale.
-            _unlink_quiet(tvim_p)
-
-        meta = {
-            "version": META_VERSION,
-            "provider": self.provider,
-            "model": self.model,
-            "dims": self.dims,
-            "source": _fingerprint(corpus_dir / JSON_NAME),
-            "rows": [
-                {"id": eid,
-                 "u64": self._u64_of[eid],
-                 "hash": self.hashes.get(eid, ""),
-                 "identity": self.identities.get(eid, "")}
-                for eid in self.ids
-            ],
-        }
-        meta_p = corpus_dir / META_NAME
-        tmp = meta_p.with_name(meta_p.name + f".{pid}.tmp")
-        try:
-            tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, meta_p)
         except Exception:
-            _unlink_quiet(tmp)
+            _unlink_quiet(corpus_dir / npy_name)
+            if tvim_name is not None:
+                _unlink_quiet(corpus_dir / tvim_name)
             raise
+        _sweep_orphans(corpus_dir, keep={npy_name, tvim_name or ""})
 
 
-def build_from_cache(cache: dict, provider_meta: dict) -> VectorStore:
+def build_from_cache(cache: dict, provider_meta: dict,
+                     source_fp: dict | None = None) -> VectorStore:
     """Build an in-memory store from the JSON cache (read-only input —
-    this module never writes .cb_embed_cache.json).
+    this module never writes .cb_embed_cache.json). `source_fp` is the
+    fingerprint the caller captured when it read/wrote that JSON; without
+    it a later save() is stamped source=None and load() treats it stale.
 
     Entries with a missing embedding, mismatched dims, or per-entry
     provider/model/dims provenance disagreeing with provider_meta are
@@ -381,6 +482,7 @@ def build_from_cache(cache: dict, provider_meta: dict) -> VectorStore:
         raise RuntimeError("cb_vec requires numpy")
     dims = provider_meta["dims"]
     store = VectorStore(provider_meta["name"], provider_meta["model"], dims)
+    store.source_fp = source_fp
     rows: list[list[float]] = []
     for eid, entry in cache.items():
         emb = entry.get("embedding")
@@ -413,15 +515,30 @@ def load(corpus_dir: pathlib.Path, provider: dict | None = None) -> VectorStore 
         return None
     corpus_dir = pathlib.Path(corpus_dir)
     meta_p = corpus_dir / META_NAME
-    npy_p = corpus_dir / NPY_NAME
-    # All-or-nothing: meta without npy (or vice versa) is refused.
-    if not meta_p.exists() or not npy_p.exists():
+    if not meta_p.exists():
         return None
     try:
         meta = json.loads(meta_p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(meta, dict) or meta.get("version") != META_VERSION:
+        return None
+
+    def _safe_name(n) -> bool:
+        # meta is data: a data-file reference must be a plain sidecar
+        # filename in this directory, never a path
+        return (isinstance(n, str) and n.startswith(SIDECAR_PREFIX)
+                and pathlib.PurePath(n).name == n)
+
+    npy_name = meta.get("npy")
+    if not _safe_name(npy_name):
+        return None
+    npy_p = corpus_dir / npy_name
+    # All-or-nothing: meta referencing a missing npy is refused.
+    if not npy_p.exists():
+        return None
+    tvim_name = meta.get("tvim")
+    if tvim_name is not None and not _safe_name(tvim_name):
         return None
     if provider is not None and (
             meta.get("provider") != provider["name"]
@@ -443,12 +560,13 @@ def load(corpus_dir: pathlib.Path, provider: dict | None = None) -> VectorStore 
     if len(set(u64s)) != len(rows) or len(set(ids)) != len(rows):
         return None
     try:
-        matrix = np.load(npy_p, mmap_mode="r")
+        matrix = np.load(npy_p, mmap_mode="r", allow_pickle=False)
     except (OSError, ValueError):
         return None
     if matrix.ndim != 2 or matrix.shape != (len(rows), dims):
         return None
     store = VectorStore(meta.get("provider", ""), meta.get("model", ""), dims)
+    store.source_fp = meta.get("source")
     store.ids = ids
     store.matrix = matrix
     store.norms = np.linalg.norm(matrix, axis=1).astype(np.float64)
@@ -457,7 +575,8 @@ def load(corpus_dir: pathlib.Path, provider: dict | None = None) -> VectorStore 
     store._row_of = {eid: i for i, eid in enumerate(ids)}
     store.hashes = {r["id"]: r.get("hash", "") for r in rows}
     store.identities = {r["id"]: r.get("identity", "") for r in rows}
-    tvim_p = corpus_dir / TVIM_NAME
-    if _turbovec_enabled() and tvim_p.exists():
-        store._load_tvim(tvim_p)
+    if _turbovec_enabled() and tvim_name is not None:
+        tvim_p = corpus_dir / tvim_name
+        if tvim_p.exists():
+            store._load_tvim(tvim_p)
     return store

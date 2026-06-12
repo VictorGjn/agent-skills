@@ -262,10 +262,12 @@ class RankContractTests(unittest.TestCase):
         self.assertEqual(res[0], {"id": "concept:alpha", "score": 1.0,
                                   "identity": cb_embed.entity_identity(
                                       self.entities["concept:alpha"])})
-        self.assertTrue((self.corpus / cb_vec.NPY_NAME).exists())
         self.assertTrue((self.corpus / cb_vec.META_NAME).exists())
-        self.assertEqual((self.corpus / cb_vec.TVIM_NAME).exists(),
-                         cb_vec._turbovec_enabled())
+        meta = self._meta()
+        self.assertTrue((self.corpus / meta["npy"]).exists())
+        self.assertEqual(meta["tvim"] is not None, cb_vec._turbovec_enabled())
+        if meta["tvim"] is not None:
+            self.assertTrue((self.corpus / meta["tvim"]).exists())
         self.assertEqual(cb_embed._cache_path(self.corpus).read_bytes(), before)
 
     def test_second_call_serves_from_sidecars(self):
@@ -313,10 +315,12 @@ class RankContractTests(unittest.TestCase):
 
     # ── build_embeddings incremental sidecar sync ────────────────
 
-    def _meta_rows(self) -> list[dict]:
-        meta = json.loads((self.corpus / cb_vec.META_NAME)
+    def _meta(self) -> dict:
+        return json.loads((self.corpus / cb_vec.META_NAME)
                           .read_text(encoding="utf-8"))
-        return meta["rows"]
+
+    def _meta_rows(self) -> list[dict]:
+        return self._meta()["rows"]
 
     def test_incremental_sync_stable_u64_and_pruning(self):
         self.build()
@@ -335,7 +339,7 @@ class RankContractTests(unittest.TestCase):
         self.assertIn("concept:zeta", ids)
         u64_after = {r["id"]: r["u64"] for r in rows}
         self.assertEqual(u64_after["concept:beta"], u64_before["concept:beta"])
-        mat = np.load(self.corpus / cb_vec.NPY_NAME)
+        mat = np.load(self.corpus / self._meta()["npy"])
         np.testing.assert_allclose(mat[ids.index("concept:beta")],
                                    self.vecs["concept:beta"])
         by_id = {r["id"]: r["score"] for r in self.rank()}
@@ -355,7 +359,7 @@ class RankContractTests(unittest.TestCase):
         cache = cb_embed.build_embeddings(self.corpus, self.entities, force=True)
         self.assertTrue(self.embed_calls)
         rows = self._meta_rows()
-        mat = np.load(self.corpus / cb_vec.NPY_NAME)
+        mat = np.load(self.corpus / self._meta()["npy"])
         self.assertEqual(len(rows), len(self.entities))
         for i, r in enumerate(rows):
             np.testing.assert_allclose(mat[i], cache[r["id"]]["embedding"])
@@ -366,11 +370,15 @@ class RankContractTests(unittest.TestCase):
             META_NAME = cb_vec.META_NAME
 
             @staticmethod
-            def load(corpus_dir):
+            def json_fingerprint(corpus_dir):
+                return None
+
+            @staticmethod
+            def load(corpus_dir, provider=None):
                 raise OSError("sidecar load boom")
 
             @staticmethod
-            def build_from_cache(cache, provider):
+            def build_from_cache(cache, provider, source_fp=None):
                 raise OSError("sidecar build boom")
 
         orig = cb_embed.cb_vec
