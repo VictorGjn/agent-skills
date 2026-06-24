@@ -30,6 +30,14 @@ import os
 import math
 from pathlib import Path
 
+# Optional dep, same feature-detect convention as the sentence_transformers
+# guard in _resolve_provider: numpy vectorizes ranking; pure-Python fallback
+# in _rank_cosine keeps the script working stdlib-only.
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 # ── Config ──
 
 EMBED_BATCH_SIZE = 100
@@ -293,6 +301,50 @@ def cosine_similarity(a: list, b: list) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _rank_cosine(query_embedding: list, cache: dict, min_score: float) -> list:
+    """
+    Rank cache entries by cosine similarity to the query embedding.
+
+    Returns [(path, similarity)] sorted by similarity desc, excluding entries
+    below `min_score`. Single numpy matmul when numpy is available; otherwise
+    the per-entry pure-Python cosine loop — both paths return identical
+    results.
+
+    Entries whose embedding length differs from the query's are excluded in
+    BOTH paths. This is a deliberate behaviour change: cosine_similarity
+    zip-truncates mismatched-dim vectors while still dividing by full-length
+    norms, returning deflated garbage scores — excluding such entries (e.g.
+    a cache poisoned by a provider/dims switch) is strictly safer than
+    ranking on garbage.
+
+    Seam: when the Anabasis engine-carve lands, this helper is the
+    convergence point on entitystore/scripts/cb_vec.py (VectorStore backend).
+    Workspace caches here are small and three external readers pin the raw
+    cache/embeddings.json shape, so an in-memory matmul is all this skill
+    needs — no sidecar index, no cross-skill import.
+    """
+    qdims = len(query_embedding)
+    pairs = [(path, entry['embedding']) for path, entry in cache.items()
+             if entry.get('embedding') and len(entry['embedding']) == qdims]
+    if not pairs:
+        return []
+
+    if np is not None:
+        matrix = np.array([emb for _, emb in pairs], dtype=np.float64)
+        q = np.array(query_embedding, dtype=np.float64)
+        denom = np.linalg.norm(matrix, axis=1) * np.linalg.norm(q)
+        denom[denom == 0] = 1.0  # zero vectors score 0.0, like cosine_similarity
+        sims = (matrix @ q) / denom
+        scored = [(path, float(sim)) for (path, _), sim in zip(pairs, sims)]
+    else:
+        scored = [(path, cosine_similarity(query_embedding, emb))
+                  for path, emb in pairs]
+
+    scored = [(p, s) for p, s in scored if s >= min_score]
+    scored.sort(key=lambda x: -x[1])
+    return scored
+
+
 # ── Cache management ──
 
 def load_cache(cache_path: str) -> dict:
@@ -471,22 +523,15 @@ def resolve_semantic(query: str, cache_path: str = CACHE_FILE,
     if not query_embedding:
         return []
 
-    results = []
-    for path, entry in cache.items():
-        emb = entry.get('embedding')
-        if not emb:
-            continue
-
-        sim = cosine_similarity(query_embedding, emb)
-        if sim >= min_score:
-            results.append({
-                'path': path,
-                'confidence': round(sim, 4),
-                'reason': 'semantic match',
-                'identity': entry.get('identity', ''),
-            })
-
-    results.sort(key=lambda x: -x['confidence'])
+    results = [
+        {
+            'path': path,
+            'confidence': round(sim, 4),
+            'reason': 'semantic match',
+            'identity': cache[path].get('identity', ''),
+        }
+        for path, sim in _rank_cosine(query_embedding, cache, min_score)
+    ]
     return results[:top_k]
 
 
@@ -530,15 +575,8 @@ def resolve_hybrid(query: str, scored_files: list, cache_path: str = CACHE_FILE,
     SEM_MIN_COSINE = 0.15
     KW_MIN_RELEVANCE = 0.10
 
-    semantic_pairs = []
-    if query_embedding:
-        for path, entry in cache.items():
-            emb = entry.get('embedding')
-            if emb:
-                sim = cosine_similarity(query_embedding, emb)
-                if sim >= SEM_MIN_COSINE:
-                    semantic_pairs.append((path, sim))
-    semantic_pairs.sort(key=lambda x: -x[1])
+    semantic_pairs = (_rank_cosine(query_embedding, cache, SEM_MIN_COSINE)
+                      if query_embedding else [])
     semantic_rank = {p: i + 1 for i, (p, _) in enumerate(semantic_pairs)}
     semantic_raw = dict(semantic_pairs)
 
