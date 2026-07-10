@@ -6,4 +6,8 @@ cache/
 !context-engineering/server-prod/vercel.json
 !context-engineering/eval/csb/converted-tasks/**/spec.json
 !context-engineering/eval/csb/converted-tasks/**/ground_truth.json
+!entitystore/scripts/tests/fixtures/golden_seed.json
+!entitystore/scripts/tests/fixtures/golden_queries.json
+!entitystore/scripts/tests/fixtures/schemas/entity.schema.json
+!entitystore/scripts/tests/fixtures/golden_corpus/**/*.json
 .DS_Store

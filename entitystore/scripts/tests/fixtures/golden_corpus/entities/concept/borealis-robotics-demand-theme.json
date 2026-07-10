@@ -1,0 +1,32 @@
+{
+  "concept": {
+    "falsifiability": "medium",
+    "maturity": "emerging",
+    "priority": "medium",
+    "specificity": "medium",
+    "statement": "Competing sensing vendors report rising demand for retrofit sensor kits on existing foil craft, a market Borealis Robotics is expanding into.",
+    "status": "exploring",
+    "type": "opportunity"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "id": "concept:borealis-robotics-demand-theme",
+  "kind": "concept",
+  "names": [
+    "Borealis Robotics Retrofit Sensor Demand"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: rising demand for retrofit sensor kits on existing foil craft.",
+  "topics": [
+    "fixture",
+    "demand"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:borealis-robotics",
+    "concept:foil-stability-cluster"
+  ]
+}

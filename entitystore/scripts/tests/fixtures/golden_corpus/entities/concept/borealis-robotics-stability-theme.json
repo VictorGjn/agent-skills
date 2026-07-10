@@ -1,0 +1,43 @@
+{
+  "concept": {
+    "falsifiability": "tested",
+    "maturity": "tested",
+    "specificity": "high",
+    "statement": "Borealis Robotics' sensing kit correlates onboard accelerometer spikes with foil cavitation onset, giving early warning ahead of stability loss events.",
+    "type": "pattern"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "Across forty logged transits, accelerometer spikes above the calibrated threshold preceded a reported cavitation event in the large majority of cases, giving the bridge crew a median warning window of several seconds before the stability loss became noticeable.",
+      "source_id": "fixture:synthetic-source-5",
+      "stance": "supports"
+    },
+    {
+      "quote": "Borealis Robotics' own engineering notes describe the correlation as strong enough to justify an audible cockpit alert, though the fixture operations team has so far only enabled a passive logging mode pending further validation on the wider fleet.",
+      "source_id": "fixture:synthetic-source-6",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:borealis-robotics-stability-theme",
+  "kind": "concept",
+  "names": [
+    "Borealis Robotics Cavitation Early-Warning Pattern"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: Borealis sensing kit correlates accelerometer spikes with foil cavitation onset.",
+  "topics": [
+    "fixture",
+    "stability"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:borealis-robotics",
+    "concept:foil-stability-cluster",
+    "concept:meridian-foils-stability-theme"
+  ]
+}

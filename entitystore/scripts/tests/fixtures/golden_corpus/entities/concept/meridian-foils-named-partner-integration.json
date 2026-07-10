@@ -1,0 +1,39 @@
+{
+  "concept": {
+    "falsifiability": "medium",
+    "maturity": "emerging",
+    "specificity": "high",
+    "statement": "Meridian Foils has integrated Atlas Marine's routing module and Borealis Robotics' sensing kit into a single onboard stability-advisory system.",
+    "type": "observation"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "The fixture fleet's refit notes describe a single advisory panel on the bridge that surfaces both the Atlas Marine routing recommendation and the Borealis Robotics sensing alert side by side, replacing two separate vendor displays that crews had found confusing to cross-reference.",
+      "source_id": "fixture:synthetic-source-7",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:meridian-foils-named-partner-integration",
+  "kind": "concept",
+  "names": [
+    "Meridian Foils Combined Routing-Sensing Integration"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: Meridian Foils integrates Atlas routing and Borealis sensing into one advisory system.",
+  "topics": [
+    "fixture",
+    "partnership"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:meridian-foils",
+    "org:atlas-marine",
+    "org:borealis-robotics",
+    "concept:foil-stability-cluster"
+  ]
+}
