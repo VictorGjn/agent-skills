@@ -26,13 +26,13 @@ company-brain entities, and is not relocated into company-brain.**
 Rejected alternatives and why:
 
 - **Vendor real entities into this public repo.** An earlier version of this
-  plan did exactly that (`org:bearing-ai`, `org:ascenz-marorka`,
-  `org:bar-technologies` and their partnership/opportunity concept clusters,
-  verbatim) — caught in review before any code was written. Rejected: no
-  engineering need justifies publishing real commercial entities, and
-  retrieval-regression coverage for scoring/banding/neighbor-expansion logic
-  is **shape-driven, not content-driven** — a synthetic fixture with the same
-  graph shape delivers the same coverage with zero data-exposure risk.
+  plan did exactly that (real Syroco commercial entities and their
+  partnership/opportunity concept clusters, verbatim) — caught in review before
+  any code was written. Rejected: no engineering need justifies publishing real
+  commercial entities, and retrieval-regression coverage for scoring/banding/
+  neighbor-expansion logic is **shape-driven, not content-driven** — a synthetic
+  fixture with the same graph shape delivers the same coverage with zero
+  data-exposure risk.
 - **Relocate the fixture into private `company-brain` instead.** Rejected:
   it would leave `agent-skills`' own default CI with zero retrieval-regression
   coverage unless a contributor happens to have a private company-brain
@@ -121,11 +121,11 @@ be caught.
 
 ## 5. Content scan (run before committing any change to this directory)
 
-```
-grep -riE "bearing-ai|ascenz|marorka|bar-technologies" entitystore/scripts/tests/fixtures/
-```
-
-Zero matches required. This repo (`VictorGjn/agent-skills`) is public.
+Before adding or modifying any files in this directory, verify that no real
+Syroco, customer, or competitor organization/vessel/person names or slugs have
+been included. Use a grep pattern appropriate to your Syroco entity-naming
+conventions and verify: zero matches required. This repo (`VictorGjn/agent-skills`)
+is public.
 
 ## 6. Opt-in live-corpus sanity check (local only, never in CI)
 
