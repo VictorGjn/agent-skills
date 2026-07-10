@@ -2,15 +2,19 @@
 
 > **Status:** draft, 2026-05-03. First worked example (granola-scribe) deferred.
 >
-> **Two profiles exist (un-reconciled, read before applying this spec).** This
-> document specifies **Profile A — CE push**: scribes call `wiki.add`,
-> `entity_hint` is a *resolved* slug, claims are extracted at scribe-time
-> (T0–T3). A second, **newer** model is now in production at Syroco — **Profile
-> B — raw-JSONL verbatim** (`syrocolab/syroco-product-ops/routines/scribe-pass`):
-> scribes append verbatim events to `company-brain/<stream>/raw/<source>.jsonl`,
-> `entity_hint` is *source-local* (`<scribe>:<id>`), and **all** extraction +
-> identity resolution defer to the enricher (`enrich-pass`). The two must
-> converge (see *Open questions → Cross-scribe entity merge*). The SOTA
+> **Two profiles exist (un-reconciled, read before applying this spec).** The
+> live production model at Syroco is **Profile B — raw-JSONL verbatim**
+> (`syrocolab/syroco-product-ops/routines/scribe-pass`): scribes append verbatim
+> events to `company-brain/<stream>/raw/<source>.jsonl`, `entity_hint` is
+> *source-local* (`<scribe>:<id>`), and **all** extraction + identity resolution
+> defer to the enricher (`enrich-pass`). An older, un-reconciled alternative is
+> **Profile A — CE push**: scribes call `wiki.add`, `entity_hint` is a *resolved*
+> slug, claims are extracted at scribe-time (T0–T3). **Scribes must conform to
+> exactly one profile.** THE WRITER RULE (company-brain/CLAUDE.md, locked
+> 2026-06-04) states: scribes write RAW only; NEVER entities; NEVER
+> identity_assertions. This locks Profile B as the canonical architecture; all
+> NEW scribes MUST use it. Profile A is retained for reference only. The two
+> must converge (see *Open questions → Cross-scribe entity merge*). The SOTA
 > idempotency rules added below (content fingerprint, supersession, look-back,
 > correlation) apply to **both** profiles. Validate any scribe against its
 > profile with the `scribe-check` skill.
@@ -37,27 +41,31 @@ CE stays corpus-agnostic. Scribes do the source-specific work. The two are indep
    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
    │granola-scribe│    │ slack-scribe │    │hubspot-scribe│  ← N scribes
    └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-          │  presses [add]    │  presses [add]    │  presses [add]
+          │ appends          │ appends          │ appends
           └────────────┬──────┴────────────┬──────┘
                        ▼                   ▼
-              ┌──────────────────────────────────┐
-              │     CE.wiki.add (push-shape)     │  ← 1 brain
-              │  → events/<date>.jsonl           │
-              │  → wiki_init consolidates        │
-              │  → audit flags                   │
-              └──────────────────────────────────┘
+         company-brain/<stream>/raw/<source>.jsonl
+                       │
+                       ▼
+         ┌──────────────────────────────────┐
+         │   enrich-pass (extraction,      │
+         │   identity resolution, frozen    │
+         │   as_of per run)                 │
+         │  → entities/ + claims/          │
+         │  → entity stores                │
+         └──────────────────────────────────┘
 ```
 
-The `wiki.add` button already exists (`mcp_server.py:wiki_add`). The brain uses `EventStreamSource` (push-shape Source) under it. Scribes just call the button — no plugin contract, no engine modifications.
+Profile B scribes append verbatim events to the raw event log; the enricher (enrich-pass) then extracts claims and resolves identity. This is the canonical flow Syroco runs today. (Profile A historical note: older scribes called `wiki.add` MCP and pushed resolved claims directly; that infrastructure remains available but is not recommended for new work.)
 
 ## What a scribe is (the minimum)
 
 A scribe is a runnable thing that:
 
 1. **Reads** from one upstream source (typically via the corresponding MCP).
-2. **Extracts** zero or more claims per artifact (meeting / message / issue / page / email).
-3. **Pushes** each claim as an event to `wiki.add`.
-4. **Tracks** what it has already pushed so re-runs are idempotent.
+2. **Emits verbatim events** per artifact (meeting / message / issue / page / email), with source-local identity; extraction and resolution defer to the enricher.
+3. **Appends each event** as a line to `company-brain/<stream>/raw/<source>.jsonl`.
+4. **Tracks** what it has already appended so re-runs are idempotent.
 
 Anything else is implementation choice.
 
