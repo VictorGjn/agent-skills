@@ -73,7 +73,7 @@ detection logic and two-profile gate remain unchanged.
 
 | ID | Rule | Sev | Profile | Mode | Pass criterion | Fix |
 |---|---|---|---|---|---|---|
-| C1 | All required envelope fields present & typed | FAIL | both | static, output | A: `source_type, source_ref, file_id, claim`. B: `schema_version, scribe, scribed_at, source_type, source_ref, file_id, external_id, content_hash, claim, ts, entity_hint, payload` | add the missing field to the emit spec |
+| C1 | All required envelope fields present & typed | FAIL | both | static, output | A: `source_type, source_ref, file_id, claim`. B: `schema_version, scribe, scribed_at, source_type, source_ref, file_id, external_id, content_hash, claim, ts, entity_hint, payload, data_classification` (`data_classification` enum: `public/internal/confidential/restricted`, see `context-engineering/SPEC-mcp.md` §6.3) | add the missing field to the emit spec |
 | C2 | `file_id` is the deterministic cross-run dedup key | FAIL | both | static, output | A: stable per artifact. B: `sha256(scribe + external_id + content_hash)` | define `file_id` exactly; never random/time-based |
 | C3 | `source_type` registered in `freshness_policy.HALF_LIVES` before ship | FAIL | A | static | half-life key declared & registered (else 60-day default silently applies) | register the key in CE |
 | C4 | `source_ref` stable across re-runs | FAIL | both | static, output | a permalink/id that does not change run-to-run | use upstream stable URL/id, not a positional ref |

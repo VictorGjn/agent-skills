@@ -17,7 +17,10 @@
 > must converge (see *Open questions → Cross-scribe entity merge*). The SOTA
 > idempotency rules added below (content fingerprint, supersession, look-back,
 > correlation) apply to **both** profiles. Validate any scribe against its
-> profile with the `scribe-check` skill.
+> profile with the `scribe-check` skill. Profile-B raw envelopes MUST also
+> carry `data_classification` (enum, canonical definition in
+> `scribe-check/CRITERIA.md` C1 / `context-engineering/SPEC-mcp.md` §6.3) —
+> the full envelope field list is not duplicated here.
 
 > **Placement & ownership now live in company-brain.** The authoritative
 > placement/ownership model (truth shared, relevance per-department; one
