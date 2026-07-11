@@ -1,0 +1,63 @@
+{
+  "concept": {
+    "falsifiability": "medium",
+    "maturity": "emerging",
+    "specificity": "high",
+    "statement": "Routing optimization, onboard sensing, and passenger-comfort outcomes form one interlocking stability narrative across the Atlas Marine, Borealis Robotics, and Meridian Foils fixture cluster, evidenced by multiple independent operational reports.",
+    "type": "pattern"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "Taken together, the routing pitch-reduction figures, the sensing cavitation early-warning correlation, and the passenger-comfort trial results describe a single stability story rather than three unrelated vendor claims, which is why the fixture cluster groups them under one hub concept for retrieval testing.",
+      "source_id": "fixture:synthetic-source-10",
+      "stance": "asserts"
+    },
+    {
+      "quote": "A cross-vendor review of the fixture fleet's quarterly reports found consistent directional agreement between the routing, sensing, and comfort metrics even though each was collected by a different team using different instrumentation and reporting cadence.",
+      "source_id": "fixture:synthetic-source-11",
+      "stance": "supports"
+    },
+    {
+      "quote": "The fixture operations team's internal wiki references this cluster as the reason the two smaller vendors were kept on the same integration roadmap instead of being evaluated as mutually exclusive alternatives during the fixture's synthetic procurement review.",
+      "source_id": "fixture:synthetic-source-12",
+      "stance": "mentions"
+    },
+    {
+      "quote": "This hub concept is deliberately large and evidence-heavy so that a tight wiki_pack token budget forces real Full to Detail to Summary depth demotion when it is matched directly by a golden query in the retrieval regression suite.",
+      "source_id": "fixture:synthetic-source-13",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:foil-stability-cluster",
+  "kind": "concept",
+  "names": [
+    "Foil Stability Cluster"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture hub concept tying together routing, sensing, and stability themes across the fixture's fictional org cluster.",
+  "topics": [
+    "fixture",
+    "stability",
+    "cluster"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:atlas-marine",
+    "org:borealis-robotics",
+    "org:meridian-foils",
+    "concept:atlas-marine-named-partner-routing",
+    "concept:atlas-marine-demand-theme",
+    "concept:atlas-marine-stability-theme",
+    "concept:borealis-robotics-named-partner-sensing",
+    "concept:borealis-robotics-demand-theme",
+    "concept:borealis-robotics-stability-theme",
+    "concept:meridian-foils-named-partner-integration",
+    "concept:meridian-foils-demand-theme",
+    "concept:meridian-foils-stability-theme"
+  ]
+}

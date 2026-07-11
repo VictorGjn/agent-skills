@@ -1,0 +1,521 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/syrocolab/company-brain/schemas/entity.schema.json",
+  "title": "Entity",
+  "description": "One semantic-layer entity. Lives at corpora/<corpus_id>/entities/<kind>/<slug>.json. Implements the Anabasis Entity ABC (spec/entity.md). Concept-first, evidence-bound, author-agnostic. v2 (additive): optional claims[] (charter-structure-aware structured facts), vessel kind + vessel{} particulars, client{} commercial overlay on org, org.charter_role. v4 (additive): navigation kind + navigation{} voyage anchor (single captain_in_charge edge; charterer voyage-scoped), vessel.manager/navigations, provenance.extraction_method=system. v5 (additive): vessel.operators[] (fleet-alert operator-follow edge from HubSpot 'Ground user' contacts) + vessel.live_status/contract_status (observed-but-volatile integration fields, captured not frozen). v6 (additive): optional top-level identity_assertions[] — revisable, evidence-bound source-record links; echo_of marks non-independent mirrors (e.g. a HubSpot nav echoing the back-office one). All v1 entities remain valid.",
+  "type": "object",
+  "required": ["id", "kind", "names", "summary", "provenance", "created_at", "updated_at"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9-]{0,127}$",
+      "description": "URN-style entity id: <kind>:<slug>. Immutable."
+    },
+    "kind": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "description": "Entity kind. Open-set. Canonical kinds: concept, post, person, org. Maritime/commercial corpora add: vessel, product, navigation. Corpora may define additional kinds."
+    },
+    "names": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 200},
+      "minItems": 1,
+      "description": "Names and aliases. First entry is canonical display name."
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One-line description rendered in indexes and digests."
+    },
+    "wiki_links": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9-]{0,127}$"
+      },
+      "description": "Outgoing entity references. Ids must resolve within the corpus or via cross-corpus mapping."
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "stance"],
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "description": "Reference to a post id, file path, or external URL."
+          },
+          "stance": {
+            "enum": ["asserts", "supports", "rejects", "contradicts", "mentions"]
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Optional verbatim excerpt for digest surfacing."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["extractor", "extraction_method"],
+      "properties": {
+        "extracted_from": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Source ids this entity was extracted from."
+        },
+        "extractor": {
+          "type": "string",
+          "description": "Runtime/version that produced this entity. e.g. anabasis-runtime/v0.2"
+        },
+        "extraction_method": {
+          "enum": ["human", "llm", "hybrid", "system"],
+          "description": "`system` = deterministic resolution from a system of record (e.g. a vessel/navigation pulled from Back-office), not an LLM extraction."
+        },
+        "extraction_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "LLM-self-reported (or 1.0 for human/system resolution). Used as tie-breaker, never as quality input."
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+
+    "identity_assertions": {
+      "type": "array",
+      "description": "v6: revisable, evidence-bound assertions that an external source record refers to THIS entity. Identity is a thresholded inference with receipts, never bedrock. The canonical side is the entity's own id; only the source side is named here. Retract/supersede to un-merge when evidence or thresholds change. Writers: enrich-pass ONLY (enrichers build all entities; scribes write RAW only and never write identity_assertions — see CLAUDE.md 'THE WRITER RULE'). This includes exact-key materialization from a system of record. PROHIBITED: deleting an assertion to un-merge — set status=retracted with a reason so the audit trail survives.",
+      "items": {
+        "type": "object",
+        "required": ["assertion_id", "source_system", "source_id", "method", "as_of", "asserted_by", "status"],
+        "properties": {
+          "assertion_id": {
+            "type": "string",
+            "pattern": "^ida_[a-z0-9_]{1,128}$",
+            "description": "Stable id for this assertion. Idempotency key = (source_system, source_id, method) so re-runs update in place rather than duplicating."
+          },
+          "source_system": {
+            "type": "string",
+            "description": "System of record the link points at. e.g. hubspot, back-office, linkedin, gmail."
+          },
+          "source_id": {
+            "type": "string",
+            "description": "Native id in that system. e.g. HubSpot object id, IMO, backoffice navigation id."
+          },
+          "match_probability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence THIS source record is the same real-world entity. 1.0 for exact-key joins."
+          },
+          "method": {
+            "enum": ["exact-key", "probabilistic", "manual-seed"],
+            "description": "How the link was made. Distinct from provenance.extraction_method (which describes how the entity was authored)."
+          },
+          "threshold_at_assertion": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "The acceptance threshold in force when this link was made. Recorded so a later threshold change can re-judge historical assertions honestly."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this assertion was made/last reaffirmed."
+          },
+          "asserted_by": {
+            "type": "string",
+            "description": "Extractor/runtime handle, same convention as provenance.extractor. e.g. enrich-pass/demand-enrich, scribe/bo."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Source-id references backing the link, same convention as evidence[].source_id. e.g. raw/hubspot.jsonl#L1423."
+          },
+          "status": {
+            "enum": ["active", "superseded", "retracted"],
+            "description": "active = currently believed. superseded = replaced by a newer assertion (see superseded_by). retracted = withdrawn (evidence/threshold no longer holds) — the un-merge signal for the indexer."
+          },
+          "superseded_by": {
+            "type": ["string", "null"],
+            "pattern": "^ida_[a-z0-9_]{1,128}$",
+            "description": "assertion_id that replaced this one, or null."
+          },
+          "echo_of": {
+            "type": ["string", "null"],
+            "pattern": "^ida_[a-z0-9_]{1,128}$",
+            "description": "v6: assertion_id of the UPSTREAM authoritative assertion this one merely mirrors (e.g. a HubSpot navigation link that is a copy of the back-office one). Non-null => this is an echo, NOT an independent corroboration; corroboration counting and any match_probability aggregation MUST exclude it. null => independent observation."
+          },
+          "retraction_reason": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Required in practice when status=retracted: why the link no longer holds (new evidence, threshold change, found to be an echo not a corroboration)."
+          }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          { "if": { "properties": { "status": { "const": "retracted" } }, "required": ["status"] }, "then": { "required": ["retraction_reason"] } },
+          { "if": { "properties": { "status": { "const": "superseded" } }, "required": ["status"] }, "then": { "required": ["superseded_by"], "properties": { "superseded_by": { "type": "string" } } } },
+          { "if": { "properties": { "method": { "const": "probabilistic" } }, "required": ["method"] }, "then": { "required": ["match_probability", "threshold_at_assertion"] } }
+        ]
+      }
+    },
+
+    "topics": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+      "uniqueItems": true,
+      "description": "Corpus-relevant topic tags. Used by the topic filter (spec/entity.md §3.5) to gate which corpora surface this entity. Identity-neutral: tags describe the concept, not its author."
+    },
+
+    "concept": {
+      "type": "object",
+      "required": ["statement", "type", "specificity", "falsifiability", "maturity"],
+      "properties": {
+        "statement": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500,
+          "description": "One-sentence assertion. Sharp; falsifiable when possible."
+        },
+        "type": {
+          "enum": ["claim", "pattern", "architecture", "technique", "observation", "open-question", "opportunity"]
+        },
+        "specificity": {
+          "enum": ["platitude", "low", "medium", "high"],
+          "description": "How specific is the claim? Platitude = applies to anything; high = makes a concrete commitment."
+        },
+        "falsifiability": {
+          "enum": ["low", "medium", "high", "tested"],
+          "description": "Can it be wrong? `tested` = predictions have actually been evaluated."
+        },
+        "maturity": {
+          "enum": ["speculation", "emerging", "tested", "battle-proven", "dying"],
+          "description": "Lifecycle stage. Gates digest surfacing thresholds, not quality."
+        },
+        "status": {
+          "enum": ["open", "exploring", "committed", "shipped", "dropped"],
+          "description": "v3: discovery workflow state (mainly type=opportunity). Lifecycle, not epistemic maturity."
+        },
+        "priority": {
+          "enum": ["low", "medium", "high"],
+          "description": "v3: discovery priority (type=opportunity)."
+        },
+        "predictions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text"],
+            "properties": {
+              "text": {"type": "string", "minLength": 10, "maxLength": 500},
+              "tested": {"type": "boolean"},
+              "outcome": {"enum": ["supported", "refuted", "inconclusive", "untested"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "relationships": {
+          "type": "object",
+          "properties": {
+            "composes_with": {"type": "array", "items": {"type": "string"}},
+            "contradicts": {"type": "array", "items": {"type": "string"}},
+            "generalizes": {"type": "array", "items": {"type": "string"}},
+            "specializes": {"type": "array", "items": {"type": "string"}}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "post": {
+      "type": "object",
+      "required": ["platform", "ingested_at", "ingested_via", "content_hash"],
+      "properties": {
+        "platform": {
+          "enum": ["linkedin", "x", "blog", "paper", "granola", "slack", "gmail", "youtube", "podcast", "other"]
+        },
+        "url": {"type": "string", "format": "uri"},
+        "author": {
+          "type": ["string", "null"],
+          "description": "person:<slug> reference. Nullable — anonymous content allowed."
+        },
+        "published_at": {"type": ["string", "null"], "format": "date-time"},
+        "ingested_at": {"type": "string", "format": "date-time"},
+        "ingested_via": {
+          "type": "string",
+          "description": "How the post entered the corpus. e.g. victor-curation, granola-sync, anabasis/v0.2-rss."
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "content_excerpt": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "signal_quality": {
+          "enum": ["signal", "unsure", "noise"],
+          "description": "Curator-set fidelity marker. `noise` posts are indexed but excluded from evidence_score. Per spec/entity.md §3.2 — judges the post, never the author."
+        },
+        "concepts_articulated": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "stance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["concept", "polarity"],
+            "properties": {
+              "concept": {"type": "string"},
+              "polarity": {"enum": ["asserts", "rejects", "mentions", "open-question"]}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "person": {
+      "type": "object",
+      "required": ["display_name"],
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "title": {"type": "string", "maxLength": 200, "description": "v3: role/title, e.g. 'Shipping Decarbonization Lead'. Descriptive, not seniority-as-authority."},
+        "last_contacted": {"type": "string", "description": "v3: ISO date or YYYY-MM of last touchpoint."},
+        "handles": {
+          "type": "object",
+          "properties": {
+            "linkedin": {"type": "string", "format": "uri"},
+            "x": {"type": "string"},
+            "github": {"type": "string"},
+            "email": {"type": "string", "format": "email"}
+          },
+          "additionalProperties": false
+        },
+        "affiliations": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "concepts_articulated": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Backlinks populated by the indexer. Descriptive only — never used to weight retrieval ranking."
+        },
+        "notes": {"type": "string", "maxLength": 500}
+      },
+      "additionalProperties": false,
+      "description": "PROHIBITED FIELDS: trust, reputation, tier, score. A person is a witness, not an authority."
+    },
+
+    "org": {
+      "type": "object",
+      "required": ["display_name", "type"],
+      "properties": {
+        "display_name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "type": {
+          "enum": ["company", "research-lab", "university", "foundation", "informal-group"]
+        },
+        "charter_role": {
+          "enum": ["owner", "charterer", "operator", "manager", "mixed"],
+          "description": "v2: the org's relationship to tonnage, per /charter-party. Drives which Syroco value prop fits (TC charterer -> fuel; VC owner -> TCE). Context, not a ranking."
+        },
+        "market_role": {
+          "enum": ["customer", "prospect", "competitor", "partner", "vendor", "other"],
+          "description": "v3: the org's relationship to Syroco. Distinct from charter_role (its role in shipping). Context, not a ranking."
+        },
+        "website": {"type": "string", "description": "v3: primary website URL."},
+        "linkedin": {"type": "string", "description": "v3: LinkedIn company URL."},
+        "hq_country": {"type": "string", "description": "v3: HQ country (city may be inline)."},
+        "industry": {"type": "string", "description": "v3: industry / segment, e.g. 'dry bulk chartering'."},
+        "employees": {"type": "integer", "minimum": 0, "description": "v3: approximate headcount (durable-ish; precise series belongs in claims)."},
+        "revenue": {"type": "string", "description": "v3: reported revenue/net-sales, free-form with currency + year. Precise time series belongs in claims."},
+        "members": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Backlinks populated by the indexer."
+        },
+        "notes": {"type": "string", "maxLength": 500}
+      },
+      "additionalProperties": false,
+      "description": "PROHIBITED FIELDS: trust_default, tier. An org is context, not credential."
+    },
+
+    "claims": {
+      "type": "array",
+      "description": "v2: structured normalized claims, grouped by metric. Each claim heads a (metric, role, as_of) group; measurements[] carry the fine charter-structure dimensions (cp_type, tenor, status) with per-leaf value + source, so provenance stays per-fact and metric/role are not repeated. Contradiction identity = (entity, metric, role, cp_type, tenor, status, as_of) at the measurement leaf. Derived totals (e.g. status=all) are computed, not stored. Per /charter-party.",
+      "items": {
+        "type": "object",
+        "required": ["metric", "measurements"],
+        "properties": {
+          "metric": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "description": "e.g. fleet_count, tce_usd_day, arr_usd."
+          },
+          "role": {
+            "enum": ["owner", "charterer", "operator", "manager", "n/a"],
+            "description": "Org role for this metric group. Mixed orgs get one claim per role."
+          },
+          "as_of": {"type": "string", "description": "Snapshot time for the group. ISO date or YYYY-MM."},
+          "unit": {"type": "string", "description": "e.g. vessels, usd/day, usd. Applies to all measurements unless a leaf overrides."},
+          "measurements": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["value", "source"],
+              "properties": {
+                "cp_type": {"enum": ["owned", "voyage", "time", "bareboat", "coa", "n/a"]},
+                "tenor": {"enum": ["spot", "short", "long", "n/a"]},
+                "status": {"enum": ["operating", "on-order", "all", "n/a"]},
+                "value": {"type": ["number", "string"]},
+                "unit": {"type": "string"},
+                "source": {"type": "string", "description": "post id, file path, URL, or extractor handle."},
+                "stance": {"enum": ["asserts", "supports", "rejects", "contradicts", "mentions"]}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+
+    "vessel": {
+      "type": "object",
+      "description": "v2: vessel particulars. OPTIONAL and additive - base-field vessel entities stay valid; becomes required for kind=vessel only in a future enforce phase.",
+      "properties": {
+        "imo": {"type": "string", "pattern": "^[0-9]{7}$", "description": "IMO number (7 digits) - the stable global vessel id."},
+        "mmsi": {"type": "string"},
+        "vessel_type": {"type": "string", "description": "e.g. CABU, CLEANBU, MR tanker, Handysize."},
+        "dwt": {"type": "number", "minimum": 0},
+        "built_year": {"type": "integer", "minimum": 1900, "maximum": 2100},
+        "flag": {"type": "string"},
+        "loa_m": {"type": "number", "minimum": 0},
+        "owner": {"type": ["string", "null"], "description": "org:<slug> reference (relatively stable; precise ownership history belongs in claims)."},
+        "operator": {"type": ["string", "null"], "description": "org:<slug> reference."},
+        "manager": {"type": ["string", "null"], "description": "v4: org:<slug> technical/commercial manager (charter_role=manager), distinct from owner/operator."},
+        "navigations": {"type": "array", "items": {"type": "string"}, "description": "v4: navigation:<slug> backlinks, indexer-populated. Voyages are referenced, not embedded. Slug convention: vessel:<imo>."},
+        "live_status": {"type": ["string", "null"], "description": "v5: HubSpot live_status — fleet-alert follow flag (e.g. 'All clear', 'All clear;Not Following'). Volatile, integration-derived; an OBSERVED value, not an asserted truth."},
+        "contract_status": {"type": ["string", "null"], "description": "v5: HubSpot syroco_contract_status (Live/Terminated/On hold/Not started). VOLATILE — derived from isContractLive + endOperationDate, recomputed on every navigation event (overwrites manual CRM edits). Can contradict live navigation activity; NOT an operational truth. Captured with source attribution, never frozen as fact — reconcile against lifecycle_status + navigation state."},
+        "operators": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": ["string", "null"]}, "hubspot_contact_id": {"type": "string"}, "email": {"type": ["string", "null"]}, "title": {"type": ["string", "null"]}}, "required": ["hubspot_contact_id"], "additionalProperties": false}, "description": "v5: fleet-alert operators following this vessel — HubSpot contacts labelled 'Ground user'. This is the operator-follow view (e.g. a charterer's ops contacts) that the company->vessel 'Charterer' association does NOT capture. Sparse where HubSpot labels are unset; absence here != not-followed."}
+      },
+      "additionalProperties": false
+    },
+
+    "navigation": {
+      "type": "object",
+      "description": "v4: a vessel voyage/leg — the durable anchor feedback, decisions, and claims attach to. REFERENCE entity: stable keys + one consolidated captain only; bulk (track, weather, noon reports, fuel) is NOT stored — derive on demand via backoffice_id (a mirror is useless duplication). Materialize LAZILY (only when something references the navigation), never one node per voyage. PROHIBITED FIELDS: any score/rating/satisfaction/zone-flag — a navigation is a fact, not a judgement; quality is a consumer-time derivation or an evidence-bound concept. Slug derives from backoffice_id.",
+      "required": ["vessel", "started_at"],
+      "properties": {
+        "vessel": {"type": "string", "description": "vessel:<slug> — the ship sailing this navigation."},
+        "backoffice_id": {"type": "string", "description": "Back-office navigation id: the system-of-record key and slug basis. Bulk voyage data is fetched live via this id, never stored here."},
+        "started_at": {"type": "string", "format": "date-time", "description": "Interval start (departure). With ended_at, the window used to resolve which navigation an observation falls in: start <= observed_at <= end."},
+        "ended_at": {"type": ["string", "null"], "format": "date-time", "description": "Interval end (arrival); null while ongoing."},
+        "departure_port": {"type": ["string", "null"], "description": "UN/LOCODE or name. Convenience for human-readable summary; authoritative routing stays in Back-office."},
+        "arrival_port": {"type": ["string", "null"], "description": "UN/LOCODE or name. Convenience for summary."},
+        "captain_in_charge": {"type": ["string", "null"], "description": "person:<slug>. SINGLE-VALUED BY DESIGN — no change of command at sea; exactly one captain per navigation. An operator writing on behalf is NOT a second captain (that role lives on the feedback event, not here). Conflicting identity evidence goes in evidence[] (stance=contradicts) and is surfaced by audit, never silently re-picked. Prefer the email-signed name over Back-office's lossy captain-of-record. Null when unresolved."},
+        "charterer": {"type": ["string", "null"], "description": "v4: org:<slug> chartering this voyage — voyage-scoped, the correct home for the charter relationship (NOT a static vessel field). A charter-as-entity spanning multiple navigations is deferred until a consumer needs it."},
+        "departure_port_id": {"type": ["string", "null"], "description": "v6: port:<locode-slug> reference (exact, from back-office PortEntity.code). The departure_port name string remains for the human-readable summary."},
+        "arrival_port_id": {"type": ["string", "null"], "description": "v6: port:<locode-slug> reference (exact, from back-office PortEntity.code)."}
+      },
+      "additionalProperties": false
+    },
+
+    "port": {
+      "type": "object",
+      "description": "v6: a port/terminal — durable reference node navigations link to. Identity = UN/LOCODE (code). Materialized LAZILY by the navigation-enricher only for ports a navigation references (never the full world gazetteer). Name + coordinates are authoritative from back-office PortEntity; country is optional gazetteer enrichment. Slug derives from code.",
+      "required": ["code"],
+      "properties": {
+        "code": {"type": "string", "description": "UN/LOCODE (back-office PortEntity.code) — the unique global port key and slug basis."},
+        "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
+        "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180},
+        "country": {"type": ["string", "null"], "description": "Country name. Optional enrichment — back-office PortDto omits it; the vesseltracker gazetteer can backfill it."},
+        "navigations": {"type": "array", "items": {"type": "string"}, "description": "navigation:<slug> backlinks, indexer-populated. Voyages reference the port, not embedded."}
+      },
+      "additionalProperties": false
+    },
+
+    "client": {
+      "type": "object",
+      "description": "v2: Syroco commercial overlay on a customer/prospect org (not a separate kind - a company is one entity). Optional and additive.",
+      "properties": {
+        "status": {"enum": ["prospect", "lead", "trial", "pilot", "customer", "churned"]},
+        "tier": {"type": "string", "description": "Account-ops tier label (e.g. P0/critical). NOT a knowledge-trust signal."},
+        "csm": {"type": ["string", "null"], "description": "person:<slug> reference."},
+        "hubspot_id": {"type": "string"},
+        "hubspot_url": {"type": "string"},
+        "account_owner": {"type": ["string", "null"], "description": "v3: person:<slug> (Syroco commercial owner)."},
+        "sponsor": {"type": ["string", "null"], "description": "v3: person:<slug> (client-side champion)."},
+        "project_status": {"type": "string", "description": "v3: free-form delivery status."},
+        "objectives": {
+          "type": "object",
+          "description": "v3: client objectives.",
+          "properties": {"short_term": {"type": "string"}, "long_term": {"type": "string"}},
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "product": {
+      "type": "object",
+      "description": "v3: product particulars (kind=product) - Syroco or competitor offerings. Optional/additive; capabilities are descriptive self-data, whereas comparative competitor strengths/weaknesses belong in evidence-bound concepts.",
+      "properties": {
+        "purpose": {"type": "string", "maxLength": 500},
+        "capabilities": {"type": "array", "items": {"type": "string"}},
+        "differentiators": {"type": "array", "items": {"type": "string"}},
+        "workflow": {"type": "string", "maxLength": 1000},
+        "vendor": {"type": ["string", "null"], "description": "org:<slug> that makes it."},
+        "status": {"enum": ["concept", "alpha", "beta", "ga", "deprecated"]}
+      },
+      "additionalProperties": false
+    },
+
+    "market_player": {
+      "type": "object",
+      "description": "v5: profile of a market player — an org in Syroco's market that is not (primarily) a customer: competitor, partner, provider, integration, reseller. DURABLE descriptive profile only. Comparative strengths/weaknesses and 'better/worse than Syroco' judgements are evidence-bound CONCEPTS, never flat fields here (concept-first-trust). Pairs with org.market_role (coarse) and product entities (their offerings in detail).",
+      "properties": {
+        "relationship": {"enum": ["competitor", "partner", "provider", "integration", "reseller", "other"], "description": "Granular relationship to Syroco; org.market_role is the coarse role."},
+        "category": {"type": "string", "description": "What they are, e.g. 'weather routing', 'voyage optimization', 'noon-report platform'."},
+        "offerings": {"type": "array", "items": {"type": "string"}, "description": "High-level products/services (descriptive self-data; per-feature comparison lives in product entities + concepts)."},
+        "notable_customers": {"type": "array", "items": {"type": "string"}, "description": "Named where public; org:<slug> when modelled."},
+        "positioning": {"type": "string", "maxLength": 500, "description": "One-paragraph market positioning. Contested claims vs Syroco belong in evidence-bound concepts, not here."},
+        "source": {"type": "string", "description": "Provenance of this profile: company-knowledge doc path, or competitor-feature-scraper run id."}
+      },
+      "additionalProperties": false
+    }
+  },
+
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "concept"}}},
+      "then": {"required": ["concept"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "post"}}},
+      "then": {"required": ["post"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "person"}}},
+      "then": {"required": ["person"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "org"}}},
+      "then": {"required": ["org"]}
+    },
+    {
+      "if": {"properties": {"kind": {"const": "navigation"}}},
+      "then": {"required": ["navigation"]}
+    }
+  ],
+
+  "additionalProperties": false
+}

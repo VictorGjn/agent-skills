@@ -1,0 +1,44 @@
+{
+  "concept": {
+    "falsifiability": "tested",
+    "maturity": "tested",
+    "specificity": "high",
+    "statement": "Meridian Foils' combined routing-plus-sensing trial reduced reported passenger-discomfort incidents across the fleet's busiest hydrofoil route.",
+    "type": "observation"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "Passenger-comfort incident reports on the busiest fixture route fell during the trial quarter compared with the same quarter a year earlier, with crew logs attributing the change to smoother course corrections rather than any change in weather patterns over the period.",
+      "source_id": "fixture:synthetic-source-8",
+      "stance": "supports"
+    },
+    {
+      "quote": "Fleet operations manager Aiko Ferrant noted in a fixture debrief that the combined system was the single most-requested feature by crews surveyed after the trial, ahead of every other proposed refit item on that quarter's list.",
+      "source_id": "fixture:synthetic-source-9",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:meridian-foils-stability-theme",
+  "kind": "concept",
+  "names": [
+    "Meridian Foils Passenger-Comfort Improvement Pattern"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: combined routing-plus-sensing trial reduced passenger-discomfort incidents on Meridian Foils' busiest route.",
+  "topics": [
+    "fixture",
+    "stability"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:meridian-foils",
+    "concept:foil-stability-cluster",
+    "concept:atlas-marine-stability-theme",
+    "concept:borealis-robotics-stability-theme"
+  ]
+}

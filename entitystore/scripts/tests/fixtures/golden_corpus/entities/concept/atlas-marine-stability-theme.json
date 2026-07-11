@@ -1,0 +1,43 @@
+{
+  "concept": {
+    "falsifiability": "tested",
+    "maturity": "tested",
+    "specificity": "high",
+    "statement": "Atlas Marine's routing algorithm shows a measurable reduction in foil-borne pitch oscillation during following-sea transits, a stability outcome distinct from its published fuel-saving claims.",
+    "type": "pattern"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "During a six-week trial across the fixture fleet's northern route, Atlas Marine's routing module cut peak pitch angles by an average of eighteen percent on following-sea legs, compared with the unassisted baseline logged the prior season across three separate sea-state bands.",
+      "source_id": "fixture:synthetic-source-2",
+      "stance": "supports"
+    },
+    {
+      "quote": "The pitch-reduction figure was independently corroborated by onboard accelerometer logs collected by the fixture operations team, not solely by the vendor's own telemetry dashboard, which had previously been the sole source backing the claim before this trial.",
+      "source_id": "fixture:synthetic-source-3",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:atlas-marine-stability-theme",
+  "kind": "concept",
+  "names": [
+    "Atlas Marine Pitch-Reduction Stability Outcome"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: Atlas Marine routing reduces foil-borne pitch oscillation, a stability effect distinct from its fuel claims.",
+  "topics": [
+    "fixture",
+    "stability"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:atlas-marine",
+    "concept:foil-stability-cluster",
+    "concept:meridian-foils-stability-theme"
+  ]
+}

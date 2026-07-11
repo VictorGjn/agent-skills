@@ -1,0 +1,346 @@
+{
+  "_comment": "Hand-authored synthetic seed graph for the golden-query retrieval gate. Every id, name, and fact below is FICTIONAL — invented for this fixture, chosen to collide with no known real Syroco/customer/competitor name. Shape mirrors a real competitive-intel + route-optimization cluster (named-partner relationship concepts, demand/opportunity themes, a token-heavy stability sub-cluster with wiki_link fan-out) without reusing any of its content. build_golden_corpus.py reads this file and materializes schema-conformant entity JSON under golden_corpus/entities/. created_at/updated_at/provenance are filled deterministically by the generator when absent, so they are omitted here.",
+  "entities": [
+    {
+      "id": "org:atlas-marine",
+      "kind": "org",
+      "names": ["Atlas Marine Systems", "Atlas Marine"],
+      "summary": "Fictional marine-robotics firm; synthetic fixture partner org for golden-query retrieval tests.",
+      "topics": ["fixture", "marine-robotics", "partner"],
+      "wiki_links": [
+        "concept:atlas-marine-named-partner-routing",
+        "concept:atlas-marine-demand-theme",
+        "concept:atlas-marine-stability-theme"
+      ],
+      "org": {
+        "display_name": "Atlas Marine Systems",
+        "type": "company",
+        "market_role": "partner",
+        "industry": "marine robotics, autonomous routing"
+      }
+    },
+    {
+      "id": "org:borealis-robotics",
+      "kind": "org",
+      "names": ["Borealis Robotics"],
+      "summary": "Fictional autonomous-sensing firm; synthetic fixture competitor org for golden-query retrieval tests.",
+      "topics": ["fixture", "marine-robotics", "competitor"],
+      "wiki_links": [
+        "concept:borealis-robotics-named-partner-sensing",
+        "concept:borealis-robotics-demand-theme",
+        "concept:borealis-robotics-stability-theme"
+      ],
+      "org": {
+        "display_name": "Borealis Robotics",
+        "type": "company",
+        "market_role": "competitor",
+        "industry": "autonomous onboard sensing platforms"
+      }
+    },
+    {
+      "id": "org:meridian-foils",
+      "kind": "org",
+      "names": ["Meridian Foils"],
+      "summary": "Fictional hydrofoil-craft operator; synthetic fixture customer org for golden-query retrieval tests.",
+      "topics": ["fixture", "hydrofoil", "customer"],
+      "wiki_links": [
+        "concept:meridian-foils-named-partner-integration",
+        "concept:meridian-foils-demand-theme",
+        "concept:meridian-foils-stability-theme"
+      ],
+      "org": {
+        "display_name": "Meridian Foils",
+        "type": "company",
+        "market_role": "customer",
+        "industry": "hydrofoil passenger craft operation"
+      }
+    },
+    {
+      "id": "person:elena-vasko",
+      "kind": "person",
+      "names": ["Elena Vasko"],
+      "summary": "Fictional engineering lead at Atlas Marine; synthetic fixture person for golden-query retrieval tests.",
+      "topics": ["fixture"],
+      "wiki_links": ["org:atlas-marine"],
+      "person": {
+        "display_name": "Elena Vasko",
+        "title": "Head of Routing Engineering",
+        "affiliations": ["org:atlas-marine"]
+      }
+    },
+    {
+      "id": "person:tomas-reyk",
+      "kind": "person",
+      "names": ["Tomas Reyk"],
+      "summary": "Fictional director at Borealis Robotics; synthetic fixture person for golden-query retrieval tests.",
+      "topics": ["fixture"],
+      "wiki_links": ["org:borealis-robotics"],
+      "person": {
+        "display_name": "Tomas Reyk",
+        "title": "Director of Sensing Systems",
+        "affiliations": ["org:borealis-robotics"]
+      }
+    },
+    {
+      "id": "person:aiko-ferrant",
+      "kind": "person",
+      "names": ["Aiko Ferrant"],
+      "summary": "Fictional fleet operations manager at Meridian Foils; synthetic fixture person for golden-query retrieval tests.",
+      "topics": ["fixture"],
+      "wiki_links": ["org:meridian-foils"],
+      "person": {
+        "display_name": "Aiko Ferrant",
+        "title": "Fleet Operations Manager",
+        "affiliations": ["org:meridian-foils"]
+      }
+    },
+    {
+      "id": "concept:atlas-marine-named-partner-routing",
+      "kind": "concept",
+      "names": ["Atlas Marine Named As Routing Partner"],
+      "summary": "Synthetic fixture concept: Atlas Marine named as routing-optimization partner for Meridian Foils.",
+      "topics": ["fixture", "partnership"],
+      "wiki_links": ["org:atlas-marine", "org:meridian-foils", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "Atlas Marine Systems is named as the routing-optimization technology partner for Meridian Foils' hydrofoil fleet, providing autonomous course adjustments in variable sea states.",
+        "type": "observation",
+        "specificity": "high",
+        "falsifiability": "medium",
+        "maturity": "emerging"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-1",
+          "stance": "asserts",
+          "quote": "The routing partnership between Atlas Marine and Meridian Foils was formalized after a joint pilot on the fixture fleet's coastal route, with Atlas Marine's module handling course-adjustment recommendations that the bridge crew could accept or override in real time."
+        }
+      ]
+    },
+    {
+      "id": "concept:atlas-marine-demand-theme",
+      "kind": "concept",
+      "names": ["Atlas Marine Stability-Aware Routing Demand"],
+      "summary": "Synthetic fixture concept: growing demand for stability-aware routing among hydrofoil operators.",
+      "topics": ["fixture", "demand"],
+      "wiki_links": ["org:atlas-marine", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "There is a growing demand signal from hydrofoil operators for real-time stability-aware routing that Atlas Marine's platform is positioned to capture.",
+        "type": "opportunity",
+        "specificity": "medium",
+        "falsifiability": "medium",
+        "maturity": "speculation",
+        "status": "exploring",
+        "priority": "medium"
+      }
+    },
+    {
+      "id": "concept:atlas-marine-stability-theme",
+      "kind": "concept",
+      "names": ["Atlas Marine Pitch-Reduction Stability Outcome"],
+      "summary": "Synthetic fixture concept: Atlas Marine routing reduces foil-borne pitch oscillation, a stability effect distinct from its fuel claims.",
+      "topics": ["fixture", "stability"],
+      "wiki_links": ["org:atlas-marine", "concept:foil-stability-cluster", "concept:meridian-foils-stability-theme"],
+      "concept": {
+        "statement": "Atlas Marine's routing algorithm shows a measurable reduction in foil-borne pitch oscillation during following-sea transits, a stability outcome distinct from its published fuel-saving claims.",
+        "type": "pattern",
+        "specificity": "high",
+        "falsifiability": "tested",
+        "maturity": "tested"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-2",
+          "stance": "supports",
+          "quote": "During a six-week trial across the fixture fleet's northern route, Atlas Marine's routing module cut peak pitch angles by an average of eighteen percent on following-sea legs, compared with the unassisted baseline logged the prior season across three separate sea-state bands."
+        },
+        {
+          "source_id": "fixture:synthetic-source-3",
+          "stance": "asserts",
+          "quote": "The pitch-reduction figure was independently corroborated by onboard accelerometer logs collected by the fixture operations team, not solely by the vendor's own telemetry dashboard, which had previously been the sole source backing the claim before this trial."
+        }
+      ]
+    },
+    {
+      "id": "concept:borealis-robotics-named-partner-sensing",
+      "kind": "concept",
+      "names": ["Borealis Robotics Named As Sensing Partner"],
+      "summary": "Synthetic fixture concept: Borealis Robotics named as sensing-hardware partner for a wave-impact research consortium.",
+      "topics": ["fixture", "partnership"],
+      "wiki_links": ["org:borealis-robotics", "org:meridian-foils", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "Borealis Robotics is named as the onboard sensing-hardware partner for a wave-impact research consortium that Meridian Foils participates in.",
+        "type": "observation",
+        "specificity": "high",
+        "falsifiability": "medium",
+        "maturity": "emerging"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-4",
+          "stance": "asserts",
+          "quote": "Consortium meeting minutes list Borealis Robotics as the designated sensing-hardware supplier for the wave-impact study, with Meridian Foils providing a fixture vessel for a two-season deployment of the retrofit accelerometer array."
+        }
+      ]
+    },
+    {
+      "id": "concept:borealis-robotics-demand-theme",
+      "kind": "concept",
+      "names": ["Borealis Robotics Retrofit Sensor Demand"],
+      "summary": "Synthetic fixture concept: rising demand for retrofit sensor kits on existing foil craft.",
+      "topics": ["fixture", "demand"],
+      "wiki_links": ["org:borealis-robotics", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "Competing sensing vendors report rising demand for retrofit sensor kits on existing foil craft, a market Borealis Robotics is expanding into.",
+        "type": "opportunity",
+        "specificity": "medium",
+        "falsifiability": "medium",
+        "maturity": "emerging",
+        "status": "exploring",
+        "priority": "medium"
+      }
+    },
+    {
+      "id": "concept:borealis-robotics-stability-theme",
+      "kind": "concept",
+      "names": ["Borealis Robotics Cavitation Early-Warning Pattern"],
+      "summary": "Synthetic fixture concept: Borealis sensing kit correlates accelerometer spikes with foil cavitation onset.",
+      "topics": ["fixture", "stability"],
+      "wiki_links": ["org:borealis-robotics", "concept:foil-stability-cluster", "concept:meridian-foils-stability-theme"],
+      "concept": {
+        "statement": "Borealis Robotics' sensing kit correlates onboard accelerometer spikes with foil cavitation onset, giving early warning ahead of stability loss events.",
+        "type": "pattern",
+        "specificity": "high",
+        "falsifiability": "tested",
+        "maturity": "tested"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-5",
+          "stance": "supports",
+          "quote": "Across forty logged transits, accelerometer spikes above the calibrated threshold preceded a reported cavitation event in the large majority of cases, giving the bridge crew a median warning window of several seconds before the stability loss became noticeable."
+        },
+        {
+          "source_id": "fixture:synthetic-source-6",
+          "stance": "asserts",
+          "quote": "Borealis Robotics' own engineering notes describe the correlation as strong enough to justify an audible cockpit alert, though the fixture operations team has so far only enabled a passive logging mode pending further validation on the wider fleet."
+        }
+      ]
+    },
+    {
+      "id": "concept:meridian-foils-named-partner-integration",
+      "kind": "concept",
+      "names": ["Meridian Foils Combined Routing-Sensing Integration"],
+      "summary": "Synthetic fixture concept: Meridian Foils integrates Atlas routing and Borealis sensing into one advisory system.",
+      "topics": ["fixture", "partnership"],
+      "wiki_links": ["org:meridian-foils", "org:atlas-marine", "org:borealis-robotics", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "Meridian Foils has integrated Atlas Marine's routing module and Borealis Robotics' sensing kit into a single onboard stability-advisory system.",
+        "type": "observation",
+        "specificity": "high",
+        "falsifiability": "medium",
+        "maturity": "emerging"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-7",
+          "stance": "asserts",
+          "quote": "The fixture fleet's refit notes describe a single advisory panel on the bridge that surfaces both the Atlas Marine routing recommendation and the Borealis Robotics sensing alert side by side, replacing two separate vendor displays that crews had found confusing to cross-reference."
+        }
+      ]
+    },
+    {
+      "id": "concept:meridian-foils-demand-theme",
+      "kind": "concept",
+      "names": ["Meridian Foils Unified Stability Dashboard Demand"],
+      "summary": "Synthetic fixture concept: Meridian Foils wants one dashboard combining routing and sensing telemetry.",
+      "topics": ["fixture", "demand"],
+      "wiki_links": ["org:meridian-foils", "concept:foil-stability-cluster"],
+      "concept": {
+        "statement": "Meridian Foils' fleet operations team has flagged a need for a unified stability dashboard combining routing and sensing telemetry.",
+        "type": "opportunity",
+        "specificity": "medium",
+        "falsifiability": "low",
+        "maturity": "speculation",
+        "status": "open",
+        "priority": "low"
+      }
+    },
+    {
+      "id": "concept:meridian-foils-stability-theme",
+      "kind": "concept",
+      "names": ["Meridian Foils Passenger-Comfort Improvement Pattern"],
+      "summary": "Synthetic fixture concept: combined routing-plus-sensing trial reduced passenger-discomfort incidents on Meridian Foils' busiest route.",
+      "topics": ["fixture", "stability"],
+      "wiki_links": ["org:meridian-foils", "concept:foil-stability-cluster", "concept:atlas-marine-stability-theme", "concept:borealis-robotics-stability-theme"],
+      "concept": {
+        "statement": "Meridian Foils' combined routing-plus-sensing trial reduced reported passenger-discomfort incidents across the fleet's busiest hydrofoil route.",
+        "type": "observation",
+        "specificity": "high",
+        "falsifiability": "tested",
+        "maturity": "tested"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-8",
+          "stance": "supports",
+          "quote": "Passenger-comfort incident reports on the busiest fixture route fell during the trial quarter compared with the same quarter a year earlier, with crew logs attributing the change to smoother course corrections rather than any change in weather patterns over the period."
+        },
+        {
+          "source_id": "fixture:synthetic-source-9",
+          "stance": "asserts",
+          "quote": "Fleet operations manager Aiko Ferrant noted in a fixture debrief that the combined system was the single most-requested feature by crews surveyed after the trial, ahead of every other proposed refit item on that quarter's list."
+        }
+      ]
+    },
+    {
+      "id": "concept:foil-stability-cluster",
+      "kind": "concept",
+      "names": ["Foil Stability Cluster"],
+      "summary": "Synthetic fixture hub concept tying together routing, sensing, and stability themes across the fixture's fictional org cluster.",
+      "topics": ["fixture", "stability", "cluster"],
+      "wiki_links": [
+        "org:atlas-marine",
+        "org:borealis-robotics",
+        "org:meridian-foils",
+        "concept:atlas-marine-named-partner-routing",
+        "concept:atlas-marine-demand-theme",
+        "concept:atlas-marine-stability-theme",
+        "concept:borealis-robotics-named-partner-sensing",
+        "concept:borealis-robotics-demand-theme",
+        "concept:borealis-robotics-stability-theme",
+        "concept:meridian-foils-named-partner-integration",
+        "concept:meridian-foils-demand-theme",
+        "concept:meridian-foils-stability-theme"
+      ],
+      "concept": {
+        "statement": "Routing optimization, onboard sensing, and passenger-comfort outcomes form one interlocking stability narrative across the Atlas Marine, Borealis Robotics, and Meridian Foils fixture cluster, evidenced by multiple independent operational reports.",
+        "type": "pattern",
+        "specificity": "high",
+        "falsifiability": "medium",
+        "maturity": "emerging"
+      },
+      "evidence": [
+        {
+          "source_id": "fixture:synthetic-source-10",
+          "stance": "asserts",
+          "quote": "Taken together, the routing pitch-reduction figures, the sensing cavitation early-warning correlation, and the passenger-comfort trial results describe a single stability story rather than three unrelated vendor claims, which is why the fixture cluster groups them under one hub concept for retrieval testing."
+        },
+        {
+          "source_id": "fixture:synthetic-source-11",
+          "stance": "supports",
+          "quote": "A cross-vendor review of the fixture fleet's quarterly reports found consistent directional agreement between the routing, sensing, and comfort metrics even though each was collected by a different team using different instrumentation and reporting cadence."
+        },
+        {
+          "source_id": "fixture:synthetic-source-12",
+          "stance": "mentions",
+          "quote": "The fixture operations team's internal wiki references this cluster as the reason the two smaller vendors were kept on the same integration roadmap instead of being evaluated as mutually exclusive alternatives during the fixture's synthetic procurement review."
+        },
+        {
+          "source_id": "fixture:synthetic-source-13",
+          "stance": "asserts",
+          "quote": "This hub concept is deliberately large and evidence-heavy so that a tight wiki_pack token budget forces real Full to Detail to Summary depth demotion when it is matched directly by a golden query in the retrieval regression suite."
+        }
+      ]
+    }
+  ]
+}
