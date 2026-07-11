@@ -25,7 +25,7 @@ produces false findings, so detection is step 0.
 | `entity_hint` | **resolved** slug (`anthony-veder`) | **source-local** (`fathom:<recording_id>`) |
 | Extraction | at scribe (T0–T3 claim tiers) | none — verbatim; enricher extracts |
 | Resolution | librarian merges by shared hint | enricher resolves, frozen `as_of` |
-| Authority | `scribe-pass` applied contract (2026-05-19, canonical/live) | `agent-skills/scribes/SPEC.md` v0.1 (2026-05-03, legacy/reference) |
+| Authority | `agent-skills/scribes/SPEC.md` v0.1 (2026-05-03, legacy/reference) | `scribe-pass` applied contract (2026-05-19, canonical/live) |
 | Examples | `granola-scribe/SKILL.md` | `scribe-pass` `fathom` / `granola` modules |
 
 **Detection.** Calls `wiki.add` + resolved hints → **A**. Emits `raw/*.jsonl` +

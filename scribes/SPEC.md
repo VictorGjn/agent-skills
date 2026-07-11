@@ -48,11 +48,11 @@ CE stays corpus-agnostic. Scribes do the source-specific work. The two are indep
                        │
                        ▼
          ┌──────────────────────────────────┐
-         │   enrich-pass (extraction,      │
+         │   enrich-pass (extraction,       │
          │   identity resolution, frozen    │
          │   as_of per run)                 │
-         │  → entities/ + claims/          │
-         │  → entity stores                │
+         │  → entities/ + claims/           │
+         │  → entity stores                 │
          └──────────────────────────────────┘
 ```
 
