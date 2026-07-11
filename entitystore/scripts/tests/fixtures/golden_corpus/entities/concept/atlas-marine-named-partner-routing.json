@@ -1,0 +1,38 @@
+{
+  "concept": {
+    "falsifiability": "medium",
+    "maturity": "emerging",
+    "specificity": "high",
+    "statement": "Atlas Marine Systems is named as the routing-optimization technology partner for Meridian Foils' hydrofoil fleet, providing autonomous course adjustments in variable sea states.",
+    "type": "observation"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "quote": "The routing partnership between Atlas Marine and Meridian Foils was formalized after a joint pilot on the fixture fleet's coastal route, with Atlas Marine's module handling course-adjustment recommendations that the bridge crew could accept or override in real time.",
+      "source_id": "fixture:synthetic-source-1",
+      "stance": "asserts"
+    }
+  ],
+  "id": "concept:atlas-marine-named-partner-routing",
+  "kind": "concept",
+  "names": [
+    "Atlas Marine Named As Routing Partner"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: Atlas Marine named as routing-optimization partner for Meridian Foils.",
+  "topics": [
+    "fixture",
+    "partnership"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:atlas-marine",
+    "org:meridian-foils",
+    "concept:foil-stability-cluster"
+  ]
+}

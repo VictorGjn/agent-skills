@@ -1,0 +1,28 @@
+{
+  "created_at": "2026-01-01T00:00:00Z",
+  "id": "person:aiko-ferrant",
+  "kind": "person",
+  "names": [
+    "Aiko Ferrant"
+  ],
+  "person": {
+    "affiliations": [
+      "org:meridian-foils"
+    ],
+    "display_name": "Aiko Ferrant",
+    "title": "Fleet Operations Manager"
+  },
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Fictional fleet operations manager at Meridian Foils; synthetic fixture person for golden-query retrieval tests.",
+  "topics": [
+    "fixture"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:meridian-foils"
+  ]
+}

@@ -1,0 +1,41 @@
+# entitystore test gate -- GitHub Actions workflow
+#
+# Drop into the repo root as `.github/workflows/entitystore-check.yml`
+# (rename: strip the `.sample` suffix) to activate. Runs the entitystore
+# pytest suite -- including the golden-query retrieval gate
+# (scripts/tests/test_golden_queries.py) -- on every PR + push to main.
+#
+# Fully hermetic: the golden-query suite runs against a SYNTHETIC fixture
+# (scripts/tests/fixtures/golden_corpus/, generated on the fly if missing)
+# using mode=substring only. No secrets, no network calls, no cross-repo
+# checkout permissions, no real company-brain data are needed to run this --
+# see scripts/tests/fixtures/README.md for the data-governance rationale.
+
+name: entitystore check
+
+on:
+  pull_request:
+    paths:
+      - "entitystore/**"
+  push:
+    branches: [main]
+    paths:
+      - "entitystore/**"
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pytest numpy jsonschema
+
+      - name: Run entitystore test suite
+        run: python -m pytest entitystore/scripts/tests/ -v

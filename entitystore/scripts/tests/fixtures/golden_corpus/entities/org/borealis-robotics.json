@@ -1,0 +1,31 @@
+{
+  "created_at": "2026-01-01T00:00:00Z",
+  "id": "org:borealis-robotics",
+  "kind": "org",
+  "names": [
+    "Borealis Robotics"
+  ],
+  "org": {
+    "display_name": "Borealis Robotics",
+    "industry": "autonomous onboard sensing platforms",
+    "market_role": "competitor",
+    "type": "company"
+  },
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Fictional autonomous-sensing firm; synthetic fixture competitor org for golden-query retrieval tests.",
+  "topics": [
+    "fixture",
+    "marine-robotics",
+    "competitor"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "concept:borealis-robotics-named-partner-sensing",
+    "concept:borealis-robotics-demand-theme",
+    "concept:borealis-robotics-stability-theme"
+  ]
+}

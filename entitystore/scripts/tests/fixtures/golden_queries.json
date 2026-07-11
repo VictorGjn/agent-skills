@@ -1,0 +1,424 @@
+{
+  "_comment": "Golden-query retrieval gate for wiki_ask/wiki_pack, run against the SYNTHETIC fixture in golden_corpus/ (generated from golden_seed.json by build_golden_corpus.py). mode=substring only -> hermetic, no network/embedding calls. truth='author' cases are true ground truth by construction (id-substring queries are unique by definition since ids are unique; graph-traversal cases are deterministic from the seed's wiki_links regardless of scoring). truth='locked' cases record CURRENT engine output (captured by actually running cb_engine against this fixture, never hand-guessed) to catch behavioral regressions in scoring/tie-break/token-estimation, not to assert those exact numbers are 'correct'. See fixtures/README.md.",
+  "cases": [
+    {
+      "id": "ask-id-01-org-atlas-marine",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "org:atlas-marine",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "org:atlas-marine", "matched_set": ["org:atlas-marine"]}
+    },
+    {
+      "id": "ask-id-02-org-borealis-robotics",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "org:borealis-robotics",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "org:borealis-robotics", "matched_set": ["org:borealis-robotics"]}
+    },
+    {
+      "id": "ask-id-03-org-meridian-foils",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "org:meridian-foils",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "org:meridian-foils", "matched_set": ["org:meridian-foils"]}
+    },
+    {
+      "id": "ask-id-04-person-elena-vasko",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "person:elena-vasko",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:elena-vasko", "matched_set": ["person:elena-vasko"]}
+    },
+    {
+      "id": "ask-id-05-person-tomas-reyk",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "person:tomas-reyk",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:tomas-reyk", "matched_set": ["person:tomas-reyk"]}
+    },
+    {
+      "id": "ask-id-06-person-aiko-ferrant",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "person:aiko-ferrant",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:aiko-ferrant", "matched_set": ["person:aiko-ferrant"]}
+    },
+    {
+      "id": "ask-id-07-concept-atlas-named-partner",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:atlas-marine-named-partner-routing",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-named-partner-routing", "matched_set": ["concept:atlas-marine-named-partner-routing"]}
+    },
+    {
+      "id": "ask-id-08-concept-atlas-demand",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:atlas-marine-demand-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-demand-theme", "matched_set": ["concept:atlas-marine-demand-theme"]}
+    },
+    {
+      "id": "ask-id-09-concept-atlas-stability",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:atlas-marine-stability-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-stability-theme", "matched_set": ["concept:atlas-marine-stability-theme"]}
+    },
+    {
+      "id": "ask-id-10-concept-borealis-named-partner",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:borealis-robotics-named-partner-sensing",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-named-partner-sensing", "matched_set": ["concept:borealis-robotics-named-partner-sensing"]}
+    },
+    {
+      "id": "ask-id-11-concept-borealis-demand",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:borealis-robotics-demand-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-demand-theme", "matched_set": ["concept:borealis-robotics-demand-theme"]}
+    },
+    {
+      "id": "ask-id-12-concept-borealis-stability",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:borealis-robotics-stability-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-stability-theme", "matched_set": ["concept:borealis-robotics-stability-theme"]}
+    },
+    {
+      "id": "ask-id-13-concept-meridian-named-partner",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:meridian-foils-named-partner-integration",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:meridian-foils-named-partner-integration", "matched_set": ["concept:meridian-foils-named-partner-integration"]}
+    },
+    {
+      "id": "ask-id-14-concept-meridian-demand",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:meridian-foils-demand-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:meridian-foils-demand-theme", "matched_set": ["concept:meridian-foils-demand-theme"]}
+    },
+    {
+      "id": "ask-id-15-concept-meridian-stability",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:meridian-foils-stability-theme",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:meridian-foils-stability-theme", "matched_set": ["concept:meridian-foils-stability-theme"]}
+    },
+    {
+      "id": "ask-id-16-concept-hub",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:foil-stability-cluster",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:foil-stability-cluster", "matched_set": ["concept:foil-stability-cluster"]}
+    },
+    {
+      "id": "ask-nl-17-cavitation",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "cavitation",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-stability-theme", "matched_set": ["concept:borealis-robotics-stability-theme"]}
+    },
+    {
+      "id": "ask-nl-18-passenger-discomfort",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "passenger-discomfort",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:meridian-foils-stability-theme", "matched_set": ["concept:meridian-foils-stability-theme"]}
+    },
+    {
+      "id": "ask-nl-19-wave-impact-consortium",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "wave-impact research consortium",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-named-partner-sensing", "matched_set": ["concept:borealis-robotics-named-partner-sensing"]}
+    },
+    {
+      "id": "ask-nl-20-foil-stability-cluster-name",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "Foil Stability Cluster",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:foil-stability-cluster", "matched_set": ["concept:foil-stability-cluster"]}
+    },
+    {
+      "id": "ask-nl-21-foil-stability-lowercase",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "foil stability",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:foil-stability-cluster", "matched_set": ["concept:foil-stability-cluster"]}
+    },
+    {
+      "id": "ask-nl-22-elena-vasko-name",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "Elena Vasko",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:elena-vasko", "matched_set": ["person:elena-vasko"]}
+    },
+    {
+      "id": "ask-nl-23-tomas-reyk-name",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "Tomas Reyk",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:tomas-reyk", "matched_set": ["person:tomas-reyk"]}
+    },
+    {
+      "id": "ask-nl-24-aiko-ferrant-name",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "Aiko Ferrant",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "person:aiko-ferrant", "matched_set": ["person:aiko-ferrant"]}
+    },
+    {
+      "id": "ask-nl-25-routing-partner",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "routing partner",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-named-partner-routing", "matched_set": ["concept:atlas-marine-named-partner-routing"]}
+    },
+    {
+      "id": "ask-neg-26-empty-no-filter",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"matched_set": [], "error_contains": "refusing to dump corpus"}
+    },
+    {
+      "id": "ask-neg-27-nonexistent",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "nonexistent-fixture-zzz",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"matched_set": []}
+    },
+    {
+      "id": "ask-hop-28-depth1",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:atlas-marine-named-partner-routing",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {
+        "top_id": "concept:atlas-marine-named-partner-routing",
+        "neighbors_set": ["org:atlas-marine", "org:meridian-foils", "concept:foil-stability-cluster"]
+      }
+    },
+    {
+      "id": "ask-hop-29-depth2-multihop-expansion",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "query": "concept:atlas-marine-named-partner-routing",
+      "params": {"mode": "substring", "depth": 2, "top": 10},
+      "expect": {
+        "top_id": "concept:atlas-marine-named-partner-routing",
+        "neighbors_superset": [
+          "org:atlas-marine", "org:meridian-foils", "concept:foil-stability-cluster",
+          "concept:atlas-marine-demand-theme", "concept:atlas-marine-stability-theme",
+          "org:borealis-robotics"
+        ],
+        "min_neighbors": 10
+      }
+    },
+    {
+      "id": "ask-filter-30-kind-org",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "",
+      "params": {"mode": "substring", "kind": "org", "depth": 1, "top": 10},
+      "expect": {
+        "top_id": "org:atlas-marine",
+        "matched_set": ["org:atlas-marine", "org:borealis-robotics", "org:meridian-foils"]
+      }
+    },
+    {
+      "id": "ask-filter-31-topics-partnership",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "",
+      "params": {"mode": "substring", "topics": ["partnership"], "depth": 1, "top": 10},
+      "expect": {
+        "top_id": "concept:atlas-marine-named-partner-routing",
+        "matched_set": [
+          "concept:atlas-marine-named-partner-routing",
+          "concept:borealis-robotics-named-partner-sensing",
+          "concept:meridian-foils-named-partner-integration"
+        ]
+      }
+    },
+    {
+      "id": "ask-locked-32-atlas-marine-nl",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "atlas marine",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-named-partner-routing", "min_matched": 7}
+    },
+    {
+      "id": "ask-locked-33-borealis-robotics-nl",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "borealis robotics",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-named-partner-sensing", "min_matched": 7}
+    },
+    {
+      "id": "ask-locked-34-meridian-foils-nl",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "meridian foils",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:meridian-foils-demand-theme", "min_matched": 8}
+    },
+    {
+      "id": "ask-locked-35-stability-nl",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "stability",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:atlas-marine-stability-theme", "min_matched": 7}
+    },
+    {
+      "id": "ask-locked-36-sensing-nl",
+      "endpoint": "wiki_ask",
+      "truth": "locked",
+      "query": "sensing",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {"top_id": "concept:borealis-robotics-named-partner-sensing", "min_matched": 8}
+    },
+    {
+      "id": "pack-37-hub-full-budget",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "foil stability",
+      "params": {"mode": "substring", "budget": 50000},
+      "expect": {
+        "item_count": 13,
+        "depth_exactly": {"concept:foil-stability-cluster": 0, "org:atlas-marine": 0},
+        "min_distinct_depth_names": 1
+      }
+    },
+    {
+      "id": "pack-38-hub-demotion-spread",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "foil stability",
+      "params": {"mode": "substring", "budget": 1200},
+      "expect": {
+        "item_count": 13,
+        "max_used_tokens": 1200,
+        "depth_exactly": {
+          "concept:foil-stability-cluster": 0,
+          "org:atlas-marine": 2,
+          "concept:atlas-marine-named-partner-routing": 1,
+          "concept:atlas-marine-demand-theme": 3,
+          "concept:atlas-marine-stability-theme": 4
+        },
+        "min_distinct_depth_names": 5
+      }
+    },
+    {
+      "id": "pack-39-hub-extreme-budget",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "foil stability",
+      "params": {"mode": "substring", "budget": 300},
+      "expect": {
+        "item_count": 13,
+        "max_used_tokens": 300,
+        "depth_exactly": {"concept:atlas-marine-stability-theme": 4},
+        "min_distinct_depth_names": 3
+      }
+    },
+    {
+      "id": "pack-40-atlas-tight-budget",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "org:atlas-marine",
+      "params": {"mode": "substring", "budget": 250},
+      "expect": {
+        "item_count": 4,
+        "max_used_tokens": 250,
+        "depth_exactly": {
+          "org:atlas-marine": 0,
+          "concept:atlas-marine-named-partner-routing": 3,
+          "concept:atlas-marine-demand-theme": 4,
+          "concept:atlas-marine-stability-theme": 4
+        },
+        "min_distinct_depth_names": 3
+      }
+    },
+    {
+      "id": "pack-41-atlas-generous-budget",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "org:atlas-marine",
+      "params": {"mode": "substring", "budget": 10000},
+      "expect": {
+        "item_count": 4,
+        "present_ids": [
+          "org:atlas-marine",
+          "concept:atlas-marine-named-partner-routing",
+          "concept:atlas-marine-demand-theme",
+          "concept:atlas-marine-stability-theme"
+        ],
+        "depth_exactly": {"org:atlas-marine": 0, "concept:atlas-marine-stability-theme": 0}
+      }
+    },
+    {
+      "id": "pack-42-no-neighbors",
+      "endpoint": "wiki_pack",
+      "truth": "author",
+      "query": "foil stability",
+      "params": {"mode": "substring", "budget": 50000, "include_neighbors": false},
+      "expect": {"item_count": 1, "present_ids": ["concept:foil-stability-cluster"], "depth_exactly": {"concept:foil-stability-cluster": 0}}
+    },
+    {
+      "id": "pack-43-kind-org-filter",
+      "endpoint": "wiki_pack",
+      "truth": "locked",
+      "query": "",
+      "params": {"mode": "substring", "kind": "org", "budget": 50000, "top": 10},
+      "expect": {
+        "item_count": 12,
+        "present_ids": ["org:atlas-marine", "org:borealis-robotics", "org:meridian-foils"]
+      }
+    },
+    {
+      "id": "pack-44-person-with-neighbor",
+      "endpoint": "wiki_pack",
+      "truth": "author",
+      "query": "person:elena-vasko",
+      "params": {"mode": "substring", "budget": 5000},
+      "expect": {
+        "item_count": 2,
+        "present_ids": ["person:elena-vasko", "org:atlas-marine"],
+        "depth_exactly": {"person:elena-vasko": 0}
+      }
+    }
+  ]
+}

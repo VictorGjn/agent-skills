@@ -1,0 +1,32 @@
+{
+  "concept": {
+    "falsifiability": "medium",
+    "maturity": "speculation",
+    "priority": "medium",
+    "specificity": "medium",
+    "statement": "There is a growing demand signal from hydrofoil operators for real-time stability-aware routing that Atlas Marine's platform is positioned to capture.",
+    "status": "exploring",
+    "type": "opportunity"
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "id": "concept:atlas-marine-demand-theme",
+  "kind": "concept",
+  "names": [
+    "Atlas Marine Stability-Aware Routing Demand"
+  ],
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Synthetic fixture concept: growing demand for stability-aware routing among hydrofoil operators.",
+  "topics": [
+    "fixture",
+    "demand"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "org:atlas-marine",
+    "concept:foil-stability-cluster"
+  ]
+}

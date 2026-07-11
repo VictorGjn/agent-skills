@@ -1,0 +1,31 @@
+{
+  "created_at": "2026-01-01T00:00:00Z",
+  "id": "org:meridian-foils",
+  "kind": "org",
+  "names": [
+    "Meridian Foils"
+  ],
+  "org": {
+    "display_name": "Meridian Foils",
+    "industry": "hydrofoil passenger craft operation",
+    "market_role": "customer",
+    "type": "company"
+  },
+  "provenance": {
+    "extraction_confidence": 1.0,
+    "extraction_method": "human",
+    "extractor": "golden-fixture/v1"
+  },
+  "summary": "Fictional hydrofoil-craft operator; synthetic fixture customer org for golden-query retrieval tests.",
+  "topics": [
+    "fixture",
+    "hydrofoil",
+    "customer"
+  ],
+  "updated_at": "2026-01-01T00:00:00Z",
+  "wiki_links": [
+    "concept:meridian-foils-named-partner-integration",
+    "concept:meridian-foils-demand-theme",
+    "concept:meridian-foils-stability-theme"
+  ]
+}
