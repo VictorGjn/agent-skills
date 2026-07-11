@@ -34,7 +34,7 @@ Five tightly-coupled capabilities ship as one skill:
 
 1. **Multi-source indexer** — AST (14 languages via tree-sitter) + markdown heading trees, schema-versioned cache, incremental re-indexing.
 2. **Source ABC** — the contract connectors implement to feed events into the brain. This skill ships `WorkspaceSource` + `GithubRepoSource` only; Notion / HubSpot / Gmail / Granola adapters live elsewhere (Anabasis spec calls this `SignalSource`).
-3. **EntityStore** — three-tier brain layer: `raw/` (verbatim sources) + `events/` (append-only JSONL of extracted claims) + `wiki/<slug>.md` (consolidated entity pages with full provenance — every cited claim resolves to file:line + content_hash + ts). Reference impl of Anabasis spec `EntityStore` ABC.
+3. **EntityStore** — three-tier brain layer: `raw/` (verbatim sources) + `events/` (append-only JSONL of extracted claims) + `wiki/<slug>.md` (consolidated entity pages with full provenance — every cited claim resolves to file:line + content_hash + ts). Reference impl of Anabasis spec `EntityStore` ABC. _(Note: This is CE's own generic design. Company-brain uses a separate JSON-native EntityStore engine — see [`entitystore/SURFACE.md`](../entitystore/SURFACE.md).)_
 4. **Synthesizer + Auditor** — GAM-grade semantic-shift detector (consolidate only on cosine drift, never on every event); `wiki_init.py` one-shot seeder; Auditor proposes splits / merges / contradictions / dead links.
 5. **Retrieval surface** — depth-aware packer (2 levels — full / pointer, 95% budget utilization) + multi-hop reasoning paths through `[[wiki-links]]` + query-as-lens reranking + RRF fusion (semantic mode) + anti-hallucination filters.
 
