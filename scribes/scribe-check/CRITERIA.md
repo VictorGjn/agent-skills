@@ -7,7 +7,7 @@ the contract changes, change the criterion here and bump `criteria_version`.
 ```
 criteria_version: 0.1.0
 derived_from:
-  - agent-skills/scribes/SPEC.md                         # Profile A contract (CE wiki.add push)
+  - agent-skills/scribes/SPEC.md                         # general scribe contract (Profile B = live model, Profile A = legacy)
   - syroco-product-ops/routines/scribe-pass/schedule.md  # Profile B contract (raw-JSONL verbatim)
   - memory: project_scribes_architecture                 # ontology + routing
   - memory: reference_fathom_hubspot_pattern             # resolve-at-ingestion / federation
@@ -25,7 +25,7 @@ produces false findings, so detection is step 0.
 | `entity_hint` | **resolved** slug (`anthony-veder`) | **source-local** (`fathom:<recording_id>`) |
 | Extraction | at scribe (T0–T3 claim tiers) | none — verbatim; enricher extracts |
 | Resolution | librarian merges by shared hint | enricher resolves, frozen `as_of` |
-| Authority | `agent-skills/scribes/SPEC.md` v0.1 (2026-05-03) | `scribe-pass` applied contract (2026-05-19, newer) |
+| Authority | `agent-skills/scribes/SPEC.md` v0.1 (2026-05-03, legacy/reference) | `scribe-pass` applied contract (2026-05-19, canonical/live) |
 | Examples | `granola-scribe/SKILL.md` | `scribe-pass` `fathom` / `granola` modules |
 
 **Detection.** Calls `wiki.add` + resolved hints → **A**. Emits `raw/*.jsonl` +
@@ -34,11 +34,26 @@ produces false findings, so detection is step 0.
 that is itself a **FAIL (S0)** — pick one model.
 
 > ⚠️ **Known divergence (report on every run):** Profiles A and B are two
-> models for the same job and have not been reconciled (see
-> `project_scribes_architecture` "Open reconciliation"). Profile A's SPEC.md is
-> older; Profile B is what Syroco actually runs. A scribe is judged against its
+> models for the same job and have not been fully reconciled (see
+> `project_scribes_architecture` "Open reconciliation"). Profile B is the live
+> canonical model at Syroco (since 2026-05-19) and is now documented first in
+> SPEC.md; Profile A is retained for reference. A scribe is judged against its
 > own profile, **and** the report notes which profile and that convergence is
 > outstanding.
+
+## Rejected profiles
+
+**Profile C — system-of-record EntityStore writer** was proposed on branch
+`feat/scribe-check-profile-c` (commit 101772b, 2026-06-04) as a third scribe
+model where the scribe writes resolved entities + identity_assertions directly
+to the EntityStore. This profile was rejected the same day by THE WRITER RULE
+(company-brain/CLAUDE.md, locked 2026-06-04) which establishes that enrichers
+are the **sole** authorized entity writers. See
+`company-brain/schemas/entity.schema.json` line 91 ("Writers: enrich-pass
+ONLY") for the canonical technical authority.
+
+**Status:** Rejected, branch unmaintained. Do not resurrect. The `check_scribes.py`
+detection logic and two-profile gate remain unchanged.
 
 ## Severities
 
