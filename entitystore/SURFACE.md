@@ -32,7 +32,7 @@ company-brain/
 
 - Git = source of truth (unchanged).
 - Engine reads/writes JSON files directly.
-- One `corpus_id` per MCP instance (env var `CB_CORPUS_DIR`, default `syroco-commercial`).
+- One `corpus_id` per MCP instance (env var `CB_CORPUS_DIR`, no default — must be set explicitly).
 
 ## Endpoints
 
@@ -78,7 +78,7 @@ Run the charter-aware auditor on the corpus. Five checks:
 **Response**
 ```json
 {
-  "corpus": "syroco-commercial",
+  "corpus": "syroco",
   "checked_at": "2026-05-28T...",
   "entity_count": 248,
   "contradictions": [ { "key": [...], "values": [{ "value": 16, "source": "..." }, { "value": 12, "source": "..." }] } ],
@@ -148,7 +148,7 @@ Counts + breakdowns + freshness percentiles + **embedding-provider status**.
 **Response**
 ```json
 {
-  "corpus": "syroco-commercial",
+  "corpus": "syroco",
   "entity_count": 248,
   "by_kind": { "concept": 208, "org": 30, "person": 3, "post": 6, "vessel": 1 },
   "by_topic": { "commercial": 142, "competitive-intel": 39, ... },
@@ -221,10 +221,10 @@ Two measurements collide only when every normalized key field matches and values
 
 ## Test seam
 
-`python cb_engine.py --self-test` runs all 5 endpoints against the live `syroco-commercial` corpus and prints pass/fail. Smoke-tests:
+`python cb_engine.py --self-test` runs all 5 endpoints against the live `syroco` corpus and prints pass/fail. Smoke-tests:
 - `wiki_ask("route optimization")` returns ≥1 matched.
 - `wiki_audit()` returns ≥0 contradictions, valid JSON, ≥1 dead_links flagged if any exist.
-- `stats()` returns counts matching `find corpora/syroco-commercial/entities -name "*.json" | wc -l`.
+- `stats()` returns counts matching `find corpora/syroco/entities -name "*.json" | wc -l`.
 - `resolve("Klaveness")` returns `org:kcc` as top match.
 - `wiki_add(synthetic_entity)` round-trips through validator (synthetic gets cleaned up).
 
