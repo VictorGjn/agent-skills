@@ -1,8 +1,8 @@
 """Tests for scribe-check's output-validate C1 envelope rule, focused on the
-`data_classification` field added for PRD-72/M7 (pii-data-classification-gating).
+`data_classification` field on Profile-B raw envelopes.
 
 Synthetic scribe/source names only (`synthetic-scribe`, `synthetic:1`) — no
-real Syroco identifiers, per this repo's public-visibility constraint.
+real internal identifiers, per this repo's public-visibility constraint.
 """
 from __future__ import annotations
 
