@@ -27,7 +27,10 @@ FAIL, WARN, INFO = "FAIL", "WARN", "INFO"
 BANNED = ("score", "severity", "theme", "category", "sentiment",
           "priority", "trust", "tier", "reputation", "quality")
 REQUIRED_B = ("schema_version", "scribe", "scribed_at", "source_type", "source_ref",
-              "file_id", "external_id", "content_hash", "claim", "ts", "entity_hint", "payload")
+              "file_id", "external_id", "content_hash", "claim", "ts", "entity_hint", "payload",
+              "data_classification")
+# Canonical enum — see context-engineering/SPEC-mcp.md §6.3 (corpus-manifest classification).
+VALID_CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
 
 
 @dataclass
@@ -157,6 +160,10 @@ def validate_jsonl(path: str) -> list[Finding]:
                 if f not in e:
                     F.append(Finding(FAIL, "C1 envelope", f"{pathlib.Path(path).name}:{i}",
                                      f"missing required field '{f}'"))
+            dc = e.get("data_classification")
+            if dc is not None and dc not in VALID_CLASSIFICATIONS:
+                F.append(Finding(FAIL, "C1 envelope", f"{pathlib.Path(path).name}:{i}",
+                                 f"data_classification {dc!r} is not one of {VALID_CLASSIFICATIONS}"))
         # O7 entity_hint present + non-empty
         hint = e.get("entity_hint")
         if not hint:
