@@ -1,151 +1,64 @@
-"""Per-source-type half-life policy for computed-on-read freshness.
+#!/usr/bin/env python3
+"""freshness_policy.py — computed-on-read freshness for entitystore (M11).
 
-CE deliberately stores no `freshness_score` field on entity pages — only
-`last_verified_at`. Callers compute freshness at query time using the
-policy in this module.
+entitystore stores no `freshness_score` field anywhere (company-brain
+prohibits stored scores/trust/tier/reputation fields — see
+company-brain/CLAUDE.md "THE WRITER RULE"). Freshness is ALWAYS derived at
+read time from the M4-written `last_verified_at` field. This module is the
+single place that derivation happens; callers (wiki_init's frontmatter,
+cb_engine's wiki_audit lint, wiki_ask stats) import it rather than
+recomputing the decay curve independently.
 
-Spec: ``plan/phases/phase-1.md`` §1.2.2.
+Coverage reality (per BRAIN-DELIVERY-TRACK M4/M11): `last_verified_at` is
+sparsely populated — enrich-pass only started stamping it recently, and
+whole kinds (person, vessel) currently sit at 0% coverage. An entity with
+no `last_verified_at` is NOT stale (0.0) and NOT an error — it predates the
+freshness rule entirely. `status="pre-rule, never verified"` says exactly
+that, with `score=None`, so a null-coverage kind doesn't read as "all
+content expired."
 
-Decay formula (linear over 2× half-life, clamped to [0, 1]):
+Decay formula (linear over 2x half-life, clamped to [0, 1]), same shape as
+context-engineering's per-source-type policy, but keyed by entity `kind`
+instead of source type — this store's staleness signal is "how long since
+enrich-pass re-derived this entity", not "how long since a particular
+source was touched":
 
-    freshness_score = max(0.0, 1.0 - elapsed_days / (2 × half_life_days))
+    score = max(0.0, 1.0 - elapsed_days / (2 * half_life_days))
 
-At t=0: 1.0. At t=half_life: 0.5. At t=2×half_life: 0.0. Beyond: 0.0.
-
-Multi-source entities: callers should use the **shortest** half-life
-across the entity's `sources[]` — the entity is only as fresh as its
-fastest-decaying source. ``shortest_half_life()`` below is the helper.
+At t=0: 1.0. At t=half_life: 0.5. At t=2*half_life: 0.0. Beyond: 0.0.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Optional
 
-# Per-source-type half-life in days. The dict is THE spec — adding a row
-# in phase-1.md §1.2.2 means adding a key here.
+# Per-kind half-life in days. Mirrors cb_engine.FRESHNESS_THRESHOLD_DAYS
+# (the existing updated_at-based auditor threshold) so the two freshness
+# signals — "last mutated" (updated_at, cb_engine's existing check) and
+# "last re-derived from raw" (last_verified_at, this module) — read on the
+# same clock even though they answer different questions. Unlisted kinds
+# fall back to "default".
 HALF_LIVES: dict[str, int] = {
-    "code": 90,
-    "web": 30,
-    "transcript": 60,
-    "email": 21,
-    "notion": 60,
-    "rfc": 180,
-    "department-spec": 180,
-    # M1 fix: GraphifyWikiSource (PR #26) tags every event with
-    # source_type="graphify-wiki" and originally fell through to the
-    # 60-day default — wrong for graphify's primary use case (code
-    # corpora). Match `code`'s half-life until upstream graphify carries
-    # the original source_type in its page frontmatter (then
-    # GraphifyWikiSource can re-emit with the recovered type).
-    "graphify-wiki": 90,
-    "default": 60,
+    "post": 90,
+    "concept": 365,
+    "org": 180,
+    "person": 180,
+    "vessel": 180,
+    "navigation": 90,
+    "product": 365,
+    "default": 180,
 }
 
-
-def half_life_days(source_type: str) -> int:
-    """Return the half-life in days for a source type, falling back to default."""
-    return HALF_LIVES.get(source_type, HALF_LIVES["default"])
-
-
-def shortest_half_life(source_types: Iterable[str]) -> int:
-    """Return the shortest half-life across an entity's source types.
-
-    The entity is only as fresh as its fastest-decaying source — a fresh
-    web page paired with an ancient code reference should be flagged as
-    stale, not as fresh-via-the-young-source.
-    """
-    materialized = list(source_types)
-    if not materialized:
-        return HALF_LIVES["default"]
-    return min(half_life_days(st) for st in materialized)
+# Score below this is "stale" for the audit lint. Score is None (pre-rule)
+# is a DIFFERENT bucket, never folded into "stale" — see module docstring.
+STALE_FLOOR = 0.3
 
 
-def compute_freshness(
-    last_verified_at: str | datetime,
-    source_type: str,
-    *,
-    now: Optional[datetime] = None,
-) -> float:
-    """Compute freshness in [0.0, 1.0] from last_verified_at + source-type half-life.
-
-    Args:
-        last_verified_at: ISO 8601 string (e.g. "2026-05-01T10:23:45Z") or
-            a timezone-aware datetime. Naive datetimes are interpreted as
-            UTC.
-        source_type: key into HALF_LIVES; falls back to "default".
-        now: override for the current time (testability).
-
-    Returns:
-        freshness_score in [0.0, 1.0]. 1.0 means fresh; 0.0 means decayed
-        beyond 2 × half_life and should be flagged by the Auditor's
-        "freshness expired" rule (combined with the elapsed > half_life
-        guard — see §1.2.2).
-
-    Raises:
-        ValueError: if last_verified_at can't be parsed as ISO 8601.
-    """
-    if now is None:
-        now = datetime.now(timezone.utc)
-    elif now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-
-    if isinstance(last_verified_at, datetime):
-        verified = last_verified_at
-    else:
-        verified = _parse_iso8601(last_verified_at)
-
-    if verified.tzinfo is None:
-        verified = verified.replace(tzinfo=timezone.utc)
-
-    elapsed_days = (now - verified).total_seconds() / 86400.0
-    if elapsed_days < 0:
-        # last_verified_at is in the future — clamp to fresh rather than
-        # over 1.0 (a clock-skew situation shouldn't bias freshness up).
-        return 1.0
-
-    half_life = half_life_days(source_type)
-    score = 1.0 - elapsed_days / (2.0 * half_life)
-    return max(0.0, min(1.0, score))
-
-
-def compute_freshness_multi_source(
-    last_verified_at: str | datetime,
-    source_types: Iterable[str],
-    *,
-    now: Optional[datetime] = None,
-) -> float:
-    """Multi-source variant: uses the SHORTEST half-life across sources.
-
-    This is the canonical entry point for entities with heterogeneous
-    `sources[]`. See module docstring for rationale.
-
-    L2 note (v0.1 simplification): the entity carries ONE
-    ``last_verified_at`` (max-ts of all events), not a per-source
-    timestamp. So an entity with [code:fresh, web:ancient] is governed
-    by web's 30-day half-life starting from the most-recent verification
-    — including any verification that came from the still-fresh code
-    source. This is a slight over-flag (more conservative than per-
-    source verification would yield) and matches the spec's "as fresh
-    as the fastest-decaying source" principle. Per-source
-    last_verified_at is a Wave 2 schema change.
-    """
-    types = list(source_types)
-    if not types:
-        return compute_freshness(last_verified_at, "default", now=now)
-    # Pick the source type with the shortest half-life and compute against it.
-    governing = min(types, key=half_life_days)
-    return compute_freshness(last_verified_at, governing, now=now)
+def half_life_days(kind: str | None) -> int:
+    return HALF_LIVES.get(kind or "", HALF_LIVES["default"])
 
 
 def _parse_iso8601(s: str) -> datetime:
-    """Parse an ISO 8601 timestamp string, accepting common variants.
-
-    Handles:
-      - "2026-05-01T10:23:45Z" (Z suffix)
-      - "2026-05-01T10:23:45+00:00" (offset)
-      - "2026-05-01T10:23:45" (naive — interpreted as UTC by caller)
-      - "2026-05-01" (date only — midnight UTC)
-    """
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     try:
@@ -154,3 +67,72 @@ def _parse_iso8601(s: str) -> datetime:
         raise ValueError(
             f"freshness_policy: cannot parse last_verified_at={s!r} as ISO 8601"
         ) from e
+
+
+def compute_freshness(
+    last_verified_at: str | None,
+    kind: str | None,
+    *,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Compute freshness for one entity. NEVER raises on a missing/malformed
+    timestamp — that is the common, expected case (pre-rule coverage), not
+    an error path.
+
+    Returns:
+        {
+          "score": float | None,      # None = pre-rule, never computed
+          "status": str,              # "pre-rule, never verified" | "fresh" | "aging" | "stale"
+          "half_life_days": int,
+          "elapsed_days": float | None,
+        }
+    """
+    half_life = half_life_days(kind)
+
+    if not last_verified_at:
+        return {
+            "score": None,
+            "status": "pre-rule, never verified",
+            "half_life_days": half_life,
+            "elapsed_days": None,
+        }
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    try:
+        verified = _parse_iso8601(last_verified_at)
+    except ValueError:
+        # Malformed timestamp is a data-quality issue, not a "never verified"
+        # one — surface it distinctly rather than silently treating it as
+        # pre-rule (which would hide the bad write from the audit).
+        return {
+            "score": None,
+            "status": "invalid last_verified_at",
+            "half_life_days": half_life,
+            "elapsed_days": None,
+        }
+    if verified.tzinfo is None:
+        verified = verified.replace(tzinfo=timezone.utc)
+
+    elapsed_days = (now - verified).total_seconds() / 86400.0
+    if elapsed_days < 0:
+        # Clock skew: don't reward a future timestamp with score > 1.0.
+        elapsed_days = 0.0
+
+    score = max(0.0, min(1.0, 1.0 - elapsed_days / (2.0 * half_life)))
+    if score < STALE_FLOOR:
+        status = "stale"
+    elif score < 0.7:
+        status = "aging"
+    else:
+        status = "fresh"
+
+    return {
+        "score": round(score, 3),
+        "status": status,
+        "half_life_days": half_life,
+        "elapsed_days": round(elapsed_days, 1),
+    }

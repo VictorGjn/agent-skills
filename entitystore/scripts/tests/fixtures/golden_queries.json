@@ -425,7 +425,7 @@
       "id": "ask-freshness-01-floor-drops-stale",
       "endpoint": "wiki_ask",
       "truth": "author",
-      "_comment": "Verify freshness_floor drops stale entity (borealis-robotics: 2025-07-01, ~1y old with web half-life=30d). Floor=0.5 keeps fresh (atlas-marine: 2026-07-01), drops stale.",
+      "_comment": "Verify freshness_floor drops stale entity (borealis-robotics: 2025-07-01, ~1y old; kind=org half-life=180d). Floor=0.5 keeps fresh (atlas-marine: 2026-07-01), drops stale.",
       "query": "robotics",
       "params": {"mode": "substring", "depth": 0, "top": 10, "freshness_floor": 0.5},
       "expect": {

@@ -6,13 +6,16 @@ Pure-Python functions (no MCP framework dependency). The MCP server (cb_mcp.py)
 wraps each function as a tool; this file stays testable in isolation via
 `python cb_engine.py --self-test`.
 
-Six endpoints, per SURFACE.md (v1 + the three "wrong-defer" reversals):
+Eight endpoints, per SURFACE.md (v1 + the three "wrong-defer" reversals,
+plus M11's links_to/export additions):
   wiki_ask     — search (substring | semantic | hybrid) + wiki_link expansion
   wiki_audit   — charter-aware contradictions, dead_links, freshness, orphans, schema
   wiki_add     — validate + write + (optional) git commit-through
   wiki_pack    — depth-banded context pack within a token budget
   stats        — counts, breakdowns, freshness percentiles, embedding status
   resolve      — slug/alias/name → canonical entity id
+  links_to     — reverse wiki_link lookup (inbound referrers), cap-filtered
+  export       — one-way boundary export (obsidian | jsonld | json), cap-filtered
 
 Charter-normalization for the auditor is ported from
 company-brain/scratch/promote_gate.py.
@@ -20,6 +23,9 @@ company-brain/scratch/promote_gate.py.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
+import fnmatch
 import json
 import os
 import pathlib
@@ -41,7 +47,9 @@ except Exception:  # pragma: no cover — defensive
     cb_embed = None  # type: ignore
     _HAS_EMBED_MODULE = False
 
-# freshness_policy — M11 compute-on-read freshness scoring
+# freshness_policy is a zero-dependency sibling script (M11) — computed-on-read
+# freshness for wiki_audit's last_verified_at lint, wiki_ask's freshness_floor
+# (M12), and wiki_init's frontmatter. Never stored, see its docstring.
 try:
     import freshness_policy  # type: ignore
     _HAS_FRESHNESS_MODULE = True
@@ -222,6 +230,166 @@ def _flatten_claims(entities: dict[str, dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Classification cap (M7) — env-scoped read gate, M12-ready seam
+# ──────────────────────────────────────────────────────────────────
+#
+# Order matches company-brain/schemas/manifest.schema.json's data_classification
+# enum and scribe-check CRITERIA C1. Reused for two things: the classification
+# OF an entity, and the CAP a caller reads at — same scale, same rank compare.
+CLASSIFICATION_LEVELS = ("public", "internal", "confidential", "restricted")
+_CLASSIFICATION_RANK = {c: i for i, c in enumerate(CLASSIFICATION_LEVELS)}
+
+# M12 seam: per-request override of the caller cap, for a served MCP process
+# that must vary the cap per connection instead of per process. ContextVar
+# (not a plain module global) so it is isolated per thread AND per asyncio
+# Task — a threadpool-dispatching server can't leak one caller's cap into a
+# concurrent request. Default None = "no override, fall through to env" so
+# every existing single-process/env-only flow is byte-identical. Set ONLY via
+# the request_cap() context manager below — see _classification_cap()'s
+# docstring for why this is never a tool/function parameter.
+_REQUEST_CAP: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_REQUEST_CAP", default=None)
+
+
+def _classification_rank(c: str | None) -> int:
+    """Unknown/missing classification ranks as 'restricted' (fail-closed)."""
+    return _CLASSIFICATION_RANK.get(c, _CLASSIFICATION_RANK["restricted"])
+
+
+def _load_manifest(corpus_dir: pathlib.Path) -> dict:
+    p = corpus_dir / "manifest.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _entity_relpath(entity: dict) -> str:
+    """POSIX-style path relative to corpus root ('entities/<kind>/<slug>.json'),
+    for classification_map glob matching. Mirrors _entity_path's on-disk layout
+    without its write-side safety checks — this is a read-only lookup, never a
+    filesystem operation, so a malformed id/kind just fails to match any
+    pattern (falls through to the corpus-level default) instead of raising."""
+    eid = entity.get("id") or ""
+    kind = entity.get("kind") or ""
+    slug = eid.split(":", 1)[1] if ":" in eid else eid
+    return f"entities/{kind}/{slug}.json"
+
+
+def classify_entity(entity: dict, manifest: dict) -> str:
+    """Effective classification for one entity.
+
+    Precedence: longest/most-specific matching `classification_map` glob >
+    manifest-level `data_classification` > 'restricted' (fail-closed for
+    corpora that declare neither — see SURFACE.md "Classification cap").
+    `classification_map` is OPTIONAL: {"<glob relative to corpus root>": "<level>"}.
+    """
+    cmap = manifest.get("classification_map") or {}
+    relpath = _entity_relpath(entity)
+    best_pattern = ""
+    best_class = None
+    for pattern, cls in cmap.items():
+        if len(pattern) > len(best_pattern) and fnmatch.fnmatch(relpath, pattern):
+            best_pattern, best_class = pattern, cls
+    if best_class is not None:
+        return best_class
+    return manifest.get("data_classification") or "restricted"
+
+
+def _classification_cap() -> str:
+    """Caller cap: CB_CLASSIFICATION_CAP env var, or the request_cap()
+    ContextVar override when one is active — NEVER a function/tool parameter
+    (a parameter would let callers self-elevate past the process's
+    configured ceiling). The ContextVar is the M12 Bearer/role→cap binding
+    seam: server middleware resolves a token to a role/cap (cb_auth.py) and
+    holds `with request_cap(cap):` for the lifetime of one request — no MCP
+    tool ever sets it, and no MCP tool parameter can reach it.
+
+    Precedence: request_cap() override (if set) > CB_CLASSIFICATION_CAP env
+    var > 'restricted' (full read, unset-env fallback). When no override is
+    active this is byte-identical to the pre-M12 env-only behavior.
+
+    Unset = 'restricted' (full read) — backward compatible with every pre-M7
+    local flow. A set-but-unrecognized value (env OR override) fails closed
+    to 'public' (most restrictive) rather than silently granting full read
+    on a typo.
+    """
+    override = _REQUEST_CAP.get()
+    raw = override if override is not None else os.environ.get("CB_CLASSIFICATION_CAP")
+    if raw is None:
+        return "restricted"
+    raw = raw.strip().lower()
+    return raw if raw in _CLASSIFICATION_RANK else "public"
+
+
+@contextlib.contextmanager
+def request_cap(level: str):
+    """Context manager: override the caller cap for the current thread/async
+    Task only, for the duration of the `with` block. This is the ONLY
+    supported way to set a per-request cap — never a tool/function
+    parameter, never a bare module-global assignment (that would leak across
+    concurrent requests; see _REQUEST_CAP's ContextVar comment).
+
+    Intended caller: served-mode (MCP) transport middleware, after resolving
+    a Bearer token to a role/cap via cb_auth.verify_token(). Not intended for
+    tool implementations or anything reachable from a tool parameter.
+
+    `level` is passed through _classification_cap()'s normal
+    normalize-and-fail-closed-to-'public' handling — an unrecognized level
+    here fails closed exactly like an unrecognized CB_CLASSIFICATION_CAP.
+    """
+    token = _REQUEST_CAP.set(level)
+    try:
+        yield
+    finally:
+        _REQUEST_CAP.reset(token)
+
+
+def _filter_by_classification(
+    entities: dict[str, dict], corpus_dir: pathlib.Path,
+) -> tuple[dict[str, dict], int, str]:
+    """Drop entities above the caller's classification cap. Called BEFORE
+    scoring/packing on every read endpoint so withheld entities never
+    influence ranking, neighbor expansion, or budget accounting — see
+    SURFACE.md "Classification cap".
+
+    Returns (kept, withheld_count, effective_cap).
+    """
+    effective_cap = _classification_cap()
+    cap_rank = _classification_rank(effective_cap)
+    manifest = _load_manifest(corpus_dir)
+    kept: dict[str, dict] = {}
+    withheld = 0
+    for eid, e in entities.items():
+        if _classification_rank(classify_entity(e, manifest)) <= cap_rank:
+            kept[eid] = e
+        else:
+            withheld += 1
+    return kept, withheld, effective_cap
+
+
+def _inbound_links(entities: dict[str, dict]) -> dict[str, list[str]]:
+    """Map target entity id -> list of referrer ids whose `wiki_links`
+    include it.
+
+    Caller must pass an ALREADY classification-filtered entities dict (the
+    output of `_filter_by_classification`, not raw `load_corpus`) — both
+    sides of every edge then come pre-scoped to the cap: a withheld entity
+    can't be a referrer (it's not a key in `entities` to iterate) and can't
+    be a visible target either (a link to it just doesn't accumulate any
+    entry other callers can query). Shared by `wiki_audit`'s orphan check
+    and the `links_to` endpoint (M11) so the two never drift.
+    """
+    inbound: dict[str, list[str]] = defaultdict(list)
+    for eid, e in entities.items():
+        for ref in e.get("wiki_links", []) or []:
+            inbound[ref].append(eid)
+    return inbound
+
+
+# ──────────────────────────────────────────────────────────────────
 # Date parsing (timezone-normalized)
 # ──────────────────────────────────────────────────────────────────
 
@@ -351,6 +519,7 @@ def wiki_ask(
     """
     cdir = _resolve_corpus(corpus_dir)
     entities = _entities if _entities is not None else load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
     q = (query or "").strip()
     q_lower = q.lower()
 
@@ -360,6 +529,7 @@ def wiki_ask(
             "matched": [], "neighbors": [],
             "stats": {"matched": 0, "neighbors": 0, "truncated": False,
                       "corpus": cdir.name,
+                      "withheld_count": withheld_count, "effective_cap": effective_cap,
                       "error": "empty query AND no kind/topics filter — refusing to dump corpus"},
         }
 
@@ -407,40 +577,29 @@ def wiki_ask(
     scored.sort(key=lambda x: -x[0])
     matched = [e for _, e in scored[:top]]
 
-    # 2.5. Freshness filtering (post-cap, pre-budget).
+    # 2.5. Freshness filtering (post-cap, pre-budget). Delegates to
+    # freshness_policy.compute_freshness(last_verified_at, kind) — the same
+    # kind-keyed, dict-returning API wiki_audit's find_freshness_lint uses
+    # (single source of truth for the decay curve, see freshness_policy.py).
     dropped_by_freshness = 0
     if freshness_floor is not None and _HAS_FRESHNESS_MODULE and freshness_policy is not None:
         filtered_matched: list[dict] = []
         for e in matched:
-            last_verified_at = e.get("last_verified_at")
-            sources = e.get("sources", [])
+            fr = freshness_policy.compute_freshness(e.get("last_verified_at"), e.get("kind"))
+            score = fr["score"]
 
-            # Pre-rule entities (no last_verified_at) score=None.
-            if last_verified_at is None:
-                # Pre-rule entities PASS the floor by default (backward-compat) unless
-                # require_verified=True forces them to be dropped.
+            # Pre-rule / invalid-timestamp entities score=None. They PASS the
+            # floor by default (backward-compat) unless require_verified=True
+            # forces them to be dropped.
+            if score is None:
                 if not require_verified:
                     filtered_matched.append(e)
                 else:
                     dropped_by_freshness += 1
+            elif score >= freshness_floor:
+                filtered_matched.append(e)
             else:
-                # Compute freshness using the shortest half-life if multi-source.
-                try:
-                    if sources:
-                        score = freshness_policy.compute_freshness_multi_source(
-                            last_verified_at, sources
-                        )
-                    else:
-                        score = freshness_policy.compute_freshness(
-                            last_verified_at, "default"
-                        )
-                    if score >= freshness_floor:
-                        filtered_matched.append(e)
-                    else:
-                        dropped_by_freshness += 1
-                except Exception:
-                    # If freshness computation fails, pass the entity through.
-                    filtered_matched.append(e)
+                dropped_by_freshness += 1
         matched = filtered_matched
 
     # 3. Depth expansion: collect wiki_link neighbors (de-duped).
@@ -488,6 +647,8 @@ def wiki_ask(
         "corpus": cdir.name,
         "mode": mode,
         "semantic_used": semantic_used,
+        "withheld_count": withheld_count,
+        "effective_cap": effective_cap,
     }
     if freshness_floor is not None:
         stats_dict["dropped_by_freshness"] = dropped_by_freshness
@@ -509,6 +670,176 @@ FRESHNESS_THRESHOLD_DAYS = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────
+# wiki_audit lints (M11): merge / split / stale-supersession / freshness.
+# Report-only — every function here READS the corpus and returns flags; none
+# of them write an entity or a claim (THE WRITER RULE: enrichers are the
+# sole entity writer). Feeds both wiki_audit()'s JSON response and
+# render_proposals()'s audit/proposals.md.
+# ──────────────────────────────────────────────────────────────────
+
+_NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_name(s: str) -> str:
+    """Lowercase, alnum-only normalization for merge-candidate matching."""
+    return _NAME_NORM_RE.sub("", (s or "").lower())
+
+
+def find_merge_candidates(entities: dict[str, dict]) -> list[dict]:
+    """Merge lint: entities that plausibly describe the same real-world
+    thing — same normalized name, or a normalized id-slug near-miss.
+    Report-only; a human (or a future enricher) decides whether to merge.
+    """
+    flags: list[dict] = []
+
+    by_norm_name: dict[str, set[str]] = defaultdict(set)
+    for eid, e in entities.items():
+        for n in e.get("names") or []:
+            norm = _normalize_name(n)
+            if norm:
+                by_norm_name[norm].add(eid)
+    for norm in sorted(by_norm_name):
+        ids = by_norm_name[norm]
+        if len(ids) > 1:
+            flags.append({
+                "rule": "merge-candidate", "reason": "duplicate-name",
+                "normalized": norm, "entities": sorted(ids),
+            })
+
+    by_norm_slug: dict[str, set[str]] = defaultdict(set)
+    for eid in entities:
+        slug_part = eid.split(":", 1)[1] if ":" in eid else eid
+        norm = _normalize_name(slug_part)
+        if norm:
+            by_norm_slug[norm].add(eid)
+    for norm in sorted(by_norm_slug):
+        ids = by_norm_slug[norm]
+        if len(ids) > 1:
+            flags.append({
+                "rule": "merge-candidate", "reason": "slug-near-miss",
+                "normalized": norm, "entities": sorted(ids),
+            })
+
+    return flags
+
+
+# Deliberately conservative — an entity has to span a LOT of distinct
+# metrics/topics before this fires. A false positive just wastes a
+# reviewer's time; the report stays honest about being a counting
+# heuristic, not a semantic-clustering verdict (no NLI, no embeddings).
+SPLIT_METRIC_THRESHOLD = 6
+SPLIT_TOPIC_THRESHOLD = 8
+
+
+def find_split_candidates(
+    entities: dict[str, dict],
+    *,
+    metric_threshold: int = SPLIT_METRIC_THRESHOLD,
+    topic_threshold: int = SPLIT_TOPIC_THRESHOLD,
+) -> list[dict]:
+    """Split lint: entity whose claims/topics span an unusually wide set —
+    a candidate for splitting into multiple entities. Simple counting
+    heuristic, over-flags rather than under-flags by design (report-only,
+    human decides)."""
+    flags: list[dict] = []
+    for eid, e in entities.items():
+        metrics = {c.get("metric") for c in (e.get("claims") or []) if c.get("metric")}
+        topics = set(e.get("topics") or [])
+        reasons = []
+        if len(metrics) > metric_threshold:
+            reasons.append(f"{len(metrics)} distinct claim metrics (> {metric_threshold})")
+        if len(topics) > topic_threshold:
+            reasons.append(f"{len(topics)} distinct topics (> {topic_threshold})")
+        if reasons:
+            flags.append({
+                "rule": "split-candidate", "id": eid, "kind": e.get("kind"),
+                "reasons": reasons,
+                "metric_count": len(metrics), "topic_count": len(topics),
+            })
+    return flags
+
+
+def find_stale_supersessions(entities: dict[str, dict]) -> list[dict]:
+    """Stale-supersession lint over BOTH decision-continuity chains:
+
+    1. Top-level entity `superseded_by` (null-allowed decision-continuity
+       field — not populated anywhere in the real corpus yet, but this
+       future-proofs the day an enricher starts writing it): any OTHER
+       entity's `wiki_links` still pointing at a superseded entity is a
+       stale reference.
+    2. `identity_assertions[].superseded_by` (v6, populated by the M4 dedup
+       collapse): an assertion marked status=superseded whose
+       `superseded_by` id isn't present among the SAME entity's own
+       assertions is a dangling chain.
+    """
+    flags: list[dict] = []
+
+    superseded_entities = {
+        eid: e for eid, e in entities.items() if e.get("superseded_by")
+    }
+    if superseded_entities:
+        for src_id, src in entities.items():
+            for ref in src.get("wiki_links") or []:
+                if ref in superseded_entities and ref != src_id:
+                    flags.append({
+                        "rule": "stale-supersession", "scope": "entity",
+                        "source": src_id, "target": ref,
+                        "superseded_by": superseded_entities[ref].get("superseded_by"),
+                    })
+
+    for eid, e in entities.items():
+        assertions = e.get("identity_assertions") or []
+        ids_present = {a.get("assertion_id") for a in assertions}
+        for a in assertions:
+            if a.get("status") != "superseded":
+                continue
+            sb = a.get("superseded_by")
+            if sb and sb not in ids_present:
+                flags.append({
+                    "rule": "stale-supersession", "scope": "identity_assertion",
+                    "entity": eid, "assertion_id": a.get("assertion_id"),
+                    "superseded_by": sb,
+                    "reason": "superseded_by assertion not found on the same entity",
+                })
+
+    return flags
+
+
+def find_freshness_lint(entities: dict[str, dict], *, now: datetime | None = None) -> dict:
+    """last_verified_at-first freshness lint (M11), delegating the decay
+    curve to freshness_policy.py.
+
+    Returns {"pre_rule_count", "pre_rule_sample" (capped at 20),
+    "stale": [...]}. The pre-rule bucket (no last_verified_at — the entity
+    predates the freshness rule) is reported as a COUNT + small sample,
+    never the full list, so a 0%-coverage kind (person, vessel — see
+    BRAIN-DELIVERY-TRACK M4) doesn't flood the report. Pre-rule entities are
+    NEVER promoted into `stale` — see freshness_policy.py's module
+    docstring for why 'never verified' and 'stale' are different findings.
+    """
+    pre_rule: list[dict] = []
+    stale: list[dict] = []
+    for eid in sorted(entities):
+        e = entities[eid]
+        fr = freshness_policy.compute_freshness(
+            e.get("last_verified_at"), e.get("kind"), now=now,
+        )
+        if fr["status"] == "pre-rule, never verified":
+            pre_rule.append({
+                "id": eid, "kind": e.get("kind"),
+                "updated_at": e.get("updated_at"),
+            })
+            continue
+        if fr["status"] == "stale":
+            stale.append({"id": eid, "kind": e.get("kind"), **fr})
+    return {
+        "pre_rule_count": len(pre_rule),
+        "pre_rule_sample": pre_rule[:20],
+        "stale": stale,
+    }
+
+
 def wiki_audit(
     corpus_dir: str | pathlib.Path | None = None,
     schema_path: str | pathlib.Path | None = None,
@@ -516,6 +847,7 @@ def wiki_audit(
 ) -> dict:
     cdir = _resolve_corpus(corpus_dir)
     all_entities = load_corpus(cdir)
+    all_entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
     total = len(all_entities)
 
     try:
@@ -583,14 +915,11 @@ def wiki_audit(
             })
 
     # 4. orphans — no inbound + no claims + no evidence + no concept.statement
-    inbound: dict[str, int] = defaultdict(int)
-    for e in all_entities.values():
-        for ref in e.get("wiki_links", []) or []:
-            inbound[ref] += 1
+    inbound = _inbound_links(all_entities)
     orphans: list[dict] = []
     for eid, e in entities.items():
         stmt = ((e.get("concept") or {}).get("statement") or "").strip()
-        if (inbound[eid] == 0
+        if (not inbound.get(eid)
                 and not (e.get("claims") or [])
                 and not (e.get("evidence") or [])
                 and not stmt):
@@ -611,26 +940,149 @@ def wiki_audit(
     # schema_loaded distinguishes "validated, all clean" from "no schema available";
     # reporting schema_invalid=0 alone would silently hide a typo'd CB_SCHEMA_PATH.
     schema_loaded = schema is not None
+
+    # 6-9 (M11): merge / split / stale-supersession / last_verified_at freshness.
+    # Same `entities` (kind-filtered, cap-filtered) scope as checks 1-5.
+    merge_candidates = find_merge_candidates(entities)
+    split_candidates = find_split_candidates(entities)
+    stale_supersessions = find_stale_supersessions(entities)
+    freshness_lint = find_freshness_lint(entities, now=now)
+
     return {
         "corpus": cdir.name,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "entity_count_total": total,
         "entity_count_audited": len(entities),
         "kinds_filter": kinds,
+        "withheld_count": withheld_count,
+        "effective_cap": effective_cap,
         "schema_loaded": schema_loaded,
         "contradictions": contradictions,
         "dead_links": dead_links,
         "freshness_expired": freshness_expired,
         "orphans": orphans,
         "schema_invalid": schema_invalid if schema_loaded else None,
+        "merge_candidates": merge_candidates,
+        "split_candidates": split_candidates,
+        "stale_supersessions": stale_supersessions,
+        "freshness_lint": freshness_lint,
         "summary": {
             "contradictions": len(contradictions),
             "dead_links": len(dead_links),
             "freshness_expired": len(freshness_expired),
             "orphans": len(orphans),
             "schema_invalid": len(schema_invalid) if schema_loaded else None,
+            "merge_candidates": len(merge_candidates),
+            "split_candidates": len(split_candidates),
+            "stale_supersessions": len(stale_supersessions),
+            "freshness_pre_rule": freshness_lint["pre_rule_count"],
+            "freshness_stale": len(freshness_lint["stale"]),
         },
     }
+
+
+def render_proposals(audit_result: dict, *, now_iso: str | None = None) -> str:
+    """Format a wiki_audit() result as markdown for `<corpus>/audit/proposals.md`.
+
+    A REPORT file, never an entity/claim write — no WRITER RULE contact
+    (mirrors wiki_init.py's module docstring on the same point). Written by
+    `cb_engine.py wiki-audit --proposals`, not by any endpoint's default
+    path — callers who only want the JSON never touch the filesystem.
+    """
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+    lines: list[str] = [
+        "# audit/proposals.md", "", f"_Generated: {now_iso}_", "",
+        f"_Corpus: {audit_result.get('corpus')} — "
+        f"{audit_result.get('entity_count_audited')}/"
+        f"{audit_result.get('entity_count_total')} entities audited "
+        f"(withheld_count={audit_result.get('withheld_count')}, "
+        f"effective_cap={audit_result.get('effective_cap')})_",
+        "",
+    ]
+
+    def _section(title, items, fmt):
+        lines.append(f"## {title}")
+        lines.append("")
+        if items:
+            for it in items:
+                lines.append(f"- {fmt(it)}")
+        else:
+            lines.append("_(none)_")
+        lines.append("")
+
+    _section(
+        "Contradictions", audit_result.get("contradictions") or [],
+        lambda c: (
+            f"`{c['key']['entity']}` {c['key']['metric']} "
+            f"({c['key']['role']}/{c['key']['cp_type']}/{c['key']['tenor']}/"
+            f"{c['key']['status']}/{c['key']['as_of']}): "
+            f"{[v['value'] for v in c['values']]}"
+        ),
+    )
+    _section(
+        "Dead links", audit_result.get("dead_links") or [],
+        lambda d: f"`{d['from']}` -> `{d['to']}` (missing)",
+    )
+    _section(
+        "Freshness expired (updated_at)", audit_result.get("freshness_expired") or [],
+        lambda f: f"`{f['id']}` {f['days_stale']}d stale (threshold {f['threshold_days']}d)",
+    )
+    _section(
+        "Orphans", audit_result.get("orphans") or [],
+        lambda o: f"`{o['id']}` ({o['kind']})",
+    )
+
+    schema_invalid = audit_result.get("schema_invalid")
+    lines.append("## Schema invalid")
+    lines.append("")
+    if schema_invalid is None:
+        lines.append("_(schema not loaded — see wiki_audit.schema_loaded)_")
+    elif schema_invalid:
+        for s in schema_invalid:
+            lines.append(f"- `{s['id']}`: {s['error']} (at {s['path']})")
+    else:
+        lines.append("_(none)_")
+    lines.append("")
+
+    _section(
+        "Merge candidates", audit_result.get("merge_candidates") or [],
+        lambda m: f"{m['reason']} `{m['normalized']}`: {', '.join(m['entities'])}",
+    )
+    _section(
+        "Split candidates", audit_result.get("split_candidates") or [],
+        lambda s: f"`{s['id']}` ({s['kind']}): {'; '.join(s['reasons'])}",
+    )
+    _section(
+        "Stale supersessions", audit_result.get("stale_supersessions") or [],
+        lambda s: (
+            f"`{s['source']}` -> `{s['target']}` (superseded by `{s['superseded_by']}`)"
+            if s.get("scope") == "entity" else
+            f"`{s['entity']}` assertion `{s['assertion_id']}`: {s['reason']} "
+            f"(superseded_by=`{s['superseded_by']}`)"
+        ),
+    )
+
+    fresh = audit_result.get("freshness_lint") or {}
+    lines.append("## Freshness (last_verified_at)")
+    lines.append("")
+    lines.append(
+        f"- {fresh.get('pre_rule_count', 0)} entities pre-rule (never "
+        f"verified — `last_verified_at` unset; not counted as stale)."
+    )
+    stale = fresh.get("stale") or []
+    if stale:
+        for f in stale:
+            lines.append(
+                f"- `{f['id']}` ({f['kind']}) freshness {f['score']} "
+                f"(elapsed {f['elapsed_days']}d, half-life {f['half_life_days']}d)."
+            )
+    else:
+        lines.append("- 0 entities stale by last_verified_at.")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -822,7 +1274,9 @@ def wiki_pack(
         return {
             "query": query, "budget": budget, "used_tokens": 0,
             "items": [], "stats": {"matched": 0, "neighbors": 0, "dropped": 0,
-                                   "mode": mode}}
+                                   "mode": mode,
+                                   "withheld_count": answer["stats"].get("withheld_count", 0),
+                                   "effective_cap": answer["stats"].get("effective_cap", "restricted")}}
 
     def total() -> int:
         return sum(it["tokens"] for it in items)
@@ -891,6 +1345,8 @@ def wiki_pack(
             "depth_breakdown": dict(depth_counts),
             "mode": answer["stats"]["mode"],
             "semantic_used": answer["stats"].get("semantic_used", False),
+            "withheld_count": answer["stats"].get("withheld_count", 0),
+            "effective_cap": answer["stats"].get("effective_cap", "restricted"),
             "corpus": cdir.name,
         },
     }
@@ -904,6 +1360,7 @@ def wiki_pack(
 def stats(corpus_dir: str | pathlib.Path | None = None) -> dict:
     cdir = _resolve_corpus(corpus_dir)
     entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
 
     by_kind = Counter(e.get("kind", "?") for e in entities.values())
     by_topic: Counter = Counter()
@@ -960,6 +1417,8 @@ def stats(corpus_dir: str | pathlib.Path | None = None) -> dict:
         },
         "schema_version": schema_version,
         "embeddings": embed_status,
+        "withheld_count": withheld_count,
+        "effective_cap": effective_cap,
     }
 
 
@@ -984,9 +1443,10 @@ def resolve(
     """
     cdir = _resolve_corpus(corpus_dir)
     entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
     q = (query or "").strip().lower()
     if not q:
-        return {"matches": []}
+        return {"matches": [], "withheld_count": withheld_count, "effective_cap": effective_cap}
 
     scored: list[tuple[float, dict]] = []
     for eid, e in entities.items():
@@ -1017,7 +1477,207 @@ def resolve(
                 "names": e.get("names", []), "score": round(score, 3),
             }))
     scored.sort(key=lambda x: -x[0])
-    return {"matches": [m for _, m in scored[:top_k]]}
+    return {"matches": [m for _, m in scored[:top_k]],
+            "withheld_count": withheld_count, "effective_cap": effective_cap}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Endpoint 7: links_to — reverse wiki_link lookup (M11)
+# ──────────────────────────────────────────────────────────────────
+
+
+def links_to(
+    entity_id: str,
+    corpus_dir: str | pathlib.Path | None = None,
+) -> dict:
+    """Entities whose `wiki_links` reference `entity_id` (inbound edges).
+
+    Cap-filters BOTH the target entity and every inbound referrer, mirroring
+    how wiki_ask handles neighbors (see SURFACE.md "Classification cap"):
+    - The target's existence is checked against the ALREADY-capped entity
+      set, so an entity withheld by the cap reports `exists=False` — same
+      as a genuinely nonexistent id. This avoids a cap oracle: a caller
+      can't distinguish "doesn't exist" from "exists but you can't see it".
+    - `_inbound_links` is built from that same capped set, so a withheld
+      referrer never accumulates an inbound entry in the first place —
+      it can't leak via the `{id, kind, names, summary}` neighbor summary.
+    """
+    cdir = _resolve_corpus(corpus_dir)
+    all_entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
+
+    if entity_id not in entities:
+        return {
+            "id": entity_id, "exists": False, "inbound": [], "count": 0,
+            "withheld_count": withheld_count, "effective_cap": effective_cap,
+        }
+
+    referrer_ids = _inbound_links(entities).get(entity_id, [])
+    inbound = [
+        {"id": r["id"], "kind": r.get("kind"),
+         "names": r.get("names", []), "summary": r.get("summary", "")}
+        for r in (entities[rid] for rid in referrer_ids)
+    ]
+    return {
+        "id": entity_id, "exists": True, "inbound": inbound,
+        "count": len(inbound),
+        "withheld_count": withheld_count, "effective_cap": effective_cap,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
+# Endpoint 8: export — one-way boundary export (M11)
+# ──────────────────────────────────────────────────────────────────
+#
+# Per prior scoping (CE prd-closed-loop.md S5/AC13), this is deliberately
+# "the cheap half of the promised feature": a boundary crossing OUT of the
+# store, never a way back IN. No re-import, no round-trip merge system —
+# wiki_add remains the only write path (THE WRITER RULE).
+
+EXPORT_FORMATS = ("obsidian", "jsonld", "json")
+
+
+def _export_slug(entity: dict) -> tuple[str, str] | None:
+    """(kind, slug) for a filesystem-safe export path, or None if unsafe.
+
+    Same slug/kind shape `_entity_path` enforces on the write side — export
+    never writes outside `out_dir` even if a malformed id somehow made it
+    into the corpus.
+    """
+    eid = entity.get("id") or ""
+    kind = entity.get("kind") or ""
+    slug = eid.split(":", 1)[1] if ":" in eid else eid
+    if _SLUG_RE.fullmatch(slug) and _SLUG_RE.fullmatch(kind):
+        return kind, slug
+    return None
+
+
+def _export_obsidian(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """One Markdown note per entity at `<out_dir>/<kind>/<slug>.md`.
+
+    Frontmatter values are JSON-encoded — JSON is a valid YAML subset, so no
+    extra yaml dependency is needed. `[[kind/slug|display name]]` wiki-links
+    use the same folder-qualified form as the on-disk filenames so Obsidian
+    resolves them. A link to an id outside the exported set (withheld by
+    the cap, or filtered out by `kind`) renders as an unresolved link in
+    Obsidian — the same "reads as dead for this caller" outcome
+    `wiki_audit`'s `dead_links` already documents, not a new leak (the raw
+    id string was already present in the source entity's own `wiki_links`).
+    """
+    written: list[str] = []
+    for eid, e in entities.items():
+        safe = _export_slug(e)
+        if safe is None:
+            continue
+        kind, slug = safe
+        kind_dir = out_dir / kind
+        kind_dir.mkdir(parents=True, exist_ok=True)
+        names = e.get("names") or [eid]
+        front = {"id": eid, "kind": kind, "names": names,
+                 "topics": e.get("topics", [])}
+        lines = ["---"]
+        lines.extend(f"{k}: {json.dumps(v, ensure_ascii=False)}"
+                     for k, v in front.items())
+        lines.append("---")
+        lines.append("")
+        lines.append(f"# {names[0]}")
+        lines.append("")
+        if e.get("summary"):
+            lines.append(e["summary"])
+            lines.append("")
+        stmt = ((e.get("concept") or {}).get("statement") or "").strip()
+        if stmt:
+            lines.append(f"> {stmt}")
+            lines.append("")
+        links = e.get("wiki_links") or []
+        if links:
+            lines.append("## Links")
+            for ref in links:
+                rkind, _, rslug = ref.partition(":")
+                if not rslug:
+                    lines.append(f"- {ref}")
+                    continue
+                target = entities.get(ref)
+                display = (target.get("names") or [ref])[0] if target else ref
+                lines.append(f"- [[{rkind}/{rslug}|{display}]]")
+            lines.append("")
+        path = kind_dir / f"{slug}.md"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        written.append(str(path))
+    return written
+
+
+def _export_jsonld(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """Flat `@graph` of entities — one file, no external context fetch."""
+    graph = [
+        {
+            "@id": eid, "@type": e.get("kind"),
+            "name": (e.get("names") or [eid])[0],
+            "names": e.get("names", []),
+            "summary": e.get("summary", ""),
+            "topics": e.get("topics", []),
+            "links": [{"@id": ref} for ref in (e.get("wiki_links") or [])],
+        }
+        for eid, e in entities.items()
+    ]
+    doc = {
+        "@context": {"name": "https://schema.org/name",
+                     "summary": "https://schema.org/description"},
+        "@graph": graph,
+    }
+    path = out_dir / "export.jsonld"
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return [str(path)]
+
+
+def _export_json(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """Flat JSON array of full (cap-filtered) entity payloads."""
+    path = out_dir / "export.json"
+    path.write_text(json.dumps(list(entities.values()), indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return [str(path)]
+
+
+def export(
+    corpus_dir: str | pathlib.Path | None = None,
+    format: str = "obsidian",
+    kind: str | None = None,
+    out_dir: str | pathlib.Path | None = None,
+) -> dict:
+    """One-way boundary export of the corpus — no re-import, no round-trip
+    merge (see module docstring + SURFACE.md "wiki.export"). `wiki_add`
+    remains the only write path into the store (THE WRITER RULE); this
+    endpoint only ever reads and writes OUTSIDE the corpus.
+
+    Runs through the classification cap like every other read endpoint —
+    an entity above the cap is never written to an export file, in any
+    format.
+    """
+    if format not in EXPORT_FORMATS:
+        return {"ok": False, "error_kind": "ValidationError",
+                "message": f"unknown format {format!r}, expected one of {EXPORT_FORMATS}"}
+
+    cdir = _resolve_corpus(corpus_dir)
+    all_entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
+    if kind:
+        entities = {eid: e for eid, e in entities.items() if e.get("kind") == kind}
+
+    out = pathlib.Path(out_dir).resolve() if out_dir else (cdir / ".cb_export" / format)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if format == "obsidian":
+        files = _export_obsidian(entities, out)
+    elif format == "jsonld":
+        files = _export_jsonld(entities, out)
+    else:
+        files = _export_json(entities, out)
+
+    return {
+        "ok": True, "format": format, "out_dir": str(out),
+        "entity_count": len(entities), "files_written": len(files),
+        "withheld_count": withheld_count, "effective_cap": effective_cap,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1060,8 +1720,10 @@ def _self_test_in_tempdir() -> int:
         # explicitly to bypass the layout-walking heuristic.
         prev_corpus = os.environ.get("CB_CORPUS_DIR")
         prev_schema = os.environ.get("CB_SCHEMA_PATH")
+        prev_cap = os.environ.get("CB_CLASSIFICATION_CAP")
         os.environ["CB_CORPUS_DIR"] = str(test_corpus)
         os.environ["CB_SCHEMA_PATH"] = str(test_schemas / "entity.schema.json")
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
         _SCHEMA_CACHE.clear()
 
         print(f"== Self-test in {test_corpus} ==\n")
@@ -1230,6 +1892,120 @@ def _self_test_in_tempdir() -> int:
             check("_entity_path: rejects unsafe kind",
                   saw_kind_error)
 
+            # 7. Classification cap (M7) — env-scoped read gate. classify_entity()
+            # is a pure function, checked directly first; then the live-corpus
+            # checks confirm the cap actually withholds entities end-to-end.
+            check("classify_entity: no manifest classification anywhere -> "
+                  "fails closed to 'restricted'",
+                  classify_entity({"id": "concept:x", "kind": "concept"}, {})
+                  == "restricted")
+            check("classify_entity: corpus-level data_classification is the fallback",
+                  classify_entity({"id": "concept:x", "kind": "concept"},
+                                  {"data_classification": "internal"}) == "internal")
+            check("classify_entity: classification_map overrides the corpus-level default",
+                  classify_entity(
+                      {"id": "concept:x", "kind": "concept"},
+                      {"data_classification": "internal",
+                       "classification_map": {"entities/concept/**": "restricted"}},
+                  ) == "restricted")
+            check("classify_entity: longest/most-specific glob wins over a broader one",
+                  classify_entity(
+                      {"id": "concept:x", "kind": "concept"},
+                      {"data_classification": "internal",
+                       "classification_map": {
+                           "entities/concept/**": "public",
+                           "entities/concept/x.json": "restricted",
+                       }},
+                  ) == "restricted")
+            check("_classification_cap: unset env -> 'restricted' (full read, backward-compat)",
+                  _classification_cap() == "restricted")
+
+            manifest_path = test_corpus / "manifest.json"
+            corpus_class = None
+            if manifest_path.exists():
+                try:
+                    corpus_class = json.loads(
+                        manifest_path.read_text(encoding="utf-8")).get("data_classification")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            print(f"-- classification: live corpus data_classification={corpus_class!r}")
+
+            s_default = stats()
+            check("classification: unset cap withholds nothing on the live corpus",
+                  s_default.get("effective_cap") == "restricted"
+                  and s_default.get("withheld_count") == 0)
+
+            if corpus_class and _classification_rank(corpus_class) > 0:
+                os.environ["CB_CLASSIFICATION_CAP"] = "public"
+                try:
+                    s_capped = stats()
+                    print(f"-- stats() under CB_CLASSIFICATION_CAP=public: "
+                          f"entity_count={s_capped['entity_count']}, "
+                          f"withheld_count={s_capped.get('withheld_count')}")
+                    check("classification: capping below the corpus-level "
+                          "classification withholds every entity",
+                          s_capped["entity_count"] == 0
+                          and s_capped.get("withheld_count") == s_default["entity_count"]
+                          and s_capped.get("effective_cap") == "public")
+
+                    a_capped = wiki_ask("route optimization", depth=1, budget=4000,
+                                        mode="substring")
+                    check("classification: wiki_ask honors the cap too "
+                          "(0 matched, withheld_count > 0 under public)",
+                          a_capped["stats"]["matched"] == 0
+                          and a_capped["stats"].get("withheld_count", 0) > 0)
+
+                    r_capped = resolve("route")
+                    check("classification: resolve honors the cap too (no matches)",
+                          r_capped["matches"] == [] and r_capped.get("withheld_count", 0) > 0)
+
+                    audit_capped = wiki_audit()
+                    check("classification: wiki_audit honors the cap too "
+                          "(0 audited, withheld_count > 0)",
+                          audit_capped["entity_count_audited"] == 0
+                          and audit_capped.get("withheld_count", 0) > 0)
+                finally:
+                    os.environ.pop("CB_CLASSIFICATION_CAP", None)
+            else:
+                print("-- classification: live corpus has no restrictive "
+                      "data_classification; live cap-enforcement smoke check skipped "
+                      "(full coverage lives in tests/test_classification_gate.py)")
+
+            # 8. links_to (M11) — reverse-lookup smoke test. Reuses the id
+            # `r2` already resolved above (no new hardcoded real id/name —
+            # this file runs against a real company-brain corpus, and this
+            # repo is public: see fixtures/README.md's data-governance note).
+            probe_id = r2["matches"][0]["id"]
+            lt = links_to(probe_id)
+            print(f"-- links_to({probe_id!r}): exists={lt['exists']}, count={lt['count']}")
+            check("links_to: existing entity reports exists=True", lt["exists"] is True)
+            check("links_to: inbound entries carry id/kind/names/summary",
+                  all({"id", "kind", "names", "summary"} <= set(n.keys())
+                      for n in lt["inbound"]))
+            lt_missing = links_to("concept:definitely-not-a-real-entity-xyz")
+            print(f"-- links_to(nonexistent): exists={lt_missing['exists']}")
+            check("links_to: nonexistent id -> exists=False, empty inbound",
+                  lt_missing["exists"] is False and lt_missing["inbound"] == []
+                  and lt_missing["count"] == 0)
+
+            # 9. export (M11) — one-way boundary export smoke test, all 3
+            # formats, written into the tempdir (never the live corpus).
+            export_root = td_path / "export_smoke"
+            for fmt in ("obsidian", "jsonld", "json"):
+                res = export(format=fmt, out_dir=str(export_root / fmt))
+                print(f"-- export(format={fmt!r}): ok={res.get('ok')}, "
+                      f"entity_count={res.get('entity_count')}, "
+                      f"files_written={res.get('files_written')}")
+                check(f"export({fmt}): ok", res.get("ok") is True)
+                check(f"export({fmt}): wrote at least one file",
+                      res.get("files_written", 0) >= 1)
+                check(f"export({fmt}): files actually landed on disk",
+                      any(pathlib.Path(res["out_dir"]).rglob("*")))
+            bad_export = export(format="markdown-but-not-really")
+            check("export: unknown format rejected",
+                  bad_export.get("ok") is False
+                  and bad_export.get("error_kind") == "ValidationError")
+
         finally:
             # Restore env so caller's state is intact.
             if prev_corpus is None:
@@ -1240,6 +2016,10 @@ def _self_test_in_tempdir() -> int:
                 os.environ.pop("CB_SCHEMA_PATH", None)
             else:
                 os.environ["CB_SCHEMA_PATH"] = prev_schema
+            if prev_cap is None:
+                os.environ.pop("CB_CLASSIFICATION_CAP", None)
+            else:
+                os.environ["CB_CLASSIFICATION_CAP"] = prev_cap
             _SCHEMA_CACHE.clear()
 
     print(f"\n{'=' * 50}")
@@ -1278,6 +2058,8 @@ def main():
 
     au = sub.add_parser("wiki-audit")
     au.add_argument("--kinds", nargs="*")
+    au.add_argument("--proposals", action="store_true",
+                     help="also render <corpus>/audit/proposals.md")
 
     rs = sub.add_parser("resolve")
     rs.add_argument("query")
@@ -1305,7 +2087,14 @@ def main():
                       mode=args.mode),
             indent=2, default=str))
     elif args.cmd == "wiki-audit":
-        print(json.dumps(wiki_audit(kinds=args.kinds), indent=2))
+        result = wiki_audit(kinds=args.kinds)
+        print(json.dumps(result, indent=2))
+        if args.proposals:
+            cdir = _resolve_corpus(args.corpus)
+            proposals_path = cdir / "audit" / "proposals.md"
+            proposals_path.parent.mkdir(parents=True, exist_ok=True)
+            proposals_path.write_text(render_proposals(result), encoding="utf-8")
+            print(f"-- proposals written to {proposals_path}", file=sys.stderr)
     elif args.cmd == "resolve":
         print(json.dumps(resolve(args.query), indent=2))
     elif args.cmd == "build-embeddings":

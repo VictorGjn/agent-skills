@@ -1,6 +1,6 @@
 ---
 name: entitystore
-description: The schema-agnostic EntityStore engine — raw/events/wiki tiers, Source ABC, semantic-shift consolidator, contradiction auditor, depth-aware packer, and MCP. Carved from context-engineering. Reads the entity schema BY PATH (it ships no schema of its own); the canonical schema + entities live in company-brain, and domain Sources/connectors live in syroco-product-ops. Use when building or querying a provenance-tracked entity brain over any corpus, consolidating events into wiki entity pages, auditing for contradictions/drift, or packing entity context within a token budget. Do NOT use for code-context packing or code-knowledge-graph visualisation (that's the context-engineering skill, which continues independently — entitystore does not replace it).
+description: The schema-agnostic EntityStore engine — JSON-native entity corpus, Source ABC, contradiction/merge/split/freshness auditor, depth-aware packer, a regenerable wiki/<slug>.md page layer (M11), and MCP. Carved from context-engineering. Reads the entity schema BY PATH (it ships no schema of its own); the canonical schema + entities live in company-brain, and domain Sources/connectors live in syroco-product-ops. Use when building or querying a provenance-tracked entity brain over any corpus, seeding/auditing wiki entity pages, auditing for contradictions/drift/staleness, or packing entity context within a token budget. Do NOT use for code-context packing or code-knowledge-graph visualisation (that's the context-engineering skill, which continues independently — entitystore does not replace it).
 ---
 
 # entitystore
@@ -21,20 +21,25 @@ Because the schema lives with the data (not the engine), **adding a new entity
 kind or property is a schema + data change with ZERO engine change.** The engine
 validates and packs whatever schema company-brain hands it.
 
-## The three tiers (unchanged from CE)
+## Storage: JSON-native, not CE's three-tier raw/events/wiki
 
-```
-brain/
-├── raw/      verbatim source bytes, content-addressed   (Sources via fetch())
-├── events/   append-only JSONL, one event = one claim   (Sources via emit_events())
-└── wiki/     consolidated entity pages, every claim → source   (wiki_init + audit)
-```
+Superseded by the JSON-native pivot (2026-05-28, see SURFACE.md "Status"):
+entitystore has no `raw/` or `events/` tier and no events-log consolidator.
+`corpora/<id>/entities/**/*.json` (git-committed, enricher-written) is the
+one source of truth every endpoint reads directly.
 
-- **Consolidate only on cosine drift** (`semantic_shift.py`) — the wiki doesn't
-  churn on every event.
-- **Auditor** (`audit.py`) surfaces splits / merges / contradictions (with
-  per-side provenance) / dead links / freshness expiries.
-- **Packer** (`pack_context*.py`) assembles a query-driven context bundle.
+`corpora/<id>/wiki/*.md` DOES exist again as of M11 — but it's this repo's
+own `scripts/wiki_init.py` deriving pages straight from the JSON entities
+(a regenerable projection), not CE's events-log consolidator of the same
+name. See SURFACE.md "Wiki pages (M11)" for the contract; don't confuse the
+two `wiki_init.py`s if you're cross-referencing `context-engineering/scripts/wiki/`.
+
+- **Auditor** (`cb_engine.py`'s `wiki_audit`) surfaces contradictions / dead
+  links / freshness expiries / orphans / schema-invalid, plus (M11) merge /
+  split / stale-supersession / `last_verified_at` freshness lints —
+  `render_proposals` writes them to `audit/proposals.md`.
+- **Packer** (`wiki_pack` in `cb_engine.py`) assembles a depth-banded,
+  budget-bounded context bundle.
 
 ## Schema-injection contract
 
@@ -74,6 +79,32 @@ contract and the memory files (`project_syroco_company_brain`,
   (real commit sha returned via subprocess git invocation).
 - **Honest deferrals to v1.1:** structured-query (filter on claim values),
   cross-corpus, Vercel/HTTP + OAuth, embedding-cache management UI.
+
+## Wiki/document-entity layer (M11)
+
+`scripts/wiki_init.py` seeds `corpora/<id>/wiki/<slug>.md` — one page per
+entity, derived straight from the JSON corpus (**not** an events log; that
+was CE's dropped model). A page is a **regenerable projection**, never a
+second source of truth: `--rebuild` reproduces it byte-for-byte from the
+entities, nothing here writes an entity or a claim (THE WRITER RULE holds).
+Cap-aware, pointer-based (links to ids/refs, never copies claim evidence
+quotes), carries `last_verified_at` verbatim + decision-continuity fields
+(`supersedes`/`superseded_by`/`valid_until`), and never stores a
+`freshness_score`/`confidence`/`trust`/`tier` field.
+
+`scripts/freshness_policy.py` computes freshness **on read only** from
+`last_verified_at` with per-kind half-lives; a missing timestamp is
+`score=None, status="pre-rule, never verified"` — never `0.0`, never an
+error (most of the live corpus is pre-rule as of M11 — person 0/331,
+vessel 0/131 `last_verified_at` coverage).
+
+`cb_engine.py`'s `wiki_audit` gained four more report-only lints — merge
+candidates, split candidates, stale supersessions, and the
+`last_verified_at`-first freshness lint — and `cb_engine.py wiki-audit
+--proposals` renders the full result to `<corpus>/audit/proposals.md`.
+None of this is an MCP tool addition; it's a CLI/library layer SURFACE.md's
+six MCP endpoints don't depend on. See SURFACE.md "Wiki pages (M11)" for
+the full contract.
 
 ## Not in scope
 
