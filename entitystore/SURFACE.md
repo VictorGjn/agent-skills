@@ -10,7 +10,13 @@ A **local stdio MCP server** exposing the company-brain JSON entity corpus as **
 
 - Multi-user / multi-tenant / OAuth / RBAC.
 - Vercel / HTTP deployment.
-- Markdown wiki pages (CE's model — dropped).
+- Markdown wiki pages as a second source of truth — CE's events-log-consolidator
+  model is still dropped. **M11 reinstated a wiki-DOC layer, but only as a
+  REGENERABLE PROJECTION over the JSON entity corpus** (see "Wiki pages (M11)"
+  below): `wiki_init.py` derives `corpora/<id>/wiki/<slug>.md` straight from the
+  entities, byte-reproducible via `--rebuild`, never hand-edited, never a write
+  path back into an entity or claim (THE WRITER RULE holds — enrichers remain
+  the sole entity writer).
 - Code-context packing (CE's domain — stays in CE).
 - Cross-corpus operations (single corpus per MCP instance).
 
@@ -295,6 +301,89 @@ Formats:
 
 Runs through the classification cap like every other read endpoint — an entity above the cap is never written to an export file, in any format.
 
+## Wiki pages (M11) — regenerable projection, not a second store
+
+`scripts/wiki_init.py` is a one-shot, idempotent seeder: it reads the JSON
+entity corpus (the same tree every endpoint above reads — **not** an events
+log; that was CE's model) and writes one `corpora/<id>/wiki/<slug>.md` page
+per entity. A page is a **pointer-based, byte-reproducible projection**: the
+entity JSON stays the only source of truth, `--rebuild` regenerates every
+page from scratch, and nothing here ever writes an entity or a claim (THE
+WRITER RULE: enrichers remain the sole entity writer — see
+company-brain/CLAUDE.md).
+
+**Slug**: `kind:slug` -> `kind-slug` — collision-free by construction, since
+entity ids are already globally unique (no CE-style near-miss suffixing
+needed).
+
+**Frontmatter**: `id`, `kind`, `slug`, `schema_version` (page-schema,
+independent of the entity schema), `last_verified_at` (copied verbatim from
+the entity's M4 field, `null` if the entity predates the freshness rule),
+`supersedes` / `superseded_by` / `valid_until` (null-allowed
+decision-continuity fields), `sources[]` (pointer-only: `provenance` +
+every ACTIVE `identity_assertions[]` entry — retracted/superseded
+assertions are excluded as live pointers), `links_out` (= `wiki_links`),
+`links_in` (reverse-computed over the SAME cap-filtered entity set every
+other endpoint uses).
+
+**PROHIBITED on every page, no exceptions**: `freshness_score`,
+`confidence`, `centroid_embedding`, and any score/trust/tier/reputation
+field. Freshness is **computed on read only** — see `freshness_policy.py`
+and `wiki_audit`'s `freshness_lint` below; it is never written to a page,
+an entity, or a claim. Claim `evidence[].quote` text is never copied onto a
+page either (pointer-based only — keeps the M7 PII-purge surface to the
+JSON entities, not duplicated across two trees).
+
+**Cap-aware**: reads through the same `_filter_by_classification` as every
+endpoint — an entity above `CB_CLASSIFICATION_CAP` never becomes a page.
+
+**`--kinds`** filters which pages get (re)written; **`--rebuild`** deletes
+existing pages first (scoped to `--kinds` if given, so a scoped rebuild
+never clobbers other kinds' pages).
+
+### `freshness_policy.py` — computed-on-read freshness
+
+Per-kind half-life decay (`score = max(0, 1 - elapsed_days / (2 *
+half_life_days))`), keyed by entity `kind` (mirrors `FRESHNESS_THRESHOLD_DAYS`
+above). An entity with no `last_verified_at` returns `score=None`,
+`status="pre-rule, never verified"` — **not** `0.0`, **not** an error. Per
+the real M4 coverage reality (person 0/331, vessel 0/131 as of M11), most of
+the live corpus is pre-rule; treating that as "stale" would flag nearly the
+whole brain. Never persisted anywhere — every caller (wiki page frontmatter
+is `last_verified_at` only, `wiki_audit`'s lint, future `wiki_ask` stats)
+recomputes it fresh.
+
+### `wiki_audit` lints (M11 additions)
+
+Four more checks, additive to the five in "Endpoints" above, all
+report-only (never write an entity/claim):
+
+- **`merge_candidates`** — entities sharing a normalized name or a
+  normalized id-slug near-miss. `reason`: `duplicate-name` |
+  `slug-near-miss`.
+- **`split_candidates`** — an entity whose `claims[].metric` set or
+  `topics[]` set exceeds a conservative threshold (6 metrics / 8 topics by
+  default). Simple counting heuristic, not semantic clustering — over-flags
+  by design, human decides.
+- **`stale_supersessions`** — (a) any entity's `wiki_links` still pointing
+  at another entity whose top-level `superseded_by` is set, and (b) an
+  `identity_assertions[]` entry with `status=superseded` whose
+  `superseded_by` id isn't present among that same entity's own assertions
+  (a dangling M4 identity chain).
+- **`freshness_lint`** — `last_verified_at`-first (see `freshness_policy.py`
+  above), falling back to `updated_at` only for the pre-rule bucket's own
+  reporting. Returns `{pre_rule_count, pre_rule_sample (capped at 20),
+  stale}` — pre-rule entities are a count + small sample, never the full
+  list, so a 0%-coverage kind doesn't flood the report; they are never
+  promoted into `stale`.
+
+### `render_proposals` / `audit/proposals.md`
+
+`cb_engine.py wiki-audit --proposals` (or `render_proposals(wiki_audit(...))`
+directly) renders the full `wiki_audit` result — all nine checks — as
+markdown to `<corpus>/audit/proposals.md`. A **report file**, never an
+entity/claim write: no WRITER RULE contact.
+
 ## Validation contract
 
 - Every `wiki_add` runs jsonschema validation against `schemas/entity.schema.json` (path from corpus parent dir).
@@ -349,6 +438,8 @@ Two measurements collide only when every normalized key field matches and values
 
 `tests/test_classification_gate.py` is the dedicated, hermetic classification-gate suite (synthetic mixed-classification fixture — every enum level plus a longest-glob-wins override, on top of the same `fixtures/golden_corpus/` used by `tests/test_golden_queries.py`, now carrying `fixtures/golden_corpus/manifest.json`) — extended for M11 to also assert a restricted entity never appears in `links_to` inbound, or in an `export`, at a cap below `restricted`.
 
+`tests/test_wiki_init.py` (M11) is the dedicated wiki-layer suite, run against a **tempdir copy** of `fixtures/golden_corpus/` (never mutates the committed fixture): idempotency (byte-compare modulo `generated_at`), prohibited-fields absence, no evidence-quote leakage, required frontmatter fields, `links_in` correctness, classification-cap enforcement on page generation, `--kinds`-scoped `--rebuild`, all four `wiki_audit` lints (synthetic inline fixtures), `render_proposals` section coverage, and `freshness_policy` boundary cases.
+
 ## File layout (final, post-/simplify)
 
 ```
@@ -360,7 +451,9 @@ agent-skills/entitystore/
     ├── cb_mcp.py             # FastMCP local-stdio server wrapping engine
     ├── cb_embed.py           # semantic resolver (Mistral / OpenAI + cache)
     ├── cb_mcp_smoke.py       # live JSON-RPC smoke test (init + 8 tools)
-    └── validate_corpus.py    # JSON Schema validator (schema-injection seam)
+    ├── validate_corpus.py    # JSON Schema validator (schema-injection seam)
+    ├── wiki_init.py          # M11: entity-page seeder -> corpora/<id>/wiki/<slug>.md
+    └── freshness_policy.py   # M11: computed-on-read freshness (last_verified_at, per-kind half-life)
 ```
 
 CE's markdown engine (`wiki/`, `mcp_server.py`, `pack_context*.py`, `embed_resolve.py`, `mmr.py` — ~3000 LOC) deleted in the /simplify pass. Git keeps the history.
