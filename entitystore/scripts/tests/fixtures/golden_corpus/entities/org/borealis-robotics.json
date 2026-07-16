@@ -17,9 +17,6 @@
     "extraction_method": "human",
     "extractor": "golden-fixture/v1"
   },
-  "sources": [
-    "web"
-  ],
   "summary": "Fictional autonomous-sensing firm; synthetic fixture competitor org for golden-query retrieval tests.",
   "topics": [
     "fixture",

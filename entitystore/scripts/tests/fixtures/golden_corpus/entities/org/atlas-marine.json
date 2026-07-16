@@ -18,9 +18,6 @@
     "extraction_method": "human",
     "extractor": "golden-fixture/v1"
   },
-  "sources": [
-    "web"
-  ],
   "summary": "Fictional marine-robotics firm; synthetic fixture partner org for golden-query retrieval tests.",
   "topics": [
     "fixture",
