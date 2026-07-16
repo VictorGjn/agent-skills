@@ -24,12 +24,14 @@ Run: python -m pytest entitystore/scripts/tests/test_classification_gate.py -v
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent
@@ -129,6 +131,104 @@ class TestClassificationCapEnv(unittest.TestCase):
     def test_garbage_value_fails_closed_to_public(self):
         os.environ["CB_CLASSIFICATION_CAP"] = "not-a-real-level"
         self.assertEqual(ce._classification_cap(), "public")
+
+
+class TestRequestCapContextVar(unittest.TestCase):
+    """M12 seam: request_cap() ContextVar override on top of the M7 env gate.
+
+    Unit-level isolation only — necessary but NOT sufficient for the real
+    propagation risk. A threadpool-dispatching FastMCP server could pass
+    every test in this class and still leak one caller's cap into another
+    concurrent request at dispatch time if middleware wires request_cap()
+    incorrectly; that end-to-end middleware->contextvar->handler proof
+    belongs to the served-mode task's transport tests, not here.
+    """
+
+    def setUp(self):
+        self._prev = os.environ.get("CB_CLASSIFICATION_CAP")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        else:
+            os.environ["CB_CLASSIFICATION_CAP"] = self._prev
+
+    def test_override_beats_env(self):
+        os.environ["CB_CLASSIFICATION_CAP"] = "restricted"
+        with ce.request_cap("public"):
+            self.assertEqual(ce._classification_cap(), "public")
+
+    def test_reset_restores_env_backed_value_on_exit(self):
+        os.environ["CB_CLASSIFICATION_CAP"] = "internal"
+        with ce.request_cap("restricted"):
+            self.assertEqual(ce._classification_cap(), "restricted")
+        self.assertEqual(ce._classification_cap(), "internal")
+
+    def test_reset_restores_unset_env_on_exit(self):
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        with ce.request_cap("confidential"):
+            self.assertEqual(ce._classification_cap(), "confidential")
+        self.assertEqual(ce._classification_cap(), "restricted")
+
+    def test_unset_override_falls_through_to_env_byte_identical(self):
+        # No `with request_cap(...)` active anywhere -> identical to pre-M12
+        # env-only behavior, for both the "unset env" and "set env" cases.
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        self.assertEqual(ce._classification_cap(), "restricted")
+        os.environ["CB_CLASSIFICATION_CAP"] = "public"
+        self.assertEqual(ce._classification_cap(), "public")
+
+    def test_unrecognized_override_fails_closed_to_public_like_env(self):
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        with ce.request_cap("not-a-real-level"):
+            self.assertEqual(ce._classification_cap(), "public")
+
+    def test_nested_overrides_restore_the_outer_value(self):
+        with ce.request_cap("internal"):
+            with ce.request_cap("public"):
+                self.assertEqual(ce._classification_cap(), "public")
+            self.assertEqual(ce._classification_cap(), "internal")
+
+    def test_override_isolated_per_thread(self):
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        results: dict[str, str] = {}
+        barrier = threading.Barrier(2, timeout=5)
+
+        def worker(level: str, key: str) -> None:
+            with ce.request_cap(level):
+                barrier.wait()  # force both threads to hold their override concurrently
+                results[key] = ce._classification_cap()
+
+        t1 = threading.Thread(target=worker, args=("public", "t1"))
+        t2 = threading.Thread(target=worker, args=("confidential", "t2"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(results["t1"], "public")
+        self.assertEqual(results["t2"], "confidential")
+        # Main thread's context was never touched by either worker thread.
+        self.assertEqual(ce._classification_cap(), "restricted")
+
+    def test_override_isolated_per_asyncio_task(self):
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
+
+        async def worker(level: str) -> str:
+            with ce.request_cap(level):
+                await asyncio.sleep(0)  # yield control while override is held
+                return ce._classification_cap()
+
+        async def main() -> tuple[str, str, str]:
+            t1 = asyncio.create_task(worker("public"))
+            t2 = asyncio.create_task(worker("internal"))
+            r1, r2 = await asyncio.gather(t1, t2)
+            return r1, r2, ce._classification_cap()
+
+        cap1, cap2, cap_after = asyncio.run(main())
+        self.assertEqual(cap1, "public")
+        self.assertEqual(cap2, "internal")
+        self.assertEqual(cap_after, "restricted")
 
 
 class TestClassificationGateEndToEnd(unittest.TestCase):
