@@ -20,6 +20,8 @@ company-brain/scratch/promote_gate.py.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import fnmatch
 import json
 import os
@@ -228,6 +230,17 @@ def _flatten_claims(entities: dict[str, dict]) -> list[dict]:
 CLASSIFICATION_LEVELS = ("public", "internal", "confidential", "restricted")
 _CLASSIFICATION_RANK = {c: i for i, c in enumerate(CLASSIFICATION_LEVELS)}
 
+# M12 seam: per-request override of the caller cap, for a served MCP process
+# that must vary the cap per connection instead of per process. ContextVar
+# (not a plain module global) so it is isolated per thread AND per asyncio
+# Task — a threadpool-dispatching server can't leak one caller's cap into a
+# concurrent request. Default None = "no override, fall through to env" so
+# every existing single-process/env-only flow is byte-identical. Set ONLY via
+# the request_cap() context manager below — see _classification_cap()'s
+# docstring for why this is never a tool/function parameter.
+_REQUEST_CAP: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_REQUEST_CAP", default=None)
+
 
 def _classification_rank(c: str | None) -> int:
     """Unknown/missing classification ranks as 'restricted' (fail-closed)."""
@@ -277,20 +290,52 @@ def classify_entity(entity: dict, manifest: dict) -> str:
 
 
 def _classification_cap() -> str:
-    """Caller cap: CB_CLASSIFICATION_CAP env var ONLY — server-instance scoped,
-    NEVER a function/tool parameter (a parameter would let callers self-elevate
-    past the process's configured ceiling; Bearer/role→cap binding is M12, not
-    this).
+    """Caller cap: CB_CLASSIFICATION_CAP env var, or the request_cap()
+    ContextVar override when one is active — NEVER a function/tool parameter
+    (a parameter would let callers self-elevate past the process's
+    configured ceiling). The ContextVar is the M12 Bearer/role→cap binding
+    seam: server middleware resolves a token to a role/cap (cb_auth.py) and
+    holds `with request_cap(cap):` for the lifetime of one request — no MCP
+    tool ever sets it, and no MCP tool parameter can reach it.
+
+    Precedence: request_cap() override (if set) > CB_CLASSIFICATION_CAP env
+    var > 'restricted' (full read, unset-env fallback). When no override is
+    active this is byte-identical to the pre-M12 env-only behavior.
 
     Unset = 'restricted' (full read) — backward compatible with every pre-M7
-    local flow. A set-but-unrecognized value fails closed to 'public' (most
-    restrictive) rather than silently granting full read on a typo.
+    local flow. A set-but-unrecognized value (env OR override) fails closed
+    to 'public' (most restrictive) rather than silently granting full read
+    on a typo.
     """
-    raw = os.environ.get("CB_CLASSIFICATION_CAP")
+    override = _REQUEST_CAP.get()
+    raw = override if override is not None else os.environ.get("CB_CLASSIFICATION_CAP")
     if raw is None:
         return "restricted"
     raw = raw.strip().lower()
     return raw if raw in _CLASSIFICATION_RANK else "public"
+
+
+@contextlib.contextmanager
+def request_cap(level: str):
+    """Context manager: override the caller cap for the current thread/async
+    Task only, for the duration of the `with` block. This is the ONLY
+    supported way to set a per-request cap — never a tool/function
+    parameter, never a bare module-global assignment (that would leak across
+    concurrent requests; see _REQUEST_CAP's ContextVar comment).
+
+    Intended caller: served-mode (MCP) transport middleware, after resolving
+    a Bearer token to a role/cap via cb_auth.verify_token(). Not intended for
+    tool implementations or anything reachable from a tool parameter.
+
+    `level` is passed through _classification_cap()'s normal
+    normalize-and-fail-closed-to-'public' handling — an unrecognized level
+    here fails closed exactly like an unrecognized CB_CLASSIFICATION_CAP.
+    """
+    token = _REQUEST_CAP.set(level)
+    try:
+        yield
+    finally:
+        _REQUEST_CAP.reset(token)
 
 
 def _filter_by_classification(
