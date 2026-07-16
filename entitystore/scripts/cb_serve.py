@@ -58,7 +58,6 @@ version string, never corpus data, so there is nothing for the "no data on
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
