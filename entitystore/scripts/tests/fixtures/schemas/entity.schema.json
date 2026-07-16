@@ -86,6 +86,18 @@
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},
 
+    "last_verified_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "v7: when this entity was last verified (fact-checked or re-affirmed by an enricher). Null/absent for pre-rule entities authored before this field existed. Used as input to freshness_policy.compute_freshness() in wiki_ask filtering. Writers: enrich-pass ONLY (enrichers build all entities; scribes write RAW only). PROHIBITED: ever storing a freshness score or trust value — computation is read-time only."
+    },
+
+    "sources": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "v7/M11-wiki-doc-layer (LIMITATION — see SURFACE.md): array of source type strings (e.g. ['web', 'code']) intended for multi-source freshness scoring. Present ONLY in entities extracted from wiki-doc-layer markdown frontmatter. Real corpus entities (sourced from system-of-record integrations) do NOT carry this field; they will always be empty list on read, so compute_freshness_multi_source is unreachable in production today. When this field is populated, wiki_ask freshness filtering uses it as input to per-source half-life decisions. See company-brain/ARCHITECTURE.md §M11 and freshness_policy.py."
+    },
+
     "identity_assertions": {
       "type": "array",
       "description": "v6: revisable, evidence-bound assertions that an external source record refers to THIS entity. Identity is a thresholded inference with receipts, never bedrock. The canonical side is the entity's own id; only the source side is named here. Retract/supersede to un-merge when evidence or thresholds change. Writers: enrich-pass ONLY (enrichers build all entities; scribes write RAW only and never write identity_assertions — see CLAUDE.md 'THE WRITER RULE'). This includes exact-key materialization from a system of record. PROHIBITED: deleting an assertion to un-merge — set status=retracted with a reason so the audit trail survives.",
