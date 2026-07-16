@@ -86,6 +86,17 @@ class TestGoldenQueriesSynthetic(unittest.TestCase):
         self.assertGreaterEqual(author / len(self.cases), 0.5,
                                  "at least half the cases should be author-ground-truth")
 
+    def test_fixture_schema_validates(self):
+        """Validate that the golden corpus conforms to the vendored schema.
+        This catches schema drift (e.g. fixtures gaining fields without schema update)."""
+        sys.path.insert(0, str(FIXTURES))
+        import build_golden_corpus  # noqa: E402
+        # Regenerate corpus to ensure seed is up-to-date, then validate.
+        entities = build_golden_corpus.build(write=False)
+        errors = build_golden_corpus.validate(entities)
+        self.assertEqual(errors, [],
+                         f"fixture schema validation failed: {errors}")
+
     def test_wiki_ask_cases(self):
         for case in self.cases:
             if case["endpoint"] != "wiki_ask":
@@ -121,6 +132,10 @@ class TestGoldenQueriesSynthetic(unittest.TestCase):
                 if "error_contains" in expect:
                     self.assertIn(expect["error_contains"], result["stats"].get("error", ""),
                                   f"{case['id']}: expected error substring not found")
+                if "min_dropped_by_freshness" in expect:
+                    dropped = result["stats"].get("dropped_by_freshness", 0)
+                    self.assertGreaterEqual(dropped, expect["min_dropped_by_freshness"],
+                                             f"{case['id']}: too few entities dropped by freshness")
 
     def test_wiki_pack_cases(self):
         for case in self.cases:

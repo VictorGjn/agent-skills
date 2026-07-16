@@ -120,7 +120,7 @@ classification gate. Adding a raw-file resource would bypass it.
 
 ## Endpoints
 
-### 1. `wiki_ask(query, kind?, topics?, depth?, budget?, mode?, top?) → JSON`
+### 1. `wiki_ask(query, kind?, topics?, depth?, budget?, mode?, top?, freshness_floor?, require_verified?) → JSON`
 
 Read entities matching the query; return matched entities + their wiki_link neighborhood (depth-bounded). **Refuses dump-all** when query + kind + topics are all empty.
 
@@ -129,11 +129,13 @@ Read entities matching the query; return matched entities + their wiki_link neig
 {
   "query": "route optimization",
   "kind": "concept",                 // optional: concept|org|person|post|vessel|navigation|product
-  "topics": ["commercial"],          // optional intersection filter
+  "topics": ["commercial"],          // optional intersection filter (scope)
   "depth": 1,                         // wiki_link neighborhood expansion
   "budget": 8000,                     // soft char cap (~ tokens × 4); evicts LOWEST-scored first
   "mode": "hybrid",                   // "substring" | "semantic" | "hybrid" (default)
-  "top": 30                           // max matched entities pre-truncation
+  "top": 30,                          // max matched entities pre-truncation
+  "freshness_floor": 0.5,             // optional: post-cap, pre-budget freshness filter [0.0, 1.0]
+  "require_verified": false           // optional: when True, drop pre-rule entities if freshness_floor set
 }
 ```
 
@@ -143,10 +145,19 @@ Read entities matching the query; return matched entities + their wiki_link neig
   "matched": [ { "id": "concept:opportunity-route-optimization", ...full entity... } ],
   "neighbors": [ { "id": "org:kcc", "kind": "org", "names": [...], "summary": "..." } ],
   "stats": { "matched": N, "neighbors": M, "truncated": false,
-             "mode": "hybrid", "semantic_used": true,
+             "mode": "hybrid", "semantic_used": true, "dropped_by_freshness": K,
              "withheld_count": 0, "effective_cap": "restricted" }
 }
 ```
+
+**Scope** (`kind` / `topics`): Pre-filter by entity kind or topic intersection. Filters happen before scoring.
+
+**Freshness floor** (`freshness_floor` / `require_verified`): Post-cap, pre-budget scoring filter. When `freshness_floor` is set to a value in [0.0, 1.0]:
+- Matched entities with `freshness_policy.compute_freshness(last_verified_at, kind)["score"] >= freshness_floor` are kept — the same kind-keyed decay curve `wiki_audit`'s freshness lint uses (single source of truth, see `freshness_policy.py`).
+- **Pre-rule / invalid-timestamp entities** (`score=None` — no `last_verified_at`, or a malformed one) **PASS the floor by default** (backward-compat) unless `require_verified=True` is set, which forces them to be dropped.
+- Verified reality (M11 audits): 739/783 corpus entities are pre-rule, so a naive `freshness_floor` without `require_verified=False` (default) would drop most/all matched entities.
+- `dropped_by_freshness` count is included in stats when the floor is set, showing how many entities were filtered out by freshness alone.
+- `schema v7` (this PR) drops the `sources` field from golden-corpus fixtures — freshness is single-source, keyed by entity `kind` (see `freshness_policy.HALF_LIVES`), not per-source-type.
 
 `mode="hybrid"` takes `max(substring_score, cosine_score)` per entity + a co-occurrence bonus. Falls back to substring if no embedding provider is configured. Neighbors return as `{id, kind, names, summary}` only.
 

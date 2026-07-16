@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/syrocolab/company-brain/schemas/entity.schema.json",
   "title": "Entity",
-  "description": "One semantic-layer entity. Lives at corpora/<corpus_id>/entities/<kind>/<slug>.json. Implements the Anabasis Entity ABC (spec/entity.md). Concept-first, evidence-bound, author-agnostic. v2 (additive): optional claims[] (charter-structure-aware structured facts), vessel kind + vessel{} particulars, client{} commercial overlay on org, org.charter_role. v4 (additive): navigation kind + navigation{} voyage anchor (single captain_in_charge edge; charterer voyage-scoped), vessel.manager/navigations, provenance.extraction_method=system. v5 (additive): vessel.operators[] (fleet-alert operator-follow edge from HubSpot 'Ground user' contacts) + vessel.live_status/contract_status (observed-but-volatile integration fields, captured not frozen). v6 (additive): optional top-level identity_assertions[] — revisable, evidence-bound source-record links; echo_of marks non-independent mirrors (e.g. a HubSpot nav echoing the back-office one). All v1 entities remain valid.",
+  "description": "One semantic-layer entity. Lives at corpora/<corpus_id>/entities/<kind>/<slug>.json. Implements the Anabasis Entity ABC (spec/entity.md). Concept-first, evidence-bound, author-agnostic. v2 (additive): optional claims[] (charter-structure-aware structured facts), vessel kind + vessel{} particulars, client{} commercial overlay on org, org.charter_role. v4 (additive): navigation kind + navigation{} voyage anchor (single captain_in_charge edge; charterer voyage-scoped), vessel.manager/navigations, provenance.extraction_method=system. v5 (additive): vessel.operators[] (fleet-alert operator-follow edge from HubSpot 'Ground user' contacts) + vessel.live_status/contract_status (observed-but-volatile integration fields, captured not frozen). v6 (additive): optional top-level identity_assertions[] — revisable, evidence-bound source-record links; echo_of marks non-independent mirrors (e.g. a HubSpot nav echoing the back-office one). v7 (additive): optional last_verified_at (ISO datetime when this entity was last fact-checked or re-affirmed by an enricher); used as input to freshness_policy.compute_freshness() in wiki_ask filtering. Writers: enrich-pass ONLY (enrichers build all entities; scribes write RAW only). All v1 entities remain valid.",
   "type": "object",
   "required": ["id", "kind", "names", "summary", "provenance", "created_at", "updated_at"],
   "properties": {
@@ -85,6 +85,13 @@
     },
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},
+
+    "last_verified_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "v7: when this entity was last verified (fact-checked or re-affirmed by an enricher). Null/absent for pre-rule entities authored before this field existed. Used as input to freshness_policy.compute_freshness() in wiki_ask filtering. Writers: enrich-pass ONLY (enrichers build all entities; scribes write RAW only). PROHIBITED: ever storing a freshness score or trust value — computation is read-time only."
+    },
+
 
     "identity_assertions": {
       "type": "array",
