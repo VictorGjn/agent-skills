@@ -2,7 +2,7 @@
 """
 companybrain MCP server — local stdio.
 
-Wraps cb_engine.py's six JSON-native endpoints as MCP tools so an MCP-aware
+Wraps cb_engine.py's eight JSON-native endpoints as MCP tools so an MCP-aware
 client (Claude Code) can read/write/pack company-brain entities through a
 typed protocol instead of touching the JSON files directly.
 
@@ -47,13 +47,15 @@ mcp = FastMCP(
     "companybrain",
     instructions=(
         "JSON-native EntityStore over company-brain entities. "
-        "Six endpoints — wiki_ask (substring | semantic | hybrid search + "
+        "Eight endpoints — wiki_ask (substring | semantic | hybrid search + "
         "wiki_link neighborhood expansion), wiki_pack (depth-banded answer "
         "bundle within a token budget), wiki_audit (charter-aware "
         "contradictions + dead_links + freshness + orphans + schema), "
         "wiki_add (validate + write + optional git commit-through), stats "
         "(counts + freshness + embedding status), resolve (slug/alias -> "
-        "canonical id). All responses are JSON-encoded strings."
+        "canonical id), links_to (reverse wiki_link lookup), export "
+        "(one-way boundary export: obsidian | jsonld | json). All responses "
+        "are JSON-encoded strings."
     ),
 )
 
@@ -232,8 +234,64 @@ def resolve(
     return _response(cb_engine.resolve(query, corpus_dir=corpus_dir, top_k=top_k))
 
 
+@mcp.tool()
+def links_to(
+    entity_id: str,
+    corpus_dir: str | None = None,
+) -> str:
+    """Reverse-lookup: entities whose wiki_links reference `entity_id`.
+
+    Args:
+        entity_id: canonical entity id to look up inbound references for.
+        corpus_dir: override CB_CORPUS_DIR for this call.
+
+    Returns:
+        JSON: {id, exists, inbound: [{id, kind, names, summary}], count,
+        withheld_count, effective_cap}. Cap-filters both the target entity
+        and every inbound referrer — an entity withheld by the cap reports
+        exists=false (indistinguishable from a nonexistent id) and never
+        appears as an inbound referrer, mirroring how wiki_ask withholds
+        neighbors (see SURFACE.md "Classification cap").
+    """
+    return _response(cb_engine.links_to(entity_id, corpus_dir=corpus_dir))
+
+
+@mcp.tool()
+def export(
+    format: str = "obsidian",
+    kind: str | None = None,
+    out_dir: str | None = None,
+    corpus_dir: str | None = None,
+) -> str:
+    """One-way boundary export of the corpus — no re-import, no round-trip
+    merge system (see SURFACE.md "wiki.export"). wiki_add remains the only
+    write path into the store.
+
+    Args:
+        format: "obsidian" (one Markdown note per entity with [[wiki-links]]
+                intact, at <out_dir>/<kind>/<slug>.md) | "jsonld" (flat
+                @graph of entities at <out_dir>/export.jsonld) | "json"
+                (flat array of full entity payloads at <out_dir>/export.json).
+        kind: optional filter to a single entity kind.
+        out_dir: destination directory. Defaults to
+                 <corpus_dir>/.cb_export/<format>/.
+        corpus_dir: override CB_CORPUS_DIR.
+
+    Returns:
+        JSON: {ok, format, out_dir, entity_count, files_written,
+        withheld_count, effective_cap} on success, or {ok: false,
+        error_kind: "ValidationError", message} for an unknown format. An
+        entity above the classification cap is never written to an export
+        file, in any format.
+    """
+    return _response(cb_engine.export(
+        corpus_dir=corpus_dir, format=format, kind=kind, out_dir=out_dir,
+    ))
+
+
 def _list_tools() -> list[str]:
-    return ["wiki_ask", "wiki_pack", "wiki_audit", "wiki_add", "stats", "resolve"]
+    return ["wiki_ask", "wiki_pack", "wiki_audit", "wiki_add", "stats", "resolve",
+            "links_to", "export"]
 
 
 if __name__ == "__main__":
