@@ -34,6 +34,60 @@ company-brain/
 - Engine reads/writes JSON files directly.
 - One `corpus_id` per MCP instance (env var `CB_CORPUS_DIR`, default `syroco-commercial`).
 
+## Classification cap (M7)
+
+Every read endpoint (`wiki_ask`, `wiki_pack`, `wiki_audit`, `stats`, `resolve`) drops
+entities above the caller's classification cap **before** scoring, neighbor
+expansion, depth-banding, or budget accounting — a withheld entity never
+influences ranking and never leaks through a `wiki_link` neighbor.
+
+**Ordered enum** (matches `company-brain/schemas/manifest.schema.json`'s
+`data_classification` enum and scribe-check CRITERIA C1):
+
+```
+public < internal < confidential < restricted
+```
+
+**Effective classification of an entity** (first match wins):
+1. Longest/most-specific matching pattern in the corpus manifest's OPTIONAL
+   `classification_map` — `{"<glob relative to corpus root>": "<level>"}`,
+   e.g. `"entities/some-kind/**": "restricted"`. Glob matching is
+   `fnmatch`-style (no distinction between `*` and `**` — both cross path
+   separators); the longest pattern STRING wins ties, not path-segment depth.
+2. Else the manifest's corpus-level `data_classification`.
+3. Else `'restricted'` — **fail-closed** for a corpus that declares neither.
+
+**Caller cap**: `CB_CLASSIFICATION_CAP` env var **only** — server-instance
+scoped, **never a tool/function parameter**. A parameter would let a caller
+self-elevate past the process's configured ceiling, which defeats the point
+of a server-side gate.
+- Unset → `'restricted'` (full read) — every pre-M7 local flow keeps working
+  unmodified.
+- Set to an unrecognized value → fails closed to `'public'` (most
+  restrictive), not to full read, so a typo can't silently grant everything.
+
+**Transparency block**: every read endpoint's response carries
+`withheld_count` (entities dropped by the cap) and `effective_cap` (the cap
+actually applied) — `wiki_ask`/`wiki_pack` nest these inside `stats`;
+`stats`/`resolve`/`wiki_audit` carry them top-level. Consumers see coverage
+loss instead of a silently truncated result.
+
+**What M7 ships vs what M12 adds**: M7 is the env-cap read gate described
+above — one process-wide ceiling, set by whoever launches the MCP server,
+with no notion of caller identity. **M12 adds Bearer/role→cap binding**
+(per-caller identity resolving to a cap, likely via an auth header the
+server maps to a `CB_CLASSIFICATION_CAP`-equivalent at request time) — that
+is explicitly NOT built here. M7 does not half-build auth: there is no
+token, header, or role concept anywhere in this file's code, only the env
+var and the enum it's compared against.
+
+**MCP read surface**: the six `@mcp.tool()` functions in `cb_mcp.py` are the
+**entire** MCP read surface. No `corpora://` (or any other) MCP *resource*
+exists, and none should be added — raw `entities/*.json` / `manifest.json`
+are never served directly over MCP; every read goes through an endpoint
+above, which means every read goes through the classification gate. Adding
+a raw-file resource would bypass it.
+
 ## Endpoints
 
 ### 1. `wiki_ask(query, kind?, topics?, depth?, budget?, mode?, top?) → JSON`
@@ -59,7 +113,8 @@ Read entities matching the query; return matched entities + their wiki_link neig
   "matched": [ { "id": "concept:opportunity-route-optimization", ...full entity... } ],
   "neighbors": [ { "id": "org:kcc", "kind": "org", "names": [...], "summary": "..." } ],
   "stats": { "matched": N, "neighbors": M, "truncated": false,
-             "mode": "hybrid", "semantic_used": true }
+             "mode": "hybrid", "semantic_used": true,
+             "withheld_count": 0, "effective_cap": "restricted" }
 }
 ```
 
@@ -80,7 +135,9 @@ Run the charter-aware auditor on the corpus. Five checks:
 {
   "corpus": "syroco-commercial",
   "checked_at": "2026-05-28T...",
-  "entity_count": 248,
+  "entity_count_total": 248,
+  "entity_count_audited": 248,
+  "withheld_count": 0, "effective_cap": "restricted",
   "contradictions": [ { "key": [...], "values": [{ "value": 16, "source": "..." }, { "value": 12, "source": "..." }] } ],
   "dead_links": [ { "from": "concept:foo", "to": "org:nonexistent" } ],
   "freshness_expired": [ { "id": "post:bar", "updated_at": "...", "days_stale": 120 } ],
@@ -89,6 +146,8 @@ Run the charter-aware auditor on the corpus. Five checks:
   "summary": { "contradictions": N, "dead_links": M, ... }
 }
 ```
+
+`entity_count_total`/`entity_count_audited` and every check below them (`contradictions`, `dead_links`, `orphans`, ...) are already scoped to the classification cap — an entity above the cap is dropped before ANY check runs, so it can't appear in `orphans`, can't be the `to` of a live `dead_links` entry (a link to it now reads as dead — that's the correct, cap-consistent read: it doesn't exist for this caller), and can't contribute a claim to `contradictions`.
 
 ### 3. `wiki_add(entity, commit?) → JSON`
 
@@ -137,7 +196,8 @@ Depth-banded answer bundle within a token budget. Top hits stay Full; the long t
   ],
   "stats": { "items": 43, "dropped": 0,
              "depth_breakdown": { "Full": 5, "Summary": 2, "Mention": 36 },
-             "mode": "hybrid", "semantic_used": true }
+             "mode": "hybrid", "semantic_used": true,
+             "withheld_count": 0, "effective_cap": "restricted" }
 }
 ```
 
@@ -158,7 +218,8 @@ Counts + breakdowns + freshness percentiles + **embedding-provider status**.
   "schema_version": 5,
   "embeddings": { "available": true, "provider": "mistral",
                   "model": "mistral-embed", "dims": 1024,
-                  "cached_entities": 248, "entities_total": 248 }
+                  "cached_entities": 248, "entities_total": 248 },
+  "withheld_count": 0, "effective_cap": "restricted"
 }
 ```
 
@@ -173,7 +234,8 @@ Resolve a slug / alias / partial name to a canonical entity URI.
 {
   "matches": [
     { "id": "org:kcc", "kind": "org", "names": ["Klaveness Combination Carriers ASA", "KCC", "Klaveness"], "score": 1.0 }
-  ]
+  ],
+  "withheld_count": 0, "effective_cap": "restricted"
 }
 ```
 
@@ -227,6 +289,9 @@ Two measurements collide only when every normalized key field matches and values
 - `stats()` returns counts matching `find corpora/syroco-commercial/entities -name "*.json" | wc -l`.
 - `resolve("Klaveness")` returns `org:kcc` as top match.
 - `wiki_add(synthetic_entity)` round-trips through validator (synthetic gets cleaned up).
+- Classification cap (M7): `classify_entity()` precedence checked as a pure function; if the live corpus's `data_classification` is above `'public'`, `CB_CLASSIFICATION_CAP=public` is set temporarily and `stats`/`wiki_ask`/`resolve`/`wiki_audit` are asserted to withhold every entity.
+
+`tests/test_classification_gate.py` is the dedicated, hermetic classification-gate suite (synthetic mixed-classification fixture — every enum level plus a longest-glob-wins override, on top of the same `fixtures/golden_corpus/` used by `tests/test_golden_queries.py`, now carrying `fixtures/golden_corpus/manifest.json`).
 
 ## File layout (final, post-/simplify)
 

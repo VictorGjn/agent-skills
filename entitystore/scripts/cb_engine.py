@@ -20,6 +20,7 @@ company-brain/scratch/promote_gate.py.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import pathlib
@@ -214,6 +215,104 @@ def _flatten_claims(entities: dict[str, dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────
+# Classification cap (M7) — env-scoped read gate, M12-ready seam
+# ──────────────────────────────────────────────────────────────────
+#
+# Order matches company-brain/schemas/manifest.schema.json's data_classification
+# enum and scribe-check CRITERIA C1. Reused for two things: the classification
+# OF an entity, and the CAP a caller reads at — same scale, same rank compare.
+CLASSIFICATION_LEVELS = ("public", "internal", "confidential", "restricted")
+_CLASSIFICATION_RANK = {c: i for i, c in enumerate(CLASSIFICATION_LEVELS)}
+
+
+def _classification_rank(c: str | None) -> int:
+    """Unknown/missing classification ranks as 'restricted' (fail-closed)."""
+    return _CLASSIFICATION_RANK.get(c, _CLASSIFICATION_RANK["restricted"])
+
+
+def _load_manifest(corpus_dir: pathlib.Path) -> dict:
+    p = corpus_dir / "manifest.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _entity_relpath(entity: dict) -> str:
+    """POSIX-style path relative to corpus root ('entities/<kind>/<slug>.json'),
+    for classification_map glob matching. Mirrors _entity_path's on-disk layout
+    without its write-side safety checks — this is a read-only lookup, never a
+    filesystem operation, so a malformed id/kind just fails to match any
+    pattern (falls through to the corpus-level default) instead of raising."""
+    eid = entity.get("id") or ""
+    kind = entity.get("kind") or ""
+    slug = eid.split(":", 1)[1] if ":" in eid else eid
+    return f"entities/{kind}/{slug}.json"
+
+
+def classify_entity(entity: dict, manifest: dict) -> str:
+    """Effective classification for one entity.
+
+    Precedence: longest/most-specific matching `classification_map` glob >
+    manifest-level `data_classification` > 'restricted' (fail-closed for
+    corpora that declare neither — see SURFACE.md "Classification cap").
+    `classification_map` is OPTIONAL: {"<glob relative to corpus root>": "<level>"}.
+    """
+    cmap = manifest.get("classification_map") or {}
+    relpath = _entity_relpath(entity)
+    best_pattern = ""
+    best_class = None
+    for pattern, cls in cmap.items():
+        if len(pattern) > len(best_pattern) and fnmatch.fnmatch(relpath, pattern):
+            best_pattern, best_class = pattern, cls
+    if best_class is not None:
+        return best_class
+    return manifest.get("data_classification") or "restricted"
+
+
+def _classification_cap() -> str:
+    """Caller cap: CB_CLASSIFICATION_CAP env var ONLY — server-instance scoped,
+    NEVER a function/tool parameter (a parameter would let callers self-elevate
+    past the process's configured ceiling; Bearer/role→cap binding is M12, not
+    this).
+
+    Unset = 'restricted' (full read) — backward compatible with every pre-M7
+    local flow. A set-but-unrecognized value fails closed to 'public' (most
+    restrictive) rather than silently granting full read on a typo.
+    """
+    raw = os.environ.get("CB_CLASSIFICATION_CAP")
+    if raw is None:
+        return "restricted"
+    raw = raw.strip().lower()
+    return raw if raw in _CLASSIFICATION_RANK else "public"
+
+
+def _filter_by_classification(
+    entities: dict[str, dict], corpus_dir: pathlib.Path,
+) -> tuple[dict[str, dict], int, str]:
+    """Drop entities above the caller's classification cap. Called BEFORE
+    scoring/packing on every read endpoint so withheld entities never
+    influence ranking, neighbor expansion, or budget accounting — see
+    SURFACE.md "Classification cap".
+
+    Returns (kept, withheld_count, effective_cap).
+    """
+    effective_cap = _classification_cap()
+    cap_rank = _classification_rank(effective_cap)
+    manifest = _load_manifest(corpus_dir)
+    kept: dict[str, dict] = {}
+    withheld = 0
+    for eid, e in entities.items():
+        if _classification_rank(classify_entity(e, manifest)) <= cap_rank:
+            kept[eid] = e
+        else:
+            withheld += 1
+    return kept, withheld, effective_cap
+
+
+# ──────────────────────────────────────────────────────────────────
 # Date parsing (timezone-normalized)
 # ──────────────────────────────────────────────────────────────────
 
@@ -332,6 +431,7 @@ def wiki_ask(
     """
     cdir = _resolve_corpus(corpus_dir)
     entities = _entities if _entities is not None else load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
     q = (query or "").strip()
     q_lower = q.lower()
 
@@ -341,6 +441,7 @@ def wiki_ask(
             "matched": [], "neighbors": [],
             "stats": {"matched": 0, "neighbors": 0, "truncated": False,
                       "corpus": cdir.name,
+                      "withheld_count": withheld_count, "effective_cap": effective_cap,
                       "error": "empty query AND no kind/topics filter — refusing to dump corpus"},
         }
 
@@ -436,6 +537,8 @@ def wiki_ask(
             "corpus": cdir.name,
             "mode": mode,
             "semantic_used": semantic_used,
+            "withheld_count": withheld_count,
+            "effective_cap": effective_cap,
         },
     }
 
@@ -457,6 +560,7 @@ def wiki_audit(
 ) -> dict:
     cdir = _resolve_corpus(corpus_dir)
     all_entities = load_corpus(cdir)
+    all_entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
     total = len(all_entities)
 
     try:
@@ -558,6 +662,8 @@ def wiki_audit(
         "entity_count_total": total,
         "entity_count_audited": len(entities),
         "kinds_filter": kinds,
+        "withheld_count": withheld_count,
+        "effective_cap": effective_cap,
         "schema_loaded": schema_loaded,
         "contradictions": contradictions,
         "dead_links": dead_links,
@@ -763,7 +869,9 @@ def wiki_pack(
         return {
             "query": query, "budget": budget, "used_tokens": 0,
             "items": [], "stats": {"matched": 0, "neighbors": 0, "dropped": 0,
-                                   "mode": mode}}
+                                   "mode": mode,
+                                   "withheld_count": answer["stats"].get("withheld_count", 0),
+                                   "effective_cap": answer["stats"].get("effective_cap", "restricted")}}
 
     def total() -> int:
         return sum(it["tokens"] for it in items)
@@ -832,6 +940,8 @@ def wiki_pack(
             "depth_breakdown": dict(depth_counts),
             "mode": answer["stats"]["mode"],
             "semantic_used": answer["stats"].get("semantic_used", False),
+            "withheld_count": answer["stats"].get("withheld_count", 0),
+            "effective_cap": answer["stats"].get("effective_cap", "restricted"),
             "corpus": cdir.name,
         },
     }
@@ -845,6 +955,7 @@ def wiki_pack(
 def stats(corpus_dir: str | pathlib.Path | None = None) -> dict:
     cdir = _resolve_corpus(corpus_dir)
     entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
 
     by_kind = Counter(e.get("kind", "?") for e in entities.values())
     by_topic: Counter = Counter()
@@ -901,6 +1012,8 @@ def stats(corpus_dir: str | pathlib.Path | None = None) -> dict:
         },
         "schema_version": schema_version,
         "embeddings": embed_status,
+        "withheld_count": withheld_count,
+        "effective_cap": effective_cap,
     }
 
 
@@ -925,9 +1038,10 @@ def resolve(
     """
     cdir = _resolve_corpus(corpus_dir)
     entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(entities, cdir)
     q = (query or "").strip().lower()
     if not q:
-        return {"matches": []}
+        return {"matches": [], "withheld_count": withheld_count, "effective_cap": effective_cap}
 
     scored: list[tuple[float, dict]] = []
     for eid, e in entities.items():
@@ -958,7 +1072,8 @@ def resolve(
                 "names": e.get("names", []), "score": round(score, 3),
             }))
     scored.sort(key=lambda x: -x[0])
-    return {"matches": [m for _, m in scored[:top_k]]}
+    return {"matches": [m for _, m in scored[:top_k]],
+            "withheld_count": withheld_count, "effective_cap": effective_cap}
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1001,8 +1116,10 @@ def _self_test_in_tempdir() -> int:
         # explicitly to bypass the layout-walking heuristic.
         prev_corpus = os.environ.get("CB_CORPUS_DIR")
         prev_schema = os.environ.get("CB_SCHEMA_PATH")
+        prev_cap = os.environ.get("CB_CLASSIFICATION_CAP")
         os.environ["CB_CORPUS_DIR"] = str(test_corpus)
         os.environ["CB_SCHEMA_PATH"] = str(test_schemas / "entity.schema.json")
+        os.environ.pop("CB_CLASSIFICATION_CAP", None)
         _SCHEMA_CACHE.clear()
 
         print(f"== Self-test in {test_corpus} ==\n")
@@ -1171,6 +1288,85 @@ def _self_test_in_tempdir() -> int:
             check("_entity_path: rejects unsafe kind",
                   saw_kind_error)
 
+            # 7. Classification cap (M7) — env-scoped read gate. classify_entity()
+            # is a pure function, checked directly first; then the live-corpus
+            # checks confirm the cap actually withholds entities end-to-end.
+            check("classify_entity: no manifest classification anywhere -> "
+                  "fails closed to 'restricted'",
+                  classify_entity({"id": "concept:x", "kind": "concept"}, {})
+                  == "restricted")
+            check("classify_entity: corpus-level data_classification is the fallback",
+                  classify_entity({"id": "concept:x", "kind": "concept"},
+                                  {"data_classification": "internal"}) == "internal")
+            check("classify_entity: classification_map overrides the corpus-level default",
+                  classify_entity(
+                      {"id": "concept:x", "kind": "concept"},
+                      {"data_classification": "internal",
+                       "classification_map": {"entities/concept/**": "restricted"}},
+                  ) == "restricted")
+            check("classify_entity: longest/most-specific glob wins over a broader one",
+                  classify_entity(
+                      {"id": "concept:x", "kind": "concept"},
+                      {"data_classification": "internal",
+                       "classification_map": {
+                           "entities/concept/**": "public",
+                           "entities/concept/x.json": "restricted",
+                       }},
+                  ) == "restricted")
+            check("_classification_cap: unset env -> 'restricted' (full read, backward-compat)",
+                  _classification_cap() == "restricted")
+
+            manifest_path = test_corpus / "manifest.json"
+            corpus_class = None
+            if manifest_path.exists():
+                try:
+                    corpus_class = json.loads(
+                        manifest_path.read_text(encoding="utf-8")).get("data_classification")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            print(f"-- classification: live corpus data_classification={corpus_class!r}")
+
+            s_default = stats()
+            check("classification: unset cap withholds nothing on the live corpus",
+                  s_default.get("effective_cap") == "restricted"
+                  and s_default.get("withheld_count") == 0)
+
+            if corpus_class and _classification_rank(corpus_class) > 0:
+                os.environ["CB_CLASSIFICATION_CAP"] = "public"
+                try:
+                    s_capped = stats()
+                    print(f"-- stats() under CB_CLASSIFICATION_CAP=public: "
+                          f"entity_count={s_capped['entity_count']}, "
+                          f"withheld_count={s_capped.get('withheld_count')}")
+                    check("classification: capping below the corpus-level "
+                          "classification withholds every entity",
+                          s_capped["entity_count"] == 0
+                          and s_capped.get("withheld_count") == s_default["entity_count"]
+                          and s_capped.get("effective_cap") == "public")
+
+                    a_capped = wiki_ask("route optimization", depth=1, budget=4000,
+                                        mode="substring")
+                    check("classification: wiki_ask honors the cap too "
+                          "(0 matched, withheld_count > 0 under public)",
+                          a_capped["stats"]["matched"] == 0
+                          and a_capped["stats"].get("withheld_count", 0) > 0)
+
+                    r_capped = resolve("route")
+                    check("classification: resolve honors the cap too (no matches)",
+                          r_capped["matches"] == [] and r_capped.get("withheld_count", 0) > 0)
+
+                    audit_capped = wiki_audit()
+                    check("classification: wiki_audit honors the cap too "
+                          "(0 audited, withheld_count > 0)",
+                          audit_capped["entity_count_audited"] == 0
+                          and audit_capped.get("withheld_count", 0) > 0)
+                finally:
+                    os.environ.pop("CB_CLASSIFICATION_CAP", None)
+            else:
+                print("-- classification: live corpus has no restrictive "
+                      "data_classification; live cap-enforcement smoke check skipped "
+                      "(full coverage lives in tests/test_classification_gate.py)")
+
         finally:
             # Restore env so caller's state is intact.
             if prev_corpus is None:
@@ -1181,6 +1377,10 @@ def _self_test_in_tempdir() -> int:
                 os.environ.pop("CB_SCHEMA_PATH", None)
             else:
                 os.environ["CB_SCHEMA_PATH"] = prev_schema
+            if prev_cap is None:
+                os.environ.pop("CB_CLASSIFICATION_CAP", None)
+            else:
+                os.environ["CB_CLASSIFICATION_CAP"] = prev_cap
             _SCHEMA_CACHE.clear()
 
     print(f"\n{'=' * 50}")
