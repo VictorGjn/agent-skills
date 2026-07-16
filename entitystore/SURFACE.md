@@ -80,12 +80,36 @@ loss instead of a silently truncated result.
 
 **What M7 ships vs what M12 adds**: M7 is the env-cap read gate described
 above — one process-wide ceiling, set by whoever launches the MCP server,
-with no notion of caller identity. **M12 adds Bearer/role→cap binding**
-(per-caller identity resolving to a cap, likely via an auth header the
-server maps to a `CB_CLASSIFICATION_CAP`-equivalent at request time) — that
-is explicitly NOT built here. M7 does not half-build auth: there is no
-token, header, or role concept anywhere in this file's code, only the env
-var and the enum it's compared against.
+with no notion of caller identity. **M12 adds Bearer/role→cap binding**, in
+two engine-only pieces (no HTTP transport yet — that's the served-mode
+task):
+
+1. `cb_engine._classification_cap()` now has a second input ahead of the env
+   var: a `contextvars.ContextVar` (`_REQUEST_CAP`), set only through the
+   `cb_engine.request_cap(level)` context manager. When no override is
+   active, resolution is byte-identical to M7 (env var, then `'restricted'`
+   fallback). The override is isolated per thread and per asyncio Task, so a
+   threadpool- or Task-dispatching server can hold a different cap per
+   concurrent request without one caller leaking into another's read. It is
+   **still never a tool/function parameter** — `request_cap()` is for server
+   middleware only, never for a tool implementation, and no MCP tool
+   parameter can reach it.
+2. `cb_auth.py` (stdlib-only: `hashlib`/`hmac`/`json`) verifies a presented
+   Bearer token against a token-map JSON file (`CB_AUTH_TOKENS_PATH`):
+   `{"sha256:<hex>": {"role": "<role>"}, "roles": {"<role>": "<cap>"}}`.
+   `verify_token()` hashes the presented token and constant-time-compares
+   (`hmac.compare_digest`) it against the map; plaintext tokens are never
+   stored or logged. It returns `(role, cap)` or `None` — the cap comes from
+   the file's own `"roles"` section if present, else a hardcoded default
+   (`reader/internal/analyst/admin` → `public/internal/confidential/
+   restricted`).
+
+Binding the two together — extracting a Bearer header, calling
+`verify_token()`, and holding `request_cap(cap)` for one request's
+lifetime — is server middleware, which is the served-mode (HTTP) task, not
+this one. M7/M12-as-shipped-here still has no token, header, or transport
+concept in `cb_engine.py` itself; `cb_auth.py` has no HTTP/transport
+dependency either.
 
 **MCP read surface**: the eight `@mcp.tool()` functions in `cb_mcp.py` are
 the **entire** MCP read surface. No `corpora://` (or any other) MCP
