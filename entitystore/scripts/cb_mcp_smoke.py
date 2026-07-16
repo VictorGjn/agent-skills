@@ -24,6 +24,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -114,9 +115,11 @@ def main() -> int:
         tools = tools_resp.get("result", {}).get("tools", [])
         names = sorted(t["name"] for t in tools)
         print(f"-- tools/list: {len(tools)} tools -- {names}")
-        expected = {"wiki_ask", "wiki_pack", "wiki_audit", "wiki_add", "stats", "resolve"}
-        check("tools/list: 6 tools registered (added wiki_pack)", len(tools) == 6)
-        check("tools/list: all 6 expected tools present",
+        expected = {"wiki_ask", "wiki_pack", "wiki_audit", "wiki_add", "stats",
+                    "resolve", "links_to", "export"}
+        check("tools/list: 8 tools registered (added links_to, export — M11)",
+              len(tools) == 8)
+        check("tools/list: all 8 expected tools present",
               expected.issubset(set(names)))
 
         # 3. stats — also reports embedding-provider availability
@@ -273,6 +276,44 @@ def main() -> int:
         check("wiki_add: rejects path-traversal slug",
               badr.get("ok") is False
               and badr.get("error_kind") == "ValidationError")
+
+        # 11. links_to — reverse-lookup on `top`, the id resolve() already
+        # proved exists above (no new hardcoded real id/name — this file
+        # runs against a real company-brain corpus, and this repo is
+        # public: see fixtures/README.md's data-governance note).
+        send({"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+              "params": {"name": "links_to", "arguments": {"entity_id": top}}})
+        ltj = json.loads(recv()["result"]["content"][0]["text"])
+        print(f"-- links_to({top!r}): exists={ltj.get('exists')}, "
+              f"count={ltj.get('count')}")
+        check("links_to: existing entity reports exists=True",
+              ltj.get("exists") is True)
+        check("links_to: inbound entries carry id/kind/names/summary",
+              all({"id", "kind", "names", "summary"} <= set(n.keys())
+                  for n in ltj.get("inbound", [])))
+
+        send({"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+              "params": {"name": "links_to",
+                         "arguments": {"entity_id": "concept:definitely-not-real-xyz"}}})
+        ltmj = json.loads(recv()["result"]["content"][0]["text"])
+        check("links_to: nonexistent id -> exists=False, empty inbound",
+              ltmj.get("exists") is False and ltmj.get("inbound") == []
+              and ltmj.get("count") == 0)
+
+        # 12. export — writes into a tempdir, not the live corpus.
+        with tempfile.TemporaryDirectory(prefix="cb_mcp_smoke_export_") as export_td:
+            for i, fmt in enumerate(("obsidian", "jsonld", "json")):
+                send({"jsonrpc": "2.0", "id": 13 + i, "method": "tools/call",
+                      "params": {"name": "export",
+                                 "arguments": {"format": fmt, "kind": "org",
+                                               "out_dir": str(Path(export_td) / fmt)}}})
+                ej2 = json.loads(recv()["result"]["content"][0]["text"])
+                print(f"-- export(format={fmt!r}, kind='org'): ok={ej2.get('ok')}, "
+                      f"entity_count={ej2.get('entity_count')}, "
+                      f"files_written={ej2.get('files_written')}")
+                check(f"export({fmt}): ok", ej2.get("ok") is True)
+                check(f"export({fmt}): wrote at least one file",
+                      ej2.get("files_written", 0) >= 1)
 
     finally:
         try:

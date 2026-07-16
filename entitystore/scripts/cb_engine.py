@@ -6,13 +6,16 @@ Pure-Python functions (no MCP framework dependency). The MCP server (cb_mcp.py)
 wraps each function as a tool; this file stays testable in isolation via
 `python cb_engine.py --self-test`.
 
-Six endpoints, per SURFACE.md (v1 + the three "wrong-defer" reversals):
+Eight endpoints, per SURFACE.md (v1 + the three "wrong-defer" reversals,
+plus M11's links_to/export additions):
   wiki_ask     — search (substring | semantic | hybrid) + wiki_link expansion
   wiki_audit   — charter-aware contradictions, dead_links, freshness, orphans, schema
   wiki_add     — validate + write + (optional) git commit-through
   wiki_pack    — depth-banded context pack within a token budget
   stats        — counts, breakdowns, freshness percentiles, embedding status
   resolve      — slug/alias/name → canonical entity id
+  links_to     — reverse wiki_link lookup (inbound referrers), cap-filtered
+  export       — one-way boundary export (obsidian | jsonld | json), cap-filtered
 
 Charter-normalization for the auditor is ported from
 company-brain/scratch/promote_gate.py.
@@ -310,6 +313,25 @@ def _filter_by_classification(
         else:
             withheld += 1
     return kept, withheld, effective_cap
+
+
+def _inbound_links(entities: dict[str, dict]) -> dict[str, list[str]]:
+    """Map target entity id -> list of referrer ids whose `wiki_links`
+    include it.
+
+    Caller must pass an ALREADY classification-filtered entities dict (the
+    output of `_filter_by_classification`, not raw `load_corpus`) — both
+    sides of every edge then come pre-scoped to the cap: a withheld entity
+    can't be a referrer (it's not a key in `entities` to iterate) and can't
+    be a visible target either (a link to it just doesn't accumulate any
+    entry other callers can query). Shared by `wiki_audit`'s orphan check
+    and the `links_to` endpoint (M11) so the two never drift.
+    """
+    inbound: dict[str, list[str]] = defaultdict(list)
+    for eid, e in entities.items():
+        for ref in e.get("wiki_links", []) or []:
+            inbound[ref].append(eid)
+    return inbound
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -628,14 +650,11 @@ def wiki_audit(
             })
 
     # 4. orphans — no inbound + no claims + no evidence + no concept.statement
-    inbound: dict[str, int] = defaultdict(int)
-    for e in all_entities.values():
-        for ref in e.get("wiki_links", []) or []:
-            inbound[ref] += 1
+    inbound = _inbound_links(all_entities)
     orphans: list[dict] = []
     for eid, e in entities.items():
         stmt = ((e.get("concept") or {}).get("statement") or "").strip()
-        if (inbound[eid] == 0
+        if (not inbound.get(eid)
                 and not (e.get("claims") or [])
                 and not (e.get("evidence") or [])
                 and not stmt):
@@ -1077,6 +1096,205 @@ def resolve(
 
 
 # ──────────────────────────────────────────────────────────────────
+# Endpoint 7: links_to — reverse wiki_link lookup (M11)
+# ──────────────────────────────────────────────────────────────────
+
+
+def links_to(
+    entity_id: str,
+    corpus_dir: str | pathlib.Path | None = None,
+) -> dict:
+    """Entities whose `wiki_links` reference `entity_id` (inbound edges).
+
+    Cap-filters BOTH the target entity and every inbound referrer, mirroring
+    how wiki_ask handles neighbors (see SURFACE.md "Classification cap"):
+    - The target's existence is checked against the ALREADY-capped entity
+      set, so an entity withheld by the cap reports `exists=False` — same
+      as a genuinely nonexistent id. This avoids a cap oracle: a caller
+      can't distinguish "doesn't exist" from "exists but you can't see it".
+    - `_inbound_links` is built from that same capped set, so a withheld
+      referrer never accumulates an inbound entry in the first place —
+      it can't leak via the `{id, kind, names, summary}` neighbor summary.
+    """
+    cdir = _resolve_corpus(corpus_dir)
+    all_entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
+
+    if entity_id not in entities:
+        return {
+            "id": entity_id, "exists": False, "inbound": [], "count": 0,
+            "withheld_count": withheld_count, "effective_cap": effective_cap,
+        }
+
+    referrer_ids = _inbound_links(entities).get(entity_id, [])
+    inbound = [
+        {"id": r["id"], "kind": r.get("kind"),
+         "names": r.get("names", []), "summary": r.get("summary", "")}
+        for r in (entities[rid] for rid in referrer_ids)
+    ]
+    return {
+        "id": entity_id, "exists": True, "inbound": inbound,
+        "count": len(inbound),
+        "withheld_count": withheld_count, "effective_cap": effective_cap,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
+# Endpoint 8: export — one-way boundary export (M11)
+# ──────────────────────────────────────────────────────────────────
+#
+# Per prior scoping (CE prd-closed-loop.md S5/AC13), this is deliberately
+# "the cheap half of the promised feature": a boundary crossing OUT of the
+# store, never a way back IN. No re-import, no round-trip merge system —
+# wiki_add remains the only write path (THE WRITER RULE).
+
+EXPORT_FORMATS = ("obsidian", "jsonld", "json")
+
+
+def _export_slug(entity: dict) -> tuple[str, str] | None:
+    """(kind, slug) for a filesystem-safe export path, or None if unsafe.
+
+    Same slug/kind shape `_entity_path` enforces on the write side — export
+    never writes outside `out_dir` even if a malformed id somehow made it
+    into the corpus.
+    """
+    eid = entity.get("id") or ""
+    kind = entity.get("kind") or ""
+    slug = eid.split(":", 1)[1] if ":" in eid else eid
+    if _SLUG_RE.fullmatch(slug) and _SLUG_RE.fullmatch(kind):
+        return kind, slug
+    return None
+
+
+def _export_obsidian(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """One Markdown note per entity at `<out_dir>/<kind>/<slug>.md`.
+
+    Frontmatter values are JSON-encoded — JSON is a valid YAML subset, so no
+    extra yaml dependency is needed. `[[kind/slug|display name]]` wiki-links
+    use the same folder-qualified form as the on-disk filenames so Obsidian
+    resolves them. A link to an id outside the exported set (withheld by
+    the cap, or filtered out by `kind`) renders as an unresolved link in
+    Obsidian — the same "reads as dead for this caller" outcome
+    `wiki_audit`'s `dead_links` already documents, not a new leak (the raw
+    id string was already present in the source entity's own `wiki_links`).
+    """
+    written: list[str] = []
+    for eid, e in entities.items():
+        safe = _export_slug(e)
+        if safe is None:
+            continue
+        kind, slug = safe
+        kind_dir = out_dir / kind
+        kind_dir.mkdir(parents=True, exist_ok=True)
+        names = e.get("names") or [eid]
+        front = {"id": eid, "kind": kind, "names": names,
+                 "topics": e.get("topics", [])}
+        lines = ["---"]
+        lines.extend(f"{k}: {json.dumps(v, ensure_ascii=False)}"
+                     for k, v in front.items())
+        lines.append("---")
+        lines.append("")
+        lines.append(f"# {names[0]}")
+        lines.append("")
+        if e.get("summary"):
+            lines.append(e["summary"])
+            lines.append("")
+        stmt = ((e.get("concept") or {}).get("statement") or "").strip()
+        if stmt:
+            lines.append(f"> {stmt}")
+            lines.append("")
+        links = e.get("wiki_links") or []
+        if links:
+            lines.append("## Links")
+            for ref in links:
+                rkind, _, rslug = ref.partition(":")
+                if not rslug:
+                    lines.append(f"- {ref}")
+                    continue
+                target = entities.get(ref)
+                display = (target.get("names") or [ref])[0] if target else ref
+                lines.append(f"- [[{rkind}/{rslug}|{display}]]")
+            lines.append("")
+        path = kind_dir / f"{slug}.md"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        written.append(str(path))
+    return written
+
+
+def _export_jsonld(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """Flat `@graph` of entities — one file, no external context fetch."""
+    graph = [
+        {
+            "@id": eid, "@type": e.get("kind"),
+            "name": (e.get("names") or [eid])[0],
+            "names": e.get("names", []),
+            "summary": e.get("summary", ""),
+            "topics": e.get("topics", []),
+            "links": [{"@id": ref} for ref in (e.get("wiki_links") or [])],
+        }
+        for eid, e in entities.items()
+    ]
+    doc = {
+        "@context": {"name": "https://schema.org/name",
+                     "summary": "https://schema.org/description"},
+        "@graph": graph,
+    }
+    path = out_dir / "export.jsonld"
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    return [str(path)]
+
+
+def _export_json(entities: dict[str, dict], out_dir: pathlib.Path) -> list[str]:
+    """Flat JSON array of full (cap-filtered) entity payloads."""
+    path = out_dir / "export.json"
+    path.write_text(json.dumps(list(entities.values()), indent=2, ensure_ascii=False),
+                    encoding="utf-8")
+    return [str(path)]
+
+
+def export(
+    corpus_dir: str | pathlib.Path | None = None,
+    format: str = "obsidian",
+    kind: str | None = None,
+    out_dir: str | pathlib.Path | None = None,
+) -> dict:
+    """One-way boundary export of the corpus — no re-import, no round-trip
+    merge (see module docstring + SURFACE.md "wiki.export"). `wiki_add`
+    remains the only write path into the store (THE WRITER RULE); this
+    endpoint only ever reads and writes OUTSIDE the corpus.
+
+    Runs through the classification cap like every other read endpoint —
+    an entity above the cap is never written to an export file, in any
+    format.
+    """
+    if format not in EXPORT_FORMATS:
+        return {"ok": False, "error_kind": "ValidationError",
+                "message": f"unknown format {format!r}, expected one of {EXPORT_FORMATS}"}
+
+    cdir = _resolve_corpus(corpus_dir)
+    all_entities = load_corpus(cdir)
+    entities, withheld_count, effective_cap = _filter_by_classification(all_entities, cdir)
+    if kind:
+        entities = {eid: e for eid, e in entities.items() if e.get("kind") == kind}
+
+    out = pathlib.Path(out_dir).resolve() if out_dir else (cdir / ".cb_export" / format)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if format == "obsidian":
+        files = _export_obsidian(entities, out)
+    elif format == "jsonld":
+        files = _export_jsonld(entities, out)
+    else:
+        files = _export_json(entities, out)
+
+    return {
+        "ok": True, "format": format, "out_dir": str(out),
+        "entity_count": len(entities), "files_written": len(files),
+        "withheld_count": withheld_count, "effective_cap": effective_cap,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────
 # Self-test — runs in a tempdir copy of the corpus + schema
 # ──────────────────────────────────────────────────────────────────
 
@@ -1366,6 +1584,41 @@ def _self_test_in_tempdir() -> int:
                 print("-- classification: live corpus has no restrictive "
                       "data_classification; live cap-enforcement smoke check skipped "
                       "(full coverage lives in tests/test_classification_gate.py)")
+
+            # 8. links_to (M11) — reverse-lookup smoke test. Reuses the id
+            # `r2` already resolved above (no new hardcoded real id/name —
+            # this file runs against a real company-brain corpus, and this
+            # repo is public: see fixtures/README.md's data-governance note).
+            probe_id = r2["matches"][0]["id"]
+            lt = links_to(probe_id)
+            print(f"-- links_to({probe_id!r}): exists={lt['exists']}, count={lt['count']}")
+            check("links_to: existing entity reports exists=True", lt["exists"] is True)
+            check("links_to: inbound entries carry id/kind/names/summary",
+                  all({"id", "kind", "names", "summary"} <= set(n.keys())
+                      for n in lt["inbound"]))
+            lt_missing = links_to("concept:definitely-not-a-real-entity-xyz")
+            print(f"-- links_to(nonexistent): exists={lt_missing['exists']}")
+            check("links_to: nonexistent id -> exists=False, empty inbound",
+                  lt_missing["exists"] is False and lt_missing["inbound"] == []
+                  and lt_missing["count"] == 0)
+
+            # 9. export (M11) — one-way boundary export smoke test, all 3
+            # formats, written into the tempdir (never the live corpus).
+            export_root = td_path / "export_smoke"
+            for fmt in ("obsidian", "jsonld", "json"):
+                res = export(format=fmt, out_dir=str(export_root / fmt))
+                print(f"-- export(format={fmt!r}): ok={res.get('ok')}, "
+                      f"entity_count={res.get('entity_count')}, "
+                      f"files_written={res.get('files_written')}")
+                check(f"export({fmt}): ok", res.get("ok") is True)
+                check(f"export({fmt}): wrote at least one file",
+                      res.get("files_written", 0) >= 1)
+                check(f"export({fmt}): files actually landed on disk",
+                      any(pathlib.Path(res["out_dir"]).rglob("*")))
+            bad_export = export(format="markdown-but-not-really")
+            check("export: unknown format rejected",
+                  bad_export.get("ok") is False
+                  and bad_export.get("error_kind") == "ValidationError")
 
         finally:
             # Restore env so caller's state is intact.
