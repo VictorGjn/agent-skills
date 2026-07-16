@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import sys
+import tempfile
 import unittest
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent.parent
@@ -263,6 +265,183 @@ class TestClassificationGateEndToEnd(unittest.TestCase):
         self.assertEqual(s["effective_cap"], "restricted")
         self.assertEqual(s["withheld_count"], 0)
         self.assertEqual(s["entity_count"], TOTAL)
+
+
+class TestLinksTo(unittest.TestCase):
+    """M11: reverse wiki_link lookup, cap-filtered on both sides.
+
+    Reuses the same `fixtures/golden_corpus/` mixed-classification fixture
+    as the classes above — `org:atlas-marine` (internal) is linked from
+    `person:elena-vasko` (restricted), which is exactly the shape needed to
+    assert a restricted entity never leaks through `links_to`'s inbound
+    summary at a lower cap.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _ensure_corpus_built()
+        cls.corpus_dir = CORPUS
+
+    def setUp(self):
+        self._prev = os.environ.get("CB_CLASSIFICATION_CAP")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        else:
+            os.environ["CB_CLASSIFICATION_CAP"] = self._prev
+
+    def _set_cap(self, cap: str | None) -> None:
+        if cap is None:
+            os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        else:
+            os.environ["CB_CLASSIFICATION_CAP"] = cap
+
+    def test_nonexistent_id_reports_exists_false(self):
+        self._set_cap(None)
+        r = ce.links_to("concept:does-not-exist-anywhere",
+                        corpus_dir=str(self.corpus_dir))
+        self.assertFalse(r["exists"])
+        self.assertEqual(r["inbound"], [])
+        self.assertEqual(r["count"], 0)
+
+    def test_withheld_target_is_indistinguishable_from_missing(self):
+        # person:elena-vasko is classified 'restricted' — below that cap it
+        # must read exactly like a nonexistent id (no cap oracle: a caller
+        # can't tell "withheld" from "never existed").
+        self._set_cap("confidential")
+        r = ce.links_to("person:elena-vasko", corpus_dir=str(self.corpus_dir))
+        self.assertFalse(r["exists"])
+        self.assertEqual(r["inbound"], [])
+
+        self._set_cap("restricted")
+        r2 = ce.links_to("person:elena-vasko", corpus_dir=str(self.corpus_dir))
+        self.assertTrue(r2["exists"])
+        self.assertEqual(r2["count"], 0)  # nobody links TO a person in this fixture
+
+    def test_restricted_referrer_never_leaks_into_inbound(self):
+        # org:atlas-marine is itself classified 'internal' (corpus-level
+        # default — no glob matches org/**), so it's only visible at
+        # 'internal' or 'confidential'; 'public' is covered separately by
+        # test_withheld_target_is_indistinguishable_from_missing's sibling
+        # case above.
+        for cap in ("internal", "confidential"):
+            with self.subTest(cap=cap):
+                self._set_cap(cap)
+                r = ce.links_to("org:atlas-marine", corpus_dir=str(self.corpus_dir))
+                self.assertTrue(r["exists"])
+                self.assertNotIn("person:elena-vasko",
+                                 {n["id"] for n in r["inbound"]},
+                                 "restricted referrer leaked into inbound "
+                                 f"at cap={cap}")
+
+        self._set_cap("restricted")
+        r = ce.links_to("org:atlas-marine", corpus_dir=str(self.corpus_dir))
+        self.assertIn("person:elena-vasko", {n["id"] for n in r["inbound"]})
+
+    def test_confidential_referrer_gated_at_its_own_rank(self):
+        self._set_cap("internal")
+        r = ce.links_to("org:atlas-marine", corpus_dir=str(self.corpus_dir))
+        self.assertNotIn(CONFIDENTIAL_OVERRIDE_ID, {n["id"] for n in r["inbound"]})
+
+        self._set_cap("confidential")
+        r2 = ce.links_to("org:atlas-marine", corpus_dir=str(self.corpus_dir))
+        self.assertIn(CONFIDENTIAL_OVERRIDE_ID, {n["id"] for n in r2["inbound"]})
+
+    def test_inbound_entries_are_neighbor_summary_shaped(self):
+        self._set_cap(None)
+        r = ce.links_to("org:atlas-marine", corpus_dir=str(self.corpus_dir))
+        self.assertGreater(r["count"], 0)
+        for n in r["inbound"]:
+            self.assertEqual(set(n.keys()), {"id", "kind", "names", "summary"})
+
+    def test_shares_inbound_map_with_wiki_audit_orphan_check(self):
+        # links_to and wiki_audit's orphan check are both built on
+        # _inbound_links — an orphan (by definition) has zero links_to()
+        # inbound at the same cap.
+        self._set_cap("restricted")
+        audit = ce.wiki_audit(corpus_dir=str(self.corpus_dir))
+        for o in audit["orphans"]:
+            r = ce.links_to(o["id"], corpus_dir=str(self.corpus_dir))
+            self.assertEqual(r["count"], 0,
+                             f"{o['id']} is an orphan but links_to found inbound")
+
+
+class TestExport(unittest.TestCase):
+    """M11: one-way boundary export (obsidian | jsonld | json), cap-filtered.
+
+    No re-import / round-trip assertions here on purpose — that system
+    doesn't exist (see SURFACE.md "wiki.export"); these tests only check
+    that a withheld entity is never written to an export file.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        _ensure_corpus_built()
+        cls.corpus_dir = CORPUS
+
+    def setUp(self):
+        self._prev = os.environ.get("CB_CLASSIFICATION_CAP")
+        self._tmp = tempfile.mkdtemp(prefix="cb_export_test_")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        else:
+            os.environ["CB_CLASSIFICATION_CAP"] = self._prev
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _set_cap(self, cap: str | None) -> None:
+        if cap is None:
+            os.environ.pop("CB_CLASSIFICATION_CAP", None)
+        else:
+            os.environ["CB_CLASSIFICATION_CAP"] = cap
+
+    def test_unknown_format_rejected(self):
+        r = ce.export(corpus_dir=str(self.corpus_dir), format="docx",
+                     out_dir=self._tmp)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error_kind"], "ValidationError")
+
+    def test_json_export_never_writes_a_restricted_or_confidential_entity(self):
+        self._set_cap("public")
+        r = ce.export(corpus_dir=str(self.corpus_dir), format="json",
+                     out_dir=self._tmp)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["entity_count"], len(CONCEPT_IDS))
+        payload = json.loads((pathlib.Path(self._tmp) / "export.json").read_text())
+        exported_ids = {e["id"] for e in payload}
+        self.assertEqual(exported_ids, CONCEPT_IDS)
+        self.assertFalse(PERSON_IDS & exported_ids)
+        self.assertNotIn(CONFIDENTIAL_OVERRIDE_ID, exported_ids)
+
+    def test_jsonld_export_reveals_confidential_only_at_its_own_cap(self):
+        self._set_cap("confidential")
+        r = ce.export(corpus_dir=str(self.corpus_dir), format="jsonld",
+                     out_dir=self._tmp)
+        self.assertTrue(r["ok"])
+        doc = json.loads((pathlib.Path(self._tmp) / "export.jsonld").read_text())
+        graph_ids = {n["@id"] for n in doc["@graph"]}
+        self.assertIn(CONFIDENTIAL_OVERRIDE_ID, graph_ids)
+        self.assertFalse(PERSON_IDS & graph_ids)  # restricted still above this cap
+
+    def test_obsidian_export_never_writes_a_restricted_note(self):
+        self._set_cap("internal")
+        r = ce.export(corpus_dir=str(self.corpus_dir), format="obsidian",
+                     out_dir=self._tmp)
+        self.assertTrue(r["ok"])
+        written = list(pathlib.Path(self._tmp).rglob("*.md"))
+        self.assertEqual(len(written), r["entity_count"])
+        self.assertFalse(any(p.parent.name == "person" for p in written),
+                         "a restricted person note was written below its cap")
+
+    def test_kind_filter_narrows_export(self):
+        self._set_cap(None)
+        r = ce.export(corpus_dir=str(self.corpus_dir), format="json",
+                     kind="org", out_dir=self._tmp)
+        payload = json.loads((pathlib.Path(self._tmp) / "export.json").read_text())
+        self.assertEqual({e["kind"] for e in payload}, {"org"})
+        self.assertEqual(len(payload), len(ORG_IDS))
 
 
 if __name__ == "__main__":

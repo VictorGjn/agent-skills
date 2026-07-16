@@ -4,7 +4,7 @@ The contract the engine builds against. Locked 2026-05-28 (Option B pivot: JSON-
 
 ## Goal (v1)
 
-A **local stdio MCP server** exposing the company-brain JSON entity corpus as **six** typed endpoints. Single-user (Victor). No auth/RBAC. Schema-injection seam preserved: the engine reads `entity.schema.json` by path, never embeds.
+A **local stdio MCP server** exposing the company-brain JSON entity corpus as **eight** typed endpoints. Single-user (Victor). No auth/RBAC. Schema-injection seam preserved: the engine reads `entity.schema.json` by path, never embeds.
 
 ## Non-goals (v1)
 
@@ -81,12 +81,12 @@ is explicitly NOT built here. M7 does not half-build auth: there is no
 token, header, or role concept anywhere in this file's code, only the env
 var and the enum it's compared against.
 
-**MCP read surface**: the six `@mcp.tool()` functions in `cb_mcp.py` are the
-**entire** MCP read surface. No `corpora://` (or any other) MCP *resource*
-exists, and none should be added — raw `entities/*.json` / `manifest.json`
-are never served directly over MCP; every read goes through an endpoint
-above, which means every read goes through the classification gate. Adding
-a raw-file resource would bypass it.
+**MCP read surface**: the eight `@mcp.tool()` functions in `cb_mcp.py` are
+the **entire** MCP read surface. No `corpora://` (or any other) MCP
+*resource* exists, and none should be added — raw `entities/*.json` /
+`manifest.json` are never served directly over MCP; every read goes
+through an endpoint above, which means every read goes through the
+classification gate. Adding a raw-file resource would bypass it.
 
 ## Endpoints
 
@@ -241,6 +241,60 @@ Resolve a slug / alias / partial name to a canonical entity URI.
 
 Matches by `id` (exact), then `names[]` (case-insensitive substring), then slug-form. Top-K = 10.
 
+### 7. `links_to(entity_id, corpus_dir?) → JSON`
+
+Reverse-lookup: every entity whose `wiki_links` reference `entity_id` (inbound edges). Factored out of `wiki_audit`'s orphan check (`_inbound_links(entities)`) so the two never drift.
+
+**Request**: `{ "entity_id": "org:atlas-marine" }`
+
+**Response**
+```json
+{
+  "id": "org:atlas-marine",
+  "exists": true,
+  "inbound": [
+    { "id": "concept:atlas-marine-demand-theme", "kind": "concept",
+      "names": ["Atlas Marine Stability-Aware Routing Demand"],
+      "summary": "..." }
+  ],
+  "count": 1,
+  "withheld_count": 0, "effective_cap": "restricted"
+}
+```
+
+Cap-filters **both** the target entity and every inbound referrer, mirroring `wiki_ask`'s neighbor handling:
+- The target is looked up in the already-capped entity set, so an entity withheld by the cap reports `exists: false` — indistinguishable from a genuinely nonexistent id. A caller can never use `links_to` as a cap oracle ("it returns something different for withheld vs. missing, therefore it exists").
+- `_inbound_links` is built from that same capped set, so a withheld referrer never accumulates an inbound entry — it can't leak through the `{id, kind, names, summary}` neighbor summary, same guarantee `wiki_ask` gives its neighbors.
+
+### 8. `export(corpus_dir?, format?, kind?, out_dir?) → JSON`
+
+One-way boundary **export** shim — writes the (cap-filtered) corpus to files outside the store. Per prior scoping (CE `prd-closed-loop.md` S5/AC13), this is deliberately "the cheap half of the promised feature": a crossing OUT of the store, never a way back in. **No re-import, no round-trip merge system** — `wiki_add` remains the only write path into the store (THE WRITER RULE is unaffected).
+
+**Request**
+```json
+{
+  "format": "obsidian",             // "obsidian" | "jsonld" | "json" (default "obsidian")
+  "kind": "concept",                // optional filter to one entity kind
+  "out_dir": "/path/to/vault"       // default: <corpus_dir>/.cb_export/<format>/
+}
+```
+
+**Response**
+```json
+{ "ok": true, "format": "obsidian", "out_dir": "...",
+  "entity_count": 42, "files_written": 42,
+  "withheld_count": 0, "effective_cap": "restricted" }
+// or
+{ "ok": false, "error_kind": "ValidationError", "message": "unknown format ..." }
+```
+
+Formats:
+- **`obsidian`** — one Markdown note per entity at `<out_dir>/<kind>/<slug>.md`, JSON-encoded frontmatter (valid YAML, no extra dependency) plus `[[kind/slug|display name]]` wiki-links so the vault opens with links intact. A link to an id outside the exported set (withheld by the cap, or excluded by `kind`) renders as an unresolved Obsidian link — the same "reads as dead for this caller" outcome `wiki_audit`'s `dead_links` already documents, not a new leak (the raw id string was already present in the source entity's own `wiki_links`).
+- **`jsonld`** — one file, `<out_dir>/export.jsonld`, a flat `@graph` of entities (`@id`, `@type`, `name`, `summary`, `topics`, `links`).
+- **`json`** — one file, `<out_dir>/export.json`, a flat JSON array of full (cap-filtered) entity payloads.
+
+Runs through the classification cap like every other read endpoint — an entity above the cap is never written to an export file, in any format.
+
 ## Validation contract
 
 - Every `wiki_add` runs jsonschema validation against `schemas/entity.schema.json` (path from corpus parent dir).
@@ -283,15 +337,17 @@ Two measurements collide only when every normalized key field matches and values
 
 ## Test seam
 
-`python cb_engine.py --self-test` runs all 5 endpoints against the live `syroco-commercial` corpus and prints pass/fail. Smoke-tests:
+`python cb_engine.py --self-test` runs all 8 endpoints against the live `syroco-commercial` corpus and prints pass/fail. Smoke-tests:
 - `wiki_ask("route optimization")` returns ≥1 matched.
 - `wiki_audit()` returns ≥0 contradictions, valid JSON, ≥1 dead_links flagged if any exist.
 - `stats()` returns counts matching `find corpora/syroco-commercial/entities -name "*.json" | wc -l`.
 - `resolve("Klaveness")` returns `org:kcc` as top match.
 - `wiki_add(synthetic_entity)` round-trips through validator (synthetic gets cleaned up).
 - Classification cap (M7): `classify_entity()` precedence checked as a pure function; if the live corpus's `data_classification` is above `'public'`, `CB_CLASSIFICATION_CAP=public` is set temporarily and `stats`/`wiki_ask`/`resolve`/`wiki_audit` are asserted to withhold every entity.
+- `links_to` (M11): an existing id reports `exists: true` with `{id, kind, names, summary}`-shaped inbound entries; a nonexistent id reports `exists: false` with empty inbound.
+- `export` (M11): all three formats (`obsidian`/`jsonld`/`json`) write into a tempdir and are asserted to actually land files on disk; an unknown format is rejected as a `ValidationError`.
 
-`tests/test_classification_gate.py` is the dedicated, hermetic classification-gate suite (synthetic mixed-classification fixture — every enum level plus a longest-glob-wins override, on top of the same `fixtures/golden_corpus/` used by `tests/test_golden_queries.py`, now carrying `fixtures/golden_corpus/manifest.json`).
+`tests/test_classification_gate.py` is the dedicated, hermetic classification-gate suite (synthetic mixed-classification fixture — every enum level plus a longest-glob-wins override, on top of the same `fixtures/golden_corpus/` used by `tests/test_golden_queries.py`, now carrying `fixtures/golden_corpus/manifest.json`) — extended for M11 to also assert a restricted entity never appears in `links_to` inbound, or in an `export`, at a cap below `restricted`.
 
 ## File layout (final, post-/simplify)
 
@@ -300,10 +356,10 @@ agent-skills/entitystore/
 ├── SURFACE.md                # this file (v1 contract)
 ├── SKILL.md                  # skill description
 └── scripts/
-    ├── cb_engine.py          # engine — 6 endpoints, pure Python, no MCP dep
+    ├── cb_engine.py          # engine — 8 endpoints, pure Python, no MCP dep
     ├── cb_mcp.py             # FastMCP local-stdio server wrapping engine
     ├── cb_embed.py           # semantic resolver (Mistral / OpenAI + cache)
-    ├── cb_mcp_smoke.py       # live JSON-RPC smoke test (init + 6 tools)
+    ├── cb_mcp_smoke.py       # live JSON-RPC smoke test (init + 8 tools)
     └── validate_corpus.py    # JSON Schema validator (schema-injection seam)
 ```
 
