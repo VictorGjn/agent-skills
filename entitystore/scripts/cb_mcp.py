@@ -14,11 +14,17 @@ Run:
     python cb_mcp.py --self-test        # delegate to engine self-test
 
 Configure:
-    CB_CORPUS_DIR        — path to corpora/<id>/  (required)
-    CB_SCHEMA_PATH       — path to entity.schema.json (required)
-    MISTRAL_API_KEY      — enables semantic mode (or OPENAI_API_KEY)
-    CB_EMBED_PROVIDER    — override auto-detection (mistral | openai)
-    CB_EMBED_MODEL       — override default model
+    CB_CORPUS_DIR          — path to corpora/<id>/  (required)
+    CB_SCHEMA_PATH         — path to entity.schema.json (required)
+    MISTRAL_API_KEY        — enables semantic mode (or OPENAI_API_KEY)
+    CB_EMBED_PROVIDER      — override auto-detection (mistral | openai)
+    CB_EMBED_MODEL         — override default model
+    CB_CLASSIFICATION_CAP  — read cap for THIS server instance, one of
+                              public|internal|confidential|restricted.
+                              Unset = restricted (full read, backward
+                              compatible). Never a tool parameter — see
+                              SURFACE.md "Classification cap". Set this on
+                              the process, not per-call.
 
 The MCP server returns JSON-encoded strings (FastMCP serializes tool returns
 as text). Clients parse the JSON themselves.
@@ -83,7 +89,9 @@ def wiki_ask(
         corpus_dir: override CB_CORPUS_DIR for this call.
 
     Returns:
-        JSON: {matched[], neighbors[], stats}.
+        JSON: {matched[], neighbors[], stats}. stats carries withheld_count +
+        effective_cap — entities above CB_CLASSIFICATION_CAP are dropped
+        before scoring/expansion, never returned as matched or neighbors.
     """
     return _response(cb_engine.wiki_ask(
         query=query, corpus_dir=corpus_dir, kind=kind, topics=topics,
@@ -121,7 +129,8 @@ def wiki_pack(
 
     Returns:
         JSON: {query, budget, used_tokens, items: [{id, kind, depth, depth_name,
-               tokens, payload, via}, ...], stats}.
+               tokens, payload, via}, ...], stats}. stats carries
+        withheld_count + effective_cap (see wiki_ask).
     """
     return _response(cb_engine.wiki_pack(
         query=query, corpus_dir=corpus_dir, kind=kind, topics=topics,
@@ -148,7 +157,9 @@ def wiki_audit(
         corpus_dir: override CB_CORPUS_DIR.
 
     Returns:
-        JSON with detailed findings + summary counts.
+        JSON with detailed findings + summary counts. withheld_count +
+        effective_cap report the classification-cap gate (see wiki_ask);
+        every check above is already scoped to the capped entity set.
     """
     return _response(cb_engine.wiki_audit(corpus_dir=corpus_dir, kinds=kinds))
 
@@ -190,7 +201,9 @@ def stats(corpus_dir: str | None = None) -> str:
 
     Returns:
         JSON: {corpus, entity_count, by_kind, by_topic, wiki_links_total,
-               claims_total, freshness, schema_version, embeddings}.
+               claims_total, freshness, schema_version, embeddings,
+               withheld_count, effective_cap}. entity_count is already
+               post-classification-cap (see wiki_ask).
     """
     return _response(cb_engine.stats(corpus_dir=corpus_dir))
 
@@ -212,7 +225,9 @@ def resolve(
         corpus_dir: override CB_CORPUS_DIR.
 
     Returns:
-        JSON: {matches: [{id, kind, names, score}, ...]}.
+        JSON: {matches: [{id, kind, names, score}, ...], withheld_count,
+               effective_cap}. An entity above the cap never appears in
+               matches, no matter how well its name matches (see wiki_ask).
     """
     return _response(cb_engine.resolve(query, corpus_dir=corpus_dir, top_k=top_k))
 

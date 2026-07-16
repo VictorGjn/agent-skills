@@ -1,0 +1,21 @@
+{
+  "corpus_id": "golden-fixture",
+  "schema_version": 5,
+  "source": {
+    "type": "local_path",
+    "uri": "fixture:golden-corpus"
+  },
+  "lifecycle_state": "active",
+  "data_classification": "internal",
+  "classification_map": {
+    "entities/concept/**": "public",
+    "entities/concept/atlas-marine-named-partner-routing.json": "confidential",
+    "entities/person/**": "restricted"
+  },
+  "embedding": {
+    "provider": "mistral",
+    "model": "mistral-embed",
+    "dims": 1024
+  },
+  "version": 1
+}
