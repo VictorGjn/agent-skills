@@ -12,6 +12,8 @@
         "concept:atlas-marine-demand-theme",
         "concept:atlas-marine-stability-theme"
       ],
+      "last_verified_at": "2026-07-01T12:00:00Z",
+      "sources": ["web"],
       "org": {
         "display_name": "Atlas Marine Systems",
         "type": "company",
@@ -30,6 +32,8 @@
         "concept:borealis-robotics-demand-theme",
         "concept:borealis-robotics-stability-theme"
       ],
+      "last_verified_at": "2025-07-01T12:00:00Z",
+      "sources": ["web"],
       "org": {
         "display_name": "Borealis Robotics",
         "type": "company",

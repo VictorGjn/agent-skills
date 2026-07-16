@@ -121,6 +121,10 @@ class TestGoldenQueriesSynthetic(unittest.TestCase):
                 if "error_contains" in expect:
                     self.assertIn(expect["error_contains"], result["stats"].get("error", ""),
                                   f"{case['id']}: expected error substring not found")
+                if "min_dropped_by_freshness" in expect:
+                    dropped = result["stats"].get("dropped_by_freshness", 0)
+                    self.assertGreaterEqual(dropped, expect["min_dropped_by_freshness"],
+                                             f"{case['id']}: too few entities dropped by freshness")
 
     def test_wiki_pack_cases(self):
         for case in self.cases:

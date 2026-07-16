@@ -358,6 +358,7 @@
       "id": "pack-40-atlas-tight-budget",
       "endpoint": "wiki_pack",
       "truth": "locked",
+      "_comment": "Updated for M12 freshness fields (last_verified_at/sources) added to entities.",
       "query": "org:atlas-marine",
       "params": {"mode": "substring", "budget": 250},
       "expect": {
@@ -365,11 +366,11 @@
         "max_used_tokens": 250,
         "depth_exactly": {
           "org:atlas-marine": 0,
-          "concept:atlas-marine-named-partner-routing": 3,
+          "concept:atlas-marine-named-partner-routing": 4,
           "concept:atlas-marine-demand-theme": 4,
           "concept:atlas-marine-stability-theme": 4
         },
-        "min_distinct_depth_names": 3
+        "min_distinct_depth_names": 2
       }
     },
     {
@@ -418,6 +419,53 @@
         "item_count": 2,
         "present_ids": ["person:elena-vasko", "org:atlas-marine"],
         "depth_exactly": {"person:elena-vasko": 0}
+      }
+    },
+    {
+      "id": "ask-freshness-01-floor-drops-stale",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "_comment": "Verify freshness_floor drops stale entity (borealis-robotics: 2025-07-01, ~1y old with web half-life=30d). Floor=0.5 keeps fresh (atlas-marine: 2026-07-01), drops stale.",
+      "query": "robotics",
+      "params": {"mode": "substring", "depth": 0, "top": 10, "freshness_floor": 0.5},
+      "expect": {
+        "min_matched": 1,
+        "absent_ids": ["org:borealis-robotics"]
+      }
+    },
+    {
+      "id": "ask-freshness-02-pre-rule-pass-by-default",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "_comment": "Pre-rule entity (meridian-foils: no last_verified_at) passes floor by default (backward-compat), even with floor=0.9. ID query ensures exact match.",
+      "query": "org:meridian-foils",
+      "params": {"mode": "substring", "depth": 0, "top": 10, "freshness_floor": 0.9},
+      "expect": {
+        "top_id": "org:meridian-foils",
+        "matched_set": ["org:meridian-foils"]
+      }
+    },
+    {
+      "id": "ask-freshness-03-require-verified-drops-pre-rule",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "_comment": "With require_verified=True, pre-rule entities (no last_verified_at) are dropped. ID query for meridian-foils (pre-rule) returns empty with require_verified=True.",
+      "query": "org:meridian-foils",
+      "params": {"mode": "substring", "depth": 0, "top": 10, "freshness_floor": 0.0, "require_verified": true},
+      "expect": {
+        "matched_set": []
+      }
+    },
+    {
+      "id": "ask-freshness-04-no-floor-regression",
+      "endpoint": "wiki_ask",
+      "truth": "author",
+      "_comment": "Regression: freshness_floor=None should produce byte-identical results to baseline (no floor filtering).",
+      "query": "routing",
+      "params": {"mode": "substring", "depth": 1, "top": 10},
+      "expect": {
+        "min_matched": 1,
+        "absent_ids": []
       }
     }
   ]

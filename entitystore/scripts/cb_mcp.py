@@ -66,6 +66,8 @@ def wiki_ask(
     budget: int = 8000,
     mode: str = "hybrid",
     top: int = 30,
+    freshness_floor: float | None = None,
+    require_verified: bool = False,
     corpus_dir: str | None = None,
 ) -> str:
     """Search entities + expand wiki_link neighborhood to depth N.
@@ -73,21 +75,28 @@ def wiki_ask(
     Args:
         query: free-text query. Refuses dump-all when query + kind + topics are all empty.
         kind:  optional filter — concept|org|person|post|vessel|navigation|product.
-        topics: optional intersection filter.
+                Scope filtering; see freshness_floor for post-match filtering.
+        topics: optional intersection filter. Scope filtering.
         depth: wiki_link hops to expand (0 = matched only, default 1).
         budget: soft cap on serialized output chars (~ tokens × 4). Eviction
                 drops lowest-SCORED items first (not LIFO).
         mode: "substring" | "semantic" | "hybrid" (default — fast keyword OR
               embedding similarity, whichever scores higher per entity).
         top: max matched entities pre-truncation.
+        freshness_floor: optional freshness score threshold [0.0, 1.0]. Matched entities
+                         with freshness_policy.compute_freshness < floor are dropped
+                         (post-cap, pre-budget). Pre-rule entities (no last_verified_at)
+                         pass by default unless require_verified=True.
+        require_verified: when True, drop pre-rule entities if freshness_floor is set.
         corpus_dir: override CB_CORPUS_DIR for this call.
 
     Returns:
-        JSON: {matched[], neighbors[], stats}.
+        JSON: {matched[], neighbors[], stats (includes dropped_by_freshness if floor set)}.
     """
     return _response(cb_engine.wiki_ask(
         query=query, corpus_dir=corpus_dir, kind=kind, topics=topics,
         depth=depth, budget=budget, mode=mode, top=top,
+        freshness_floor=freshness_floor, require_verified=require_verified,
     ))
 
 

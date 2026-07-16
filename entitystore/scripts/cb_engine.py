@@ -41,6 +41,14 @@ except Exception:  # pragma: no cover — defensive
     cb_embed = None  # type: ignore
     _HAS_EMBED_MODULE = False
 
+# freshness_policy — M11 compute-on-read freshness scoring
+try:
+    import freshness_policy  # type: ignore
+    _HAS_FRESHNESS_MODULE = True
+except Exception:  # pragma: no cover — defensive
+    freshness_policy = None  # type: ignore
+    _HAS_FRESHNESS_MODULE = False
+
 
 # ──────────────────────────────────────────────────────────────────
 # Path resolution — no hardcoded user paths, env-driven
@@ -318,12 +326,23 @@ def wiki_ask(
     budget: int = 8000,
     mode: str = "hybrid",
     top: int = 30,
+    freshness_floor: float | None = None,
+    require_verified: bool = False,
     _entities: dict[str, dict] | None = None,
 ) -> dict:
     """Search entities + expand wiki_link neighborhood.
 
     mode = "substring" | "semantic" | "hybrid" (default).
     Hybrid falls back to substring when no embedding provider is available.
+
+    freshness_floor (optional): Filter matched entities by freshness_policy.compute_freshness
+        score, keeping only those with score >= freshness_floor (post-cap, pre-budget).
+        Pre-rule entities (no last_verified_at) score=None and PASS the floor by default
+        unless require_verified=True.
+        'scope' (kind/topics filtering) is already available via kind/topics params.
+
+    require_verified (default False): When True, pre-rule entities (score=None) are
+        dropped by freshness_floor. When False (default), they pass (backward-compat).
 
     Truncation (over budget) drops the LOWEST-scored entities first, not LIFO.
 
@@ -388,6 +407,42 @@ def wiki_ask(
     scored.sort(key=lambda x: -x[0])
     matched = [e for _, e in scored[:top]]
 
+    # 2.5. Freshness filtering (post-cap, pre-budget).
+    dropped_by_freshness = 0
+    if freshness_floor is not None and _HAS_FRESHNESS_MODULE and freshness_policy is not None:
+        filtered_matched: list[dict] = []
+        for e in matched:
+            last_verified_at = e.get("last_verified_at")
+            sources = e.get("sources", [])
+
+            # Pre-rule entities (no last_verified_at) score=None.
+            if last_verified_at is None:
+                # Pre-rule entities PASS the floor by default (backward-compat) unless
+                # require_verified=True forces them to be dropped.
+                if not require_verified:
+                    filtered_matched.append(e)
+                else:
+                    dropped_by_freshness += 1
+            else:
+                # Compute freshness using the shortest half-life if multi-source.
+                try:
+                    if sources:
+                        score = freshness_policy.compute_freshness_multi_source(
+                            last_verified_at, sources
+                        )
+                    else:
+                        score = freshness_policy.compute_freshness(
+                            last_verified_at, "default"
+                        )
+                    if score >= freshness_floor:
+                        filtered_matched.append(e)
+                    else:
+                        dropped_by_freshness += 1
+                except Exception:
+                    # If freshness computation fails, pass the entity through.
+                    filtered_matched.append(e)
+        matched = filtered_matched
+
     # 3. Depth expansion: collect wiki_link neighbors (de-duped).
     seen = {e["id"] for e in matched}
     frontier = list(matched)
@@ -426,17 +481,21 @@ def wiki_ask(
         matched.pop()
         truncated = True
 
+    stats_dict = {
+        "matched": len(matched),
+        "neighbors": len(neighbors),
+        "truncated": truncated,
+        "corpus": cdir.name,
+        "mode": mode,
+        "semantic_used": semantic_used,
+    }
+    if freshness_floor is not None:
+        stats_dict["dropped_by_freshness"] = dropped_by_freshness
+
     return {
         "matched": matched,
         "neighbors": neighbors,
-        "stats": {
-            "matched": len(matched),
-            "neighbors": len(neighbors),
-            "truncated": truncated,
-            "corpus": cdir.name,
-            "mode": mode,
-            "semantic_used": semantic_used,
-        },
+        "stats": stats_dict,
     }
 
 
