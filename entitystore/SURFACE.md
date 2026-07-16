@@ -111,12 +111,40 @@ this one. M7/M12-as-shipped-here still has no token, header, or transport
 concept in `cb_engine.py` itself; `cb_auth.py` has no HTTP/transport
 dependency either.
 
+**Served mode (M12, `cb_serve.py`)**: the HTTP transport promised above now
+exists — `entitystore/scripts/cb_serve.py` serves five named endpoints
+(`wiki_ask`, `wiki_pack`, `wiki_audit`, `stats`, `resolve`) over MCP
+streamable-http, behind `BearerAuthMiddleware`: a pure-ASGI middleware (not
+`BaseHTTPMiddleware`, so SSE responses are never buffered) that extracts the
+`Authorization: Bearer <token>` header, resolves it via
+`cb_auth.verify_token()`, and holds `cb_engine.request_cap(cap)` for exactly
+that request's downstream call — a missing/unknown token 401s with no data
+and never reaches MCP dispatch. `wiki_add` is not registered on the
+HTTP-facing `FastMCP` instance at all (structural, not just a runtime
+rejection) — see `cb_serve.py`'s module docstring for the open write-path
+design question this deliberately defers. `links_to` and `export` (added to
+`cb_mcp.py` after this branch forked) are read-only tools too but are not
+yet wired into `cb_serve.py`'s `READ_TOOLS` list — a known gap, not a
+deliberate exclusion like `wiki_add`'s, left for a follow-up rather than
+expanded here. A `/health` route (unauthenticated — it returns a static
+version string, never corpus data) answers
+`{"status": "ok", "version": "1.0.0"}`.
+`entitystore/scripts/tests/test_serve_http.py` includes the end-to-end
+proof PR #84 (M12 cap-seam) deferred to this task: two concurrent real MCP
+`ClientSession`s, different Bearer tokens, calling `stats` concurrently
+against the real middleware + FastMCP dispatch, asserting no
+`request_cap()` ContextVar cross-leak between them. This is still
+PREPARE-ONLY — no deployment, no process actually running anywhere; see the
+served-mode PR's "Manual go-live step" section for how Victor would start it.
+
 **MCP read surface**: the eight `@mcp.tool()` functions in `cb_mcp.py` are
-the **entire** MCP read surface. No `corpora://` (or any other) MCP
-*resource* exists, and none should be added — raw `entities/*.json` /
-`manifest.json` are never served directly over MCP; every read goes
-through an endpoint above, which means every read goes through the
-classification gate. Adding a raw-file resource would bypass it.
+the **entire** MCP read surface (`cb_serve.py` above serves five of them over
+HTTP; all eight remain reachable over stdio via `cb_mcp.py`). No
+`corpora://` (or any other) MCP *resource* exists, and none should be
+added — raw `entities/*.json` / `manifest.json` are never served directly
+over MCP; every read goes through an endpoint above, which means every read
+goes through the classification gate. Adding a raw-file resource would
+bypass it.
 
 ## Endpoints
 
