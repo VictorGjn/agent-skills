@@ -45,6 +45,10 @@ except Exception:  # pragma: no cover — defensive
     cb_embed = None  # type: ignore
     _HAS_EMBED_MODULE = False
 
+# freshness_policy is a zero-dependency sibling script (M11) — computed-on-read
+# freshness for wiki_audit's last_verified_at lint. Never stored, see its docstring.
+import freshness_policy
+
 
 # ──────────────────────────────────────────────────────────────────
 # Path resolution — no hardcoded user paths, env-driven
@@ -575,6 +579,176 @@ FRESHNESS_THRESHOLD_DAYS = {
 }
 
 
+# ──────────────────────────────────────────────────────────────────
+# wiki_audit lints (M11): merge / split / stale-supersession / freshness.
+# Report-only — every function here READS the corpus and returns flags; none
+# of them write an entity or a claim (THE WRITER RULE: enrichers are the
+# sole entity writer). Feeds both wiki_audit()'s JSON response and
+# render_proposals()'s audit/proposals.md.
+# ──────────────────────────────────────────────────────────────────
+
+_NAME_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_name(s: str) -> str:
+    """Lowercase, alnum-only normalization for merge-candidate matching."""
+    return _NAME_NORM_RE.sub("", (s or "").lower())
+
+
+def find_merge_candidates(entities: dict[str, dict]) -> list[dict]:
+    """Merge lint: entities that plausibly describe the same real-world
+    thing — same normalized name, or a normalized id-slug near-miss.
+    Report-only; a human (or a future enricher) decides whether to merge.
+    """
+    flags: list[dict] = []
+
+    by_norm_name: dict[str, set[str]] = defaultdict(set)
+    for eid, e in entities.items():
+        for n in e.get("names") or []:
+            norm = _normalize_name(n)
+            if norm:
+                by_norm_name[norm].add(eid)
+    for norm in sorted(by_norm_name):
+        ids = by_norm_name[norm]
+        if len(ids) > 1:
+            flags.append({
+                "rule": "merge-candidate", "reason": "duplicate-name",
+                "normalized": norm, "entities": sorted(ids),
+            })
+
+    by_norm_slug: dict[str, set[str]] = defaultdict(set)
+    for eid in entities:
+        slug_part = eid.split(":", 1)[1] if ":" in eid else eid
+        norm = _normalize_name(slug_part)
+        if norm:
+            by_norm_slug[norm].add(eid)
+    for norm in sorted(by_norm_slug):
+        ids = by_norm_slug[norm]
+        if len(ids) > 1:
+            flags.append({
+                "rule": "merge-candidate", "reason": "slug-near-miss",
+                "normalized": norm, "entities": sorted(ids),
+            })
+
+    return flags
+
+
+# Deliberately conservative — an entity has to span a LOT of distinct
+# metrics/topics before this fires. A false positive just wastes a
+# reviewer's time; the report stays honest about being a counting
+# heuristic, not a semantic-clustering verdict (no NLI, no embeddings).
+SPLIT_METRIC_THRESHOLD = 6
+SPLIT_TOPIC_THRESHOLD = 8
+
+
+def find_split_candidates(
+    entities: dict[str, dict],
+    *,
+    metric_threshold: int = SPLIT_METRIC_THRESHOLD,
+    topic_threshold: int = SPLIT_TOPIC_THRESHOLD,
+) -> list[dict]:
+    """Split lint: entity whose claims/topics span an unusually wide set —
+    a candidate for splitting into multiple entities. Simple counting
+    heuristic, over-flags rather than under-flags by design (report-only,
+    human decides)."""
+    flags: list[dict] = []
+    for eid, e in entities.items():
+        metrics = {c.get("metric") for c in (e.get("claims") or []) if c.get("metric")}
+        topics = set(e.get("topics") or [])
+        reasons = []
+        if len(metrics) > metric_threshold:
+            reasons.append(f"{len(metrics)} distinct claim metrics (> {metric_threshold})")
+        if len(topics) > topic_threshold:
+            reasons.append(f"{len(topics)} distinct topics (> {topic_threshold})")
+        if reasons:
+            flags.append({
+                "rule": "split-candidate", "id": eid, "kind": e.get("kind"),
+                "reasons": reasons,
+                "metric_count": len(metrics), "topic_count": len(topics),
+            })
+    return flags
+
+
+def find_stale_supersessions(entities: dict[str, dict]) -> list[dict]:
+    """Stale-supersession lint over BOTH decision-continuity chains:
+
+    1. Top-level entity `superseded_by` (null-allowed decision-continuity
+       field — not populated anywhere in the real corpus yet, but this
+       future-proofs the day an enricher starts writing it): any OTHER
+       entity's `wiki_links` still pointing at a superseded entity is a
+       stale reference.
+    2. `identity_assertions[].superseded_by` (v6, populated by the M4 dedup
+       collapse): an assertion marked status=superseded whose
+       `superseded_by` id isn't present among the SAME entity's own
+       assertions is a dangling chain.
+    """
+    flags: list[dict] = []
+
+    superseded_entities = {
+        eid: e for eid, e in entities.items() if e.get("superseded_by")
+    }
+    if superseded_entities:
+        for src_id, src in entities.items():
+            for ref in src.get("wiki_links") or []:
+                if ref in superseded_entities and ref != src_id:
+                    flags.append({
+                        "rule": "stale-supersession", "scope": "entity",
+                        "source": src_id, "target": ref,
+                        "superseded_by": superseded_entities[ref].get("superseded_by"),
+                    })
+
+    for eid, e in entities.items():
+        assertions = e.get("identity_assertions") or []
+        ids_present = {a.get("assertion_id") for a in assertions}
+        for a in assertions:
+            if a.get("status") != "superseded":
+                continue
+            sb = a.get("superseded_by")
+            if sb and sb not in ids_present:
+                flags.append({
+                    "rule": "stale-supersession", "scope": "identity_assertion",
+                    "entity": eid, "assertion_id": a.get("assertion_id"),
+                    "superseded_by": sb,
+                    "reason": "superseded_by assertion not found on the same entity",
+                })
+
+    return flags
+
+
+def find_freshness_lint(entities: dict[str, dict], *, now: datetime | None = None) -> dict:
+    """last_verified_at-first freshness lint (M11), delegating the decay
+    curve to freshness_policy.py.
+
+    Returns {"pre_rule_count", "pre_rule_sample" (capped at 20),
+    "stale": [...]}. The pre-rule bucket (no last_verified_at — the entity
+    predates the freshness rule) is reported as a COUNT + small sample,
+    never the full list, so a 0%-coverage kind (person, vessel — see
+    BRAIN-DELIVERY-TRACK M4) doesn't flood the report. Pre-rule entities are
+    NEVER promoted into `stale` — see freshness_policy.py's module
+    docstring for why 'never verified' and 'stale' are different findings.
+    """
+    pre_rule: list[dict] = []
+    stale: list[dict] = []
+    for eid in sorted(entities):
+        e = entities[eid]
+        fr = freshness_policy.compute_freshness(
+            e.get("last_verified_at"), e.get("kind"), now=now,
+        )
+        if fr["status"] == "pre-rule, never verified":
+            pre_rule.append({
+                "id": eid, "kind": e.get("kind"),
+                "updated_at": e.get("updated_at"),
+            })
+            continue
+        if fr["status"] == "stale":
+            stale.append({"id": eid, "kind": e.get("kind"), **fr})
+    return {
+        "pre_rule_count": len(pre_rule),
+        "pre_rule_sample": pre_rule[:20],
+        "stale": stale,
+    }
+
+
 def wiki_audit(
     corpus_dir: str | pathlib.Path | None = None,
     schema_path: str | pathlib.Path | None = None,
@@ -675,6 +849,14 @@ def wiki_audit(
     # schema_loaded distinguishes "validated, all clean" from "no schema available";
     # reporting schema_invalid=0 alone would silently hide a typo'd CB_SCHEMA_PATH.
     schema_loaded = schema is not None
+
+    # 6-9 (M11): merge / split / stale-supersession / last_verified_at freshness.
+    # Same `entities` (kind-filtered, cap-filtered) scope as checks 1-5.
+    merge_candidates = find_merge_candidates(entities)
+    split_candidates = find_split_candidates(entities)
+    stale_supersessions = find_stale_supersessions(entities)
+    freshness_lint = find_freshness_lint(entities, now=now)
+
     return {
         "corpus": cdir.name,
         "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -689,14 +871,127 @@ def wiki_audit(
         "freshness_expired": freshness_expired,
         "orphans": orphans,
         "schema_invalid": schema_invalid if schema_loaded else None,
+        "merge_candidates": merge_candidates,
+        "split_candidates": split_candidates,
+        "stale_supersessions": stale_supersessions,
+        "freshness_lint": freshness_lint,
         "summary": {
             "contradictions": len(contradictions),
             "dead_links": len(dead_links),
             "freshness_expired": len(freshness_expired),
             "orphans": len(orphans),
             "schema_invalid": len(schema_invalid) if schema_loaded else None,
+            "merge_candidates": len(merge_candidates),
+            "split_candidates": len(split_candidates),
+            "stale_supersessions": len(stale_supersessions),
+            "freshness_pre_rule": freshness_lint["pre_rule_count"],
+            "freshness_stale": len(freshness_lint["stale"]),
         },
     }
+
+
+def render_proposals(audit_result: dict, *, now_iso: str | None = None) -> str:
+    """Format a wiki_audit() result as markdown for `<corpus>/audit/proposals.md`.
+
+    A REPORT file, never an entity/claim write — no WRITER RULE contact
+    (mirrors wiki_init.py's module docstring on the same point). Written by
+    `cb_engine.py wiki-audit --proposals`, not by any endpoint's default
+    path — callers who only want the JSON never touch the filesystem.
+    """
+    if now_iso is None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+    lines: list[str] = [
+        "# audit/proposals.md", "", f"_Generated: {now_iso}_", "",
+        f"_Corpus: {audit_result.get('corpus')} — "
+        f"{audit_result.get('entity_count_audited')}/"
+        f"{audit_result.get('entity_count_total')} entities audited "
+        f"(withheld_count={audit_result.get('withheld_count')}, "
+        f"effective_cap={audit_result.get('effective_cap')})_",
+        "",
+    ]
+
+    def _section(title, items, fmt):
+        lines.append(f"## {title}")
+        lines.append("")
+        if items:
+            for it in items:
+                lines.append(f"- {fmt(it)}")
+        else:
+            lines.append("_(none)_")
+        lines.append("")
+
+    _section(
+        "Contradictions", audit_result.get("contradictions") or [],
+        lambda c: (
+            f"`{c['key']['entity']}` {c['key']['metric']} "
+            f"({c['key']['role']}/{c['key']['cp_type']}/{c['key']['tenor']}/"
+            f"{c['key']['status']}/{c['key']['as_of']}): "
+            f"{[v['value'] for v in c['values']]}"
+        ),
+    )
+    _section(
+        "Dead links", audit_result.get("dead_links") or [],
+        lambda d: f"`{d['from']}` -> `{d['to']}` (missing)",
+    )
+    _section(
+        "Freshness expired (updated_at)", audit_result.get("freshness_expired") or [],
+        lambda f: f"`{f['id']}` {f['days_stale']}d stale (threshold {f['threshold_days']}d)",
+    )
+    _section(
+        "Orphans", audit_result.get("orphans") or [],
+        lambda o: f"`{o['id']}` ({o['kind']})",
+    )
+
+    schema_invalid = audit_result.get("schema_invalid")
+    lines.append("## Schema invalid")
+    lines.append("")
+    if schema_invalid is None:
+        lines.append("_(schema not loaded — see wiki_audit.schema_loaded)_")
+    elif schema_invalid:
+        for s in schema_invalid:
+            lines.append(f"- `{s['id']}`: {s['error']} (at {s['path']})")
+    else:
+        lines.append("_(none)_")
+    lines.append("")
+
+    _section(
+        "Merge candidates", audit_result.get("merge_candidates") or [],
+        lambda m: f"{m['reason']} `{m['normalized']}`: {', '.join(m['entities'])}",
+    )
+    _section(
+        "Split candidates", audit_result.get("split_candidates") or [],
+        lambda s: f"`{s['id']}` ({s['kind']}): {'; '.join(s['reasons'])}",
+    )
+    _section(
+        "Stale supersessions", audit_result.get("stale_supersessions") or [],
+        lambda s: (
+            f"`{s['source']}` -> `{s['target']}` (superseded by `{s['superseded_by']}`)"
+            if s.get("scope") == "entity" else
+            f"`{s['entity']}` assertion `{s['assertion_id']}`: {s['reason']} "
+            f"(superseded_by=`{s['superseded_by']}`)"
+        ),
+    )
+
+    fresh = audit_result.get("freshness_lint") or {}
+    lines.append("## Freshness (last_verified_at)")
+    lines.append("")
+    lines.append(
+        f"- {fresh.get('pre_rule_count', 0)} entities pre-rule (never "
+        f"verified — `last_verified_at` unset; not counted as stale)."
+    )
+    stale = fresh.get("stale") or []
+    if stale:
+        for f in stale:
+            lines.append(
+                f"- `{f['id']}` ({f['kind']}) freshness {f['score']} "
+                f"(elapsed {f['elapsed_days']}d, half-life {f['half_life_days']}d)."
+            )
+    else:
+        lines.append("- 0 entities stale by last_verified_at.")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1672,6 +1967,8 @@ def main():
 
     au = sub.add_parser("wiki-audit")
     au.add_argument("--kinds", nargs="*")
+    au.add_argument("--proposals", action="store_true",
+                     help="also render <corpus>/audit/proposals.md")
 
     rs = sub.add_parser("resolve")
     rs.add_argument("query")
@@ -1699,7 +1996,14 @@ def main():
                       mode=args.mode),
             indent=2, default=str))
     elif args.cmd == "wiki-audit":
-        print(json.dumps(wiki_audit(kinds=args.kinds), indent=2))
+        result = wiki_audit(kinds=args.kinds)
+        print(json.dumps(result, indent=2))
+        if args.proposals:
+            cdir = _resolve_corpus(args.corpus)
+            proposals_path = cdir / "audit" / "proposals.md"
+            proposals_path.parent.mkdir(parents=True, exist_ok=True)
+            proposals_path.write_text(render_proposals(result), encoding="utf-8")
+            print(f"-- proposals written to {proposals_path}", file=sys.stderr)
     elif args.cmd == "resolve":
         print(json.dumps(resolve(args.query), indent=2))
     elif args.cmd == "build-embeddings":
