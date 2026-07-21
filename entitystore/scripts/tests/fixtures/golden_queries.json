@@ -326,16 +326,17 @@
       "id": "pack-38-hub-demotion-spread",
       "endpoint": "wiki_pack",
       "truth": "locked",
+      "_comment": "Re-pinned for the wiki_pack token-accounting fix: per-item cost now counts the wrapper keys (id/kind/via/depth/depth_name/tokens), not just the payload, so demote/promote lands on different depths at the same tight budget.",
       "query": "foil stability",
       "params": {"mode": "substring", "budget": 1200},
       "expect": {
         "item_count": 13,
         "max_used_tokens": 1200,
         "depth_exactly": {
-          "concept:foil-stability-cluster": 0,
-          "org:atlas-marine": 2,
-          "concept:atlas-marine-named-partner-routing": 1,
-          "concept:atlas-marine-demand-theme": 3,
+          "concept:foil-stability-cluster": 1,
+          "org:atlas-marine": 0,
+          "concept:atlas-marine-named-partner-routing": 4,
+          "concept:atlas-marine-demand-theme": 4,
           "concept:atlas-marine-stability-theme": 4
         },
         "min_distinct_depth_names": 5
@@ -345,32 +346,33 @@
       "id": "pack-39-hub-extreme-budget",
       "endpoint": "wiki_pack",
       "truth": "locked",
+      "_comment": "Re-pinned for the wiki_pack token-accounting fix (see pack-38): the corrected, higher per-item cost no longer fits all 13 items even at Mention, so the tail-drop pass now trims to 6.",
       "query": "foil stability",
       "params": {"mode": "substring", "budget": 300},
       "expect": {
-        "item_count": 13,
+        "item_count": 6,
         "max_used_tokens": 300,
-        "depth_exactly": {"concept:atlas-marine-stability-theme": 4},
-        "min_distinct_depth_names": 3
+        "depth_exactly": {"concept:foil-stability-cluster": 3},
+        "min_distinct_depth_names": 2
       }
     },
     {
       "id": "pack-40-atlas-tight-budget",
       "endpoint": "wiki_pack",
       "truth": "locked",
-      "_comment": "Updated for M12 freshness fields (last_verified_at/sources) added to entities.",
+      "_comment": "Updated for M12 freshness fields (last_verified_at/sources) added to entities. Re-pinned again for the wiki_pack token-accounting fix (see pack-38): all 4 items now land on the same Headlines band instead of org:atlas-marine surviving at Full.",
       "query": "org:atlas-marine",
       "params": {"mode": "substring", "budget": 250},
       "expect": {
         "item_count": 4,
         "max_used_tokens": 250,
         "depth_exactly": {
-          "org:atlas-marine": 0,
-          "concept:atlas-marine-named-partner-routing": 4,
-          "concept:atlas-marine-demand-theme": 4,
-          "concept:atlas-marine-stability-theme": 4
+          "org:atlas-marine": 3,
+          "concept:atlas-marine-named-partner-routing": 3,
+          "concept:atlas-marine-demand-theme": 3,
+          "concept:atlas-marine-stability-theme": 3
         },
-        "min_distinct_depth_names": 2
+        "min_distinct_depth_names": 1
       }
     },
     {
