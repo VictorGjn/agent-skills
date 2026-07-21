@@ -255,13 +255,14 @@ Depth-banded answer bundle within a token budget. Top hits stay Full; the long t
 {
   "query": "...", "budget": 8000, "used_tokens": 3997,
   "items": [
-    { "id": "concept:opportunity-route-optimization", "kind": "concept",
+    { "ref": "@0", "id": "concept:opportunity-route-optimization", "kind": "concept",
       "depth": 0, "depth_name": "Full", "tokens": 1234,
-      "payload": { ...full entity... }, "via": "matched" },
-    { "id": "concept:eta-...", "depth": 2, "depth_name": "Summary",
-      "tokens": 80, "payload": { "id": ..., "summary": ..., "concept_statement": ... } },
-    { "id": "concept:weather-...", "depth": 4, "depth_name": "Mention",
-      "tokens": 5, "payload": { "id": "concept:weather-...", "kind": "concept" } }
+      "payload": { ...full entity, wiki_links to other in-bundle items shown as "@N"... },
+      "via": "matched" },
+    { "ref": "@1", "id": "concept:eta-...", "depth": 2, "depth_name": "Summary",
+      "tokens": 80, "payload": { "summary": ..., "concept_statement": ... } },
+    { "ref": "@2", "id": "concept:weather-...", "depth": 4, "depth_name": "Mention",
+      "tokens": 5, "payload": {} }
   ],
   "stats": { "items": 43, "dropped": 0,
              "depth_breakdown": { "Full": 5, "Summary": 2, "Mention": 36 },
@@ -269,6 +270,7 @@ Depth-banded answer bundle within a token budget. Top hits stay Full; the long t
              "withheld_count": 0, "effective_cap": "restricted" }
 }
 ```
+`ref` is this item's positional local id, used to compact `wiki_links` between two entities that are both present in this bundle — the biggest measured waste in earlier versions was full entity-id slugs (some 70+ chars) repeated verbatim per reference. A link pointing outside the bundle keeps its full id (unresolvable to a ref). `payload`'s own `id`/`kind` keys are dropped at every depth since they're already on the wrapper.
 
 ### 5. `stats(corpus?) → JSON`
 

@@ -458,13 +458,19 @@ def _est_item_tokens(item_id: str, kind: str | None, via: str, depth: int,
     """Token estimate for a wiki_pack item AS RETURNED ON THE WIRE.
 
     render_at_depth()'s payload alone undercounts: the response wraps each
-    payload with 6 extra keys (id/kind/via/depth/depth_name/tokens) that
+    payload with 7 extra keys (ref/id/kind/via/depth/depth_name/tokens) that
     wiki_pack's demote/promote loop must also budget for, or "used_tokens"
-    undercounts the real serialized size by ~2x. Cheap enough for the hot
-    loop — one json.dumps of a single small dict per call, not the whole
-    evolving items list.
+    undercounts the real serialized size. Cheap enough for the hot loop —
+    one json.dumps of a single small dict per call, not the whole evolving
+    items list. Mirrors wiki_pack step 5's payload transform exactly (id/kind
+    stripped — already on the wrapper) EXCEPT wiki_links ref-compaction,
+    which this deliberately does not model — that only ever shrinks the
+    final payload further, so the loop stays conservative (never budgets
+    less than the true final size will need).
     """
+    payload = {k: v for k, v in payload.items() if k not in ("id", "kind")}
     wrapped = {
+        "ref": "@0",  # self-referential placeholder — fixed-width enough, negligible
         "id": item_id, "kind": kind, "via": via,
         "depth": depth, "depth_name": depth_name,
         "tokens": 0,  # self-referential placeholder — a couple of chars, negligible
@@ -1350,16 +1356,39 @@ def wiki_pack(
                     break
 
     # 5. Render the items at their final depth for the output payload.
+    # Local-ref compaction: wiki_links between two entities THAT ARE BOTH IN
+    # THIS PACK are the single biggest measured waste in the old wire format —
+    # full entity-id slugs (e.g. "concept:ascenz-marorka-lng-containment-
+    # relationships-vs-routing-depth", 71 chars) repeated verbatim every time
+    # they're referenced. Replace those with a short positional ref ("@N");
+    # links pointing outside the pack keep their full id (unresolvable to a
+    # ref, and still needed verbatim so the caller can look them up elsewhere).
+    id_to_ref = {it["id"]: f"@{i}" for i, it in enumerate(items)}
     rendered = []
     for it in items:
+        payload = dict(render_at_depth(it["source_entity"], it["depth"]))
+        # id/kind are already on the wrapper below at every depth (render_at_depth
+        # includes them at all 5 bands) — drop the duplicate from payload too.
+        payload.pop("id", None)
+        payload.pop("kind", None)
+        links = payload.get("wiki_links")
+        if links:
+            payload["wiki_links"] = [id_to_ref.get(link, link) for link in links]
         rendered.append({
+            "ref": id_to_ref[it["id"]],
             "id": it["id"], "kind": it["kind"], "via": it["via"],
             "depth": it["depth"], "depth_name": it["depth_name"],
             "tokens": it["tokens"],
-            "payload": render_at_depth(it["source_entity"], it["depth"]),
+            "payload": payload,
         })
 
     depth_counts = Counter(it["depth_name"] for it in items)
+    # used_tokens stays the per-item estimate sum (total()), same convention
+    # as before ref-compaction: _est_item_tokens is computed on the
+    # UNCOMPACTED payload (see its docstring), so it's always >= the real
+    # compacted size below — a safe conservative ceiling, not the top-level
+    # bundle's exact measured size (which would also count the fixed
+    # query/stats envelope the demote/promote loop was never targeting).
     return {
         "query": query,
         "budget": budget,
