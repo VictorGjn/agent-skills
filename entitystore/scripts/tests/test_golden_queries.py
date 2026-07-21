@@ -153,6 +153,23 @@ class TestGoldenQueriesSynthetic(unittest.TestCase):
                 self.assertLessEqual(result["used_tokens"], expect.get("max_used_tokens", budget),
                                       f"{case['id']}: used_tokens exceeded budget")
 
+                # used_tokens must be truthful — within tolerance of the
+                # actual json.dumps size of the bundle wiki_pack returns,
+                # not just the per-item payloads. Regression guard for the
+                # wrapper-overhead undercount (id/kind/via/depth/depth_name/
+                # tokens never counted against the running budget total).
+                # Tolerance is 10% OR 100 tokens, whichever is larger: the
+                # per-item accounting (used_tokens = sum of wrapped-item
+                # estimates) still omits the outer envelope (query/budget/
+                # stats keys) by design — a roughly FIXED ~70-95 token cost
+                # regardless of item count, so it's a much bigger fraction
+                # of small packs (e.g. pack-44's 2 items) than large ones.
+                real_tokens = len(json.dumps(result, ensure_ascii=False)) // 4
+                tolerance = max(100, 0.10 * real_tokens)
+                self.assertLessEqual(
+                    abs(result["used_tokens"] - real_tokens), tolerance,
+                    f"{case['id']}: used_tokens {result['used_tokens']} vs real wire size {real_tokens}")
+
                 if "item_count" in expect:
                     self.assertEqual(len(item_ids), expect["item_count"],
                                       f"{case['id']}: item count mismatch, got {item_ids}")
