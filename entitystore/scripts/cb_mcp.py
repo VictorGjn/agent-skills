@@ -140,9 +140,16 @@ def wiki_pack(
         corpus_dir: override CB_CORPUS_DIR.
 
     Returns:
-        JSON: {query, budget, used_tokens, items: [{id, kind, depth, depth_name,
-               tokens, payload, via}, ...], stats}. stats carries
-        withheld_count + effective_cap (see wiki_ask).
+        JSON: {query, budget, used_tokens, items: [{ref, id, kind, depth,
+               depth_name, tokens, payload, via}, ...], stats}. `ref` is this
+        item's positional local id ("@0", "@1", ...); inside each item's
+        payload, any wiki_links entry that points at ANOTHER item in this
+        same bundle is replaced by that item's ref (e.g. "@3") instead of
+        its full id string, to avoid repeating long entity-id slugs across
+        the bundle. Links pointing outside the bundle keep their full id.
+        used_tokens is a conservative estimate (always >= the real payload
+        size after ref-compaction) — see cb_engine._est_item_tokens.
+        stats carries withheld_count + effective_cap (see wiki_ask).
     """
     return _response(cb_engine.wiki_pack(
         query=query, corpus_dir=corpus_dir, kind=kind, topics=topics,

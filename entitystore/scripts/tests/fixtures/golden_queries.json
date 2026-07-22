@@ -326,31 +326,31 @@
       "id": "pack-38-hub-demotion-spread",
       "endpoint": "wiki_pack",
       "truth": "locked",
-      "_comment": "Re-pinned for the wiki_pack token-accounting fix: per-item cost now counts the wrapper keys (id/kind/via/depth/depth_name/tokens), not just the payload, so demote/promote lands on different depths at the same tight budget.",
+      "_comment": "Re-pinned for the wiki_pack compact-wire change: items now carry an extra 'ref' key (local id like '@0', for wiki_links compaction) but payload's own duplicate id/kind keys are dropped (already on the wrapper) at every depth, net smaller per item than before at this budget, so foil-stability-cluster reaches Full (was Detail) and org:atlas-marine settles at Headlines (was Full).",
       "query": "foil stability",
       "params": {"mode": "substring", "budget": 1200},
       "expect": {
         "item_count": 13,
         "max_used_tokens": 1200,
         "depth_exactly": {
-          "concept:foil-stability-cluster": 1,
-          "org:atlas-marine": 0,
+          "concept:foil-stability-cluster": 0,
+          "org:atlas-marine": 3,
           "concept:atlas-marine-named-partner-routing": 4,
           "concept:atlas-marine-demand-theme": 4,
           "concept:atlas-marine-stability-theme": 4
         },
-        "min_distinct_depth_names": 5
+        "min_distinct_depth_names": 3
       }
     },
     {
       "id": "pack-39-hub-extreme-budget",
       "endpoint": "wiki_pack",
       "truth": "locked",
-      "_comment": "Re-pinned for the wiki_pack token-accounting fix (see pack-38): the corrected, higher per-item cost no longer fits all 13 items even at Mention, so the tail-drop pass now trims to 6.",
+      "_comment": "Re-pinned for the wiki_pack compact-wire change (see pack-38): the net-smaller per-item cost (ref added, duplicate id/kind dropped) fits 7 items (was 6) at this tight budget, split across Headlines/Mention instead of uniformly Headlines.",
       "query": "foil stability",
       "params": {"mode": "substring", "budget": 300},
       "expect": {
-        "item_count": 6,
+        "item_count": 7,
         "max_used_tokens": 300,
         "depth_exactly": {"concept:foil-stability-cluster": 3},
         "min_distinct_depth_names": 2
@@ -360,19 +360,19 @@
       "id": "pack-40-atlas-tight-budget",
       "endpoint": "wiki_pack",
       "truth": "locked",
-      "_comment": "Updated for M12 freshness fields (last_verified_at/sources) added to entities. Re-pinned again for the wiki_pack token-accounting fix (see pack-38): all 4 items now land on the same Headlines band instead of org:atlas-marine surviving at Full.",
+      "_comment": "Updated for M12 freshness fields (last_verified_at/sources) added to entities. Re-pinned for the wiki_pack compact-wire change (see pack-38): org:atlas-marine now affords Summary (was Headlines) since dropping the duplicate id/kind from its payload freed headroom at this tight budget.",
       "query": "org:atlas-marine",
       "params": {"mode": "substring", "budget": 250},
       "expect": {
         "item_count": 4,
         "max_used_tokens": 250,
         "depth_exactly": {
-          "org:atlas-marine": 3,
+          "org:atlas-marine": 2,
           "concept:atlas-marine-named-partner-routing": 3,
           "concept:atlas-marine-demand-theme": 3,
           "concept:atlas-marine-stability-theme": 3
         },
-        "min_distinct_depth_names": 1
+        "min_distinct_depth_names": 2
       }
     },
     {
