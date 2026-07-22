@@ -453,6 +453,26 @@ def _est_tokens(obj) -> int:
     return max(1, len(json.dumps(obj, ensure_ascii=False)) // 4)
 
 
+def _est_item_tokens(item_id: str, kind: str | None, via: str, depth: int,
+                      depth_name: str, payload: dict) -> int:
+    """Token estimate for a wiki_pack item AS RETURNED ON THE WIRE.
+
+    render_at_depth()'s payload alone undercounts: the response wraps each
+    payload with 6 extra keys (id/kind/via/depth/depth_name/tokens) that
+    wiki_pack's demote/promote loop must also budget for, or "used_tokens"
+    undercounts the real serialized size by ~2x. Cheap enough for the hot
+    loop — one json.dumps of a single small dict per call, not the whole
+    evolving items list.
+    """
+    wrapped = {
+        "id": item_id, "kind": kind, "via": via,
+        "depth": depth, "depth_name": depth_name,
+        "tokens": 0,  # self-referential placeholder — a couple of chars, negligible
+        "payload": payload,
+    }
+    return _est_tokens(wrapped)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Scoring (substring) — used as keyword baseline + hybrid keyword leg
 # ──────────────────────────────────────────────────────────────────
@@ -1251,7 +1271,8 @@ def wiki_pack(
         items.append({
             "id": e["id"], "kind": e.get("kind"),
             "depth": d, "depth_name": DEPTH_NAMES[d],
-            "tokens": _est_tokens(render_at_depth(e, d)),
+            "tokens": _est_item_tokens(e["id"], e.get("kind"), "matched", d,
+                                        DEPTH_NAMES[d], render_at_depth(e, d)),
             "source_entity": e,
             "via": "matched",
         })
@@ -1265,7 +1286,8 @@ def wiki_pack(
             items.append({
                 "id": ne["id"], "kind": ne.get("kind"),
                 "depth": d, "depth_name": DEPTH_NAMES[d],
-                "tokens": _est_tokens(render_at_depth(ne, d)),
+                "tokens": _est_item_tokens(ne["id"], ne.get("kind"), "neighbor", d,
+                                            DEPTH_NAMES[d], render_at_depth(ne, d)),
                 "source_entity": ne,
                 "via": "neighbor",
             })
@@ -1298,7 +1320,9 @@ def wiki_pack(
             break  # everyone at max depth; nothing else to do without dropping
         items[idx]["depth"] += 1
         items[idx]["depth_name"] = DEPTH_NAMES[items[idx]["depth"]]
-        items[idx]["tokens"] = _est_tokens(
+        items[idx]["tokens"] = _est_item_tokens(
+            items[idx]["id"], items[idx]["kind"], items[idx]["via"],
+            items[idx]["depth"], items[idx]["depth_name"],
             render_at_depth(items[idx]["source_entity"], items[idx]["depth"]))
 
     # If still over budget (all at Mention), drop from the tail.
@@ -1312,13 +1336,15 @@ def wiki_pack(
         for it in items:
             while it["depth"] > 0:
                 trial_depth = it["depth"] - 1
-                trial_tokens = _est_tokens(
+                trial_depth_name = DEPTH_NAMES[trial_depth]
+                trial_tokens = _est_item_tokens(
+                    it["id"], it["kind"], it["via"], trial_depth, trial_depth_name,
                     render_at_depth(it["source_entity"], trial_depth))
                 delta = trial_tokens - it["tokens"]
                 if delta <= headroom:
                     headroom -= delta
                     it["depth"] = trial_depth
-                    it["depth_name"] = DEPTH_NAMES[trial_depth]
+                    it["depth_name"] = trial_depth_name
                     it["tokens"] = trial_tokens
                 else:
                     break
@@ -1783,6 +1809,21 @@ def _self_test_in_tempdir() -> int:
                   pack["used_tokens"] <= 4000)
             check("wiki_pack: has depth banding",
                   len(pack["stats"]["depth_breakdown"]) >= 1)
+
+            # 4b. used_tokens must be truthful — within tolerance of the
+            # actual json.dumps size of the bundle the MCP layer serializes
+            # over the wire, not just the per-item payloads (regression
+            # guard for the wrapper-overhead undercount, see
+            # _est_item_tokens). Tolerance is 10% OR 100 tokens, whichever
+            # is larger — used_tokens still omits the outer envelope
+            # (query/budget/stats keys), a roughly fixed ~70-95 token cost
+            # that's a bigger fraction of small packs than large ones. See
+            # the matching check in test_golden_queries.py.
+            real_size_tokens = len(json.dumps(pack, ensure_ascii=False)) // 4
+            tolerance = max(100, real_size_tokens * 0.10)
+            check("wiki_pack: used_tokens within tolerance of real wire size",
+                  abs(pack["used_tokens"] - real_size_tokens) <= tolerance,
+                  f"used_tokens={pack['used_tokens']} real={real_size_tokens}")
 
             # 5. wiki_audit — baseline (clean corpus copy)
             audit = wiki_audit()
