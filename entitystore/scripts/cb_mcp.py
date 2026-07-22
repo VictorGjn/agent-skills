@@ -147,7 +147,8 @@ def wiki_pack(
         same bundle is replaced by that item's ref (e.g. "@3") instead of
         its full id string, to avoid repeating long entity-id slugs across
         the bundle. Links pointing outside the bundle keep their full id.
-        used_tokens is the bundle's exact measured size, not an estimate.
+        used_tokens is a conservative estimate (always >= the real payload
+        size after ref-compaction) — see cb_engine._est_item_tokens.
         stats carries withheld_count + effective_cap (see wiki_ask).
     """
     return _response(cb_engine.wiki_pack(
