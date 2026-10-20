@@ -1,0 +1,7 @@
+{
+  "name": "ste100",
+  "version": "0.1.0",
+  "description": "Makes Claude answer in ASD-STE100 Simplified Technical English (Issue 8). Injects the writing rules at session start and a reminder on each prompt.",
+  "author": { "name": "Victor Grosjean" },
+  "hooks": "./hooks/hooks.json"
+}
