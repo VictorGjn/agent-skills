@@ -1,0 +1,11 @@
+{
+  "name": "victorgjn-skills",
+  "owner": { "name": "Victor Grosjean" },
+  "plugins": [
+    {
+      "name": "ste100",
+      "source": "./ste100",
+      "description": "Answer in ASD-STE100 Simplified Technical English."
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/rules.md\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'STE100 MODE: answer in English ASD-STE100 (max 20 words per instruction, 25 per description, active voice, simple tenses, no semicolons, one name per thing). Code and identifiers stay as they are.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
