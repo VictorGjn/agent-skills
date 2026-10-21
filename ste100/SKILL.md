@@ -24,3 +24,7 @@ To keep it on, add this folder to a plugin marketplace and install `ste100`. If 
 
 - The rules come from ASD-STE100 Issue 8, Part 1 (writing rules). This skill does not include the STE dictionary (about 900 approved words), which has copyright. Get the full standard from [asd-ste100.org](https://www.asd-ste100.org).
 - The hooks only add the rules to the context. Nothing checks the output.
+
+## Issue block
+
+`/ste100:issue` presents one issue or decision in 5 fields: Context, Problem, Solution, Risk, Action. See [skills/issue/SKILL.md](./skills/issue/SKILL.md).
