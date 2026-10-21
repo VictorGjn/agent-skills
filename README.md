@@ -20,7 +20,7 @@ Concise, delta-based status reports. What changed, what needs attention, what to
 Opinionated orchestrator for the [dembrandt-skills](https://github.com/dembrandt/dembrandt-skills) design collection. Routes a UI/UX task through a six-stage pipeline (brand → tokens → layout → components → UX polish → a11y/performance gate) and loads the right sub-skill at each stage. Stage 6 is a hard ship gate, not a nice-to-have.
 
 ### [ste100](./ste100/)
-Answer in ASD-STE100 Simplified Technical English (Issue 8 writing rules), from Karpathy's tip. Use it as a skill, or install the folder as a Claude Code plugin whose hooks inject the rules into every session.
+Answer in ASD-STE100 Simplified Technical English (Issue 8 writing rules), from Karpathy's tip. Use it as a skill, or install the folder as a Claude Code plugin whose hooks inject the rules into every session. `/ste100:issue` writes an issue block: Context, Problem, Solution, Risk, Action.
 
 ## How to Use
 
