@@ -1,6 +1,8 @@
 # Step 5 — EntityStore and wiki
 
 > **Compounding memory.** Events from any number of Sources accumulate. The wiki layer consolidates them into entity pages where every claim resolves to a source.
+>
+> **Note:** This is the Context-Engineering-specific EntityStore design (three-tier raw/events/wiki). Company-brain uses a separate JSON-native EntityStore — see [`entitystore/SURFACE.md`](../../../entitystore/SURFACE.md).
 
 ## What you'll do
 
